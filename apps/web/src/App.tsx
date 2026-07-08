@@ -24,6 +24,7 @@ import { realtimeClient } from './lib/realtime'
 import { useBillingStore } from './store/billingStore'
 import { useStaffStore } from './store/staffStore'
 import { isTauriDesktop } from './lib/localDb'
+import { fetchCloudSnapshot } from './lib/cloudSync'
 
 function ProtectedRoute({ children, permission }: { children: React.ReactNode; permission?: Permission }) {
   const { isAuthenticated, user } = useAuthStore()
@@ -51,6 +52,42 @@ export default function App() {
       useBillingStore.getState().importSnapshot(payload as any, true)
     })
   }, [])
+
+  useEffect(() => {
+    if (!user) return
+    const cloud = useBillingStore.getState().cloudSync
+    if (!cloud.enabled || !cloud.serverUrl || !cloud.outletId || !cloud.accountLogin || !cloud.accountSecret) return
+    if (user.tenantId === 'platform') return
+
+    const auth = { accountLogin: cloud.accountLogin, accountSecret: cloud.accountSecret }
+    let cancelled = false
+
+    const refreshCloudData = async () => {
+      try {
+        const remote = await fetchCloudSnapshot(cloud.outletId, cloud.serverUrl, auth)
+        if (cancelled) return
+        if (remote.exists) {
+          useBillingStore.getState().importSnapshot(remote.payload)
+          useBillingStore.getState().updateCloudSyncSettings({ lastSyncedAt: new Date().toISOString() })
+        }
+      } catch {
+        // Network error — keep using local data as fallback.
+      }
+    }
+
+    refreshCloudData()
+
+    realtimeClient.connect({
+      serverUrl: cloud.serverUrl,
+      outletId: cloud.outletId,
+      accountLogin: cloud.accountLogin,
+      accountSecret: cloud.accountSecret,
+    })
+
+    return () => {
+      cancelled = true
+    }
+  }, [user?.id])
 
   if (isTauriDesktop() && staffCount === 0) {
     return (

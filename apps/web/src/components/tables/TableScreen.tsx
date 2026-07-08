@@ -8,6 +8,7 @@ import { useBillingStore } from '../../store/billingStore'
 import { useUIStore } from '../../store/uiStore'
 import { useAuthStore } from '../../store/authStore'
 import { hasPermission } from '../../lib/permissions'
+import { getFloorColor } from '../../lib/floorColors'
 import type { RestaurantTable, TableStatus } from '../../lib/types'
 import { clsx } from 'clsx'
 import FloorTabs from './FloorTabs'
@@ -314,10 +315,11 @@ export default function TableScreen() {
         <div className="flex-1 min-w-max flex flex-nowrap items-center justify-start xl:justify-center gap-3 text-[9px] font-black text-slate-500 uppercase tracking-wider px-2 whitespace-nowrap">
           <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full border border-slate-300 bg-white" />Available</span>
           <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-blue-400" />Occupied</span>
-          <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-amber-400" />KOT Sent / Preparing</span>
+          <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-amber-400" />Preparing</span>
           <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-emerald-400" />Ready</span>
-          <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-purple-400" />Payment Pending</span>
+          <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-purple-400" />Bill Pending</span>
           <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-slate-400" />Dirty</span>
+          <span className="flex items-center gap-1 text-slate-400">Border = Section Color</span>
         </div>
         <div className="flex items-center gap-1.5">
           <button onClick={() => setTableCompactView(false)} className={clsx('w-9 h-9 rounded-lg border flex items-center justify-center transition-all', !compactView ? 'bg-slate-900 text-white border-slate-900' : 'bg-white text-slate-500 border-slate-200 hover:bg-slate-50')} title="Card view"><Grid2X2 size={16} /></button>
@@ -382,6 +384,8 @@ export default function TableScreen() {
         )}>
           {filteredTables.map(table => {
             const activeOrder = table.activeOrderId ? ordersById.get(table.activeOrderId) ?? null : null
+            const floorIndex = floors.findIndex(f => f.id === table.floorId)
+            const floorColorScheme = floorIndex >= 0 ? getFloorColor(floorIndex) : null
             return (
               <TableCard
                 key={table.id}
@@ -389,6 +393,9 @@ export default function TableScreen() {
                 activeOrder={activeOrder}
                 compact={compactView}
                 canManage={canEditTables}
+                floorColor={floorColorScheme?.border}
+                floorBadge={floorColorScheme?.badge}
+                floorName={floors.find(f => f.id === table.floorId)?.name}
                 onEdit={() => setEditingTable(table)}
                 onTransfer={canTransfer && table.activeOrderId ? () => openTransfer(table) : undefined}
                 onMerge={canMerge && table.activeOrderId ? () => openMerge(table) : undefined}

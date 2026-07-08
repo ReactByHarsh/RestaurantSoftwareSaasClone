@@ -16,10 +16,17 @@ apps/web/src-tauri/icons
 .env
 .env.local
 .env.*.local
+**/.dev.vars
 
 # Cloudflare Workers
 .wrangler
 worker-configuration.d.ts
+apps/worker/out_*.json
+
+# Sensitive / debug files
+cookiejar.txt
+headers.txt
+response.json
 
 # Logs
 logs

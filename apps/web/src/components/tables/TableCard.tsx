@@ -13,8 +13,10 @@ interface Props {
   activeOrder: Order | null
   compact?: boolean
   canManage?: boolean
+  floorColor?: string
+  floorBadge?: string
+  floorName?: string
   onEdit?: () => void
-  // Table operations
   onTransfer?: () => void
   onMerge?: () => void
   onShare?: () => void
@@ -43,7 +45,7 @@ function formatElapsed(ms: number) {
   return `${minutes}m ${String(seconds).padStart(2, '0')}s`
 }
 
-export default function TableCard({ table, activeOrder, compact = false, canManage = false, onEdit, onTransfer, onMerge, onShare, onRemove, onClick }: Props) {
+export default function TableCard({ table, activeOrder, compact = false, canManage = false, floorColor, floorBadge, floorName, onEdit, onTransfer, onMerge, onShare, onRemove, onClick }: Props) {
   const navigate = useNavigate()
   const { selectTable, updateTableStatus } = useBillingStore()
   const config = STATUS_CONFIG[table.status] || STATUS_CONFIG.available
@@ -150,10 +152,10 @@ export default function TableCard({ table, activeOrder, compact = false, canMana
       role="button"
       tabIndex={0}
       className={clsx(
-        'group relative flex flex-col border text-left transition-all hover:-translate-y-0.5 hover:shadow-lg cursor-pointer',
+        'group relative flex flex-col border-2 text-left transition-all hover:-translate-y-0.5 hover:shadow-lg cursor-pointer',
         showPopover ? 'z-50' : 'z-0 hover:z-40',
         compact ? 'rounded-md min-h-[68px]' : 'rounded-xl min-h-[124px]',
-        config.bg, config.border
+        floorColor || config.border, config.bg
       )}
     >
       {/* Clickable Header Section */}
@@ -224,6 +226,11 @@ export default function TableCard({ table, activeOrder, compact = false, canMana
       {/* Card Body */}
       <div className={clsx('flex-1 flex flex-col', compact ? 'px-1.5 py-1' : 'p-2.5 pt-1.5')}>
         <div className={clsx('flex flex-wrap z-0 mb-auto', compact ? 'gap-1' : 'gap-1.5')}>
+          {floorName && floorBadge && (
+            <span className={clsx('inline-flex items-center rounded border font-black uppercase', compact ? 'px-1 py-0 text-[7px]' : 'px-1.5 py-0.5 text-[9px] tracking-wider', floorBadge)}>
+              {floorName}
+            </span>
+          )}
           <span className={clsx('inline-flex items-center rounded border font-black uppercase', compact ? 'px-1 py-0 text-[7px]' : 'px-1.5 py-0.5 text-[9px] tracking-wider', config.pill)}>
             {table.status.replace(/_/g, ' ')}
           </span>

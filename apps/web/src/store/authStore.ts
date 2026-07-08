@@ -21,6 +21,12 @@ interface AuthStore {
   logout: () => void
 }
 
+export const LOCAL_TENANT_ID = 'local_restaurant'
+
+function isCloudAccount(account: StaffAccount) {
+  return account.tenantId && account.tenantId !== LOCAL_TENANT_ID && account.tenantId !== 'platform'
+}
+
 export const useAuthStore = create<AuthStore>()(
   persist(
     (set) => ({
@@ -34,7 +40,7 @@ export const useAuthStore = create<AuthStore>()(
       login: async (emailOrPhone, password) => {
         const account = useStaffStore.getState().findByLogin(emailOrPhone)
 
-        if (!account) {
+        if (!account || isCloudAccount(account)) {
           const billing = useBillingStore.getState()
           const serverUrl = billing.cloudSync.serverUrl || 'https://bhojpatra-cloud.yash-v-shinde.workers.dev'
           try {
@@ -78,6 +84,17 @@ export const useAuthStore = create<AuthStore>()(
             })
             return { success: true }
           } catch (error) {
+            if (account && isCloudAccount(account)) {
+              const validPasswords = [account.password, account.pin ?? '']
+              if (validPasswords.includes(password) && account.status === 'active') {
+                set({
+                  user: { ...toPublicUser(account), lastLoginAt: new Date().toISOString() },
+                  outlet: useBillingStore.getState().outlet,
+                  isAuthenticated: true,
+                })
+                return { success: true }
+              }
+            }
             return { success: false, error: error instanceof Error ? error.message : 'Staff account not found' }
           }
         }
