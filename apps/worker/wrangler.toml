@@ -1,0 +1,30 @@
+name = "bhojpatra-cloud"
+main = "src/index.ts"
+compatibility_date = "2026-06-18"
+compatibility_flags = ["nodejs_compat"]
+assets = { directory = "./public" }
+
+[observability]
+enabled = true
+head_sampling_rate = 1
+
+[[d1_databases]]
+binding = "DB"
+database_name = "bhojpatra-db"
+database_id = "c1c312e6-8911-47f1-b886-988ac6e73222"
+migrations_dir = "../../packages/db/migrations"
+
+[[kv_namespaces]]
+binding = "CACHE"
+id = "6ec7242be31a4c6a94baee32e429513b"
+
+[[durable_objects.bindings]]
+name = "REALTIME_HUB"
+class_name = "RealtimeHub"
+
+[[migrations]]
+tag = "v1-realtime-hub"
+new_sqlite_classes = ["RealtimeHub"]
+
+[triggers]
+crons = ["0 4 * * *"]

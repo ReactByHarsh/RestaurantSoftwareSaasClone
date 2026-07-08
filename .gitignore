@@ -1,0 +1,62 @@
+# Dependencies
+node_modules
+
+# Build output
+dist
+dist-ssr
+
+# Tauri / Rust
+apps/web/src-tauri/target
+apps/web/src-tauri/gen
+apps/web/src-tauri/icons
+
+# Cargo lock (for libraries/apps, keep Cargo.lock; but target is already ignored)
+
+# Environment files
+.env
+.env.local
+.env.*.local
+
+# Cloudflare Workers
+.wrangler
+worker-configuration.d.ts
+
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+# Editor directories and files
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# OS generated files
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# TypeScript
+*.tsbuildinfo
+
+# Vite
+vite.config.ts.timestamp-*
+
+# Temp
+tmp
+
+# Release binaries
+release/*.exe
+release/**/*.exe
+release/**/*.exe.sig
+release/*.apk
+release/**/*.apk

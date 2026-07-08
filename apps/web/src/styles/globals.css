@@ -1,0 +1,427 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ─── Design Tokens ─────────────────────────────────── */
+:root {
+  --bg: #F8FAFC;
+  --surface: #FFFFFF;
+  --surface-muted: #F1F5F9;
+  --primary: #EA580C;
+  --primary-dark: #C2410C;
+  --primary-light: #FB923C;
+  --accent: #166534;
+  --accent-dark: #14532D;
+  --danger: #DC2626;
+  --success: #16A34A;
+  --warning: #D97706;
+  --text: #0F172A;
+  --text-muted: #64748B;
+  --border: #E2E8F0;
+  --sidebar-slim: 56px;
+  --topbar-h: 48px;
+}
+
+/* ─── Base ──────────────────────────────────────────── */
+* { box-sizing: border-box; }
+
+html, body, #root {
+  height: 100%;
+  margin: 0;
+  padding: 0;
+  overflow: hidden;
+}
+
+body {
+  font-family: 'Inter', ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  line-height: 1.5;
+}
+
+/* ─── Scrollbars ─────────────────────────────────────── */
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: #CBD5E1; border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: #94A3B8; }
+
+/* ─── Touch targets ──────────────────────────────────── */
+button, a, [role="button"] { min-height: 32px; }
+
+/* ─── Status colors ──────────────────────────────────── */
+.status-available   { --s-bg: #F0FDF4; --s-text: #16A34A; --s-border: #BBF7D0; }
+.status-occupied    { --s-bg: #EFF6FF; --s-text: #2563EB; --s-border: #BFDBFE; }
+.status-kot-sent    { --s-bg: #FFFBEB; --s-text: #D97706; --s-border: #FDE68A; }
+.status-preparing   { --s-bg: #FFF7ED; --s-text: #EA580C; --s-border: #FED7AA; }
+.status-ready       { --s-bg: #ECFDF5; --s-text: #059669; --s-border: #A7F3D0; }
+.status-bill-req    { --s-bg: #F5F3FF; --s-text: #7C3AED; --s-border: #DDD6FE; }
+.status-payment     { --s-bg: #FEF2F2; --s-text: #DC2626; --s-border: #FECACA; }
+.status-reserved    { --s-bg: #ECFEFF; --s-text: #0891B2; --s-border: #A5F3FC; }
+.status-dirty       { --s-bg: #F8FAFC; --s-text: #64748B; --s-border: #CBD5E1; }
+
+/* ─── KOT Age colors ─────────────────────────────────── */
+.age-fresh   { border-left: 4px solid #16A34A; }
+.age-medium  { border-left: 4px solid #D97706; }
+.age-old     { border-left: 4px solid #DC2626; }
+.age-fresh .kot-timer   { color: #16A34A; }
+.age-medium .kot-timer  { color: #D97706; }
+.age-old .kot-timer     { color: #DC2626; }
+
+/* ─── Veg / Non-veg dots ─────────────────────────────── */
+.veg-dot    { width: 10px; height: 10px; border-radius: 50%; background: #16A34A; border: 1.5px solid #15803D; flex-shrink: 0; }
+.nonveg-dot { width: 10px; height: 10px; border-radius: 50%; background: #DC2626; border: 1.5px solid #B91C1C; flex-shrink: 0; }
+.egg-dot    { width: 10px; height: 10px; border-radius: 50%; background: #D97706; border: 1.5px solid #B45309; flex-shrink: 0; }
+
+/* ─── Print styles ───────────────────────────────────── */
+@media print {
+  .no-print { display: none !important; }
+  body { background: white; }
+}
+
+.thermal-page {
+  --thermal-font-base: 10px;
+  --thermal-font-adjust: 0px;
+  --thermal-heading-base: 13px;
+  --thermal-heading-adjust: 0px;
+  --thermal-total-base: 12px;
+  --thermal-total-adjust: 0px;
+  --thermal-line-height: 1.18;
+  --thermal-qty-col: 20px;
+  --thermal-rate-col: 42px;
+  --thermal-amount-col: 50px;
+  --thermal-logo-column: 34px;
+  --thermal-logo-size: 28px;
+  --thermal-upi-size: 112px;
+  min-height: 100%;
+  background: #f8fafc;
+  padding: 16px;
+  color: #0f172a;
+}
+
+.thermal-page[data-receipt-width='58mm'] {
+  --thermal-font-base: 8.75px;
+  --thermal-heading-base: 11.5px;
+  --thermal-total-base: 10.75px;
+  --thermal-line-height: 1.14;
+  --thermal-qty-col: 16px;
+  --thermal-rate-col: 34px;
+  --thermal-amount-col: 40px;
+  --thermal-logo-column: 28px;
+  --thermal-logo-size: 22px;
+  --thermal-upi-size: 90px;
+}
+
+.thermal-page[data-receipt-width='72mm'] {
+  --thermal-font-base: 9.5px;
+  --thermal-heading-base: 12.5px;
+  --thermal-total-base: 11.5px;
+  --thermal-line-height: 1.16;
+  --thermal-qty-col: 18px;
+  --thermal-rate-col: 38px;
+  --thermal-amount-col: 46px;
+  --thermal-logo-column: 30px;
+  --thermal-logo-size: 24px;
+  --thermal-upi-size: 100px;
+}
+
+.thermal-page[data-heading-size='compact'] {
+  --thermal-heading-adjust: -1px;
+}
+
+.thermal-page[data-heading-size='large'] {
+  --thermal-heading-adjust: 2px;
+}
+
+.thermal-page[data-font-size='compact'] {
+  --thermal-font-adjust: -0.5px;
+  --thermal-total-adjust: -0.5px;
+}
+
+.thermal-page[data-font-size='large'] {
+  --thermal-font-adjust: 0.75px;
+  --thermal-total-adjust: 0.75px;
+}
+
+.thermal-slip {
+  width: var(--receipt-width, 80mm);
+  max-width: 100%;
+  margin: 0 auto 12px;
+  background: white;
+  padding: 6px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  font-size: calc(var(--thermal-font-base) + var(--thermal-font-adjust));
+  line-height: var(--thermal-line-height);
+  box-shadow: 0 8px 24px rgba(15, 23, 42, 0.12);
+  page-break-after: always;
+  break-after: page;
+}
+
+.thermal-slip:last-child {
+  page-break-after: auto;
+  break-after: auto;
+}
+
+.thermal-slip h1 {
+  font-size: calc(var(--thermal-heading-base) + var(--thermal-heading-adjust));
+  margin: 0 0 2px;
+  text-transform: uppercase;
+}
+
+.thermal-slip h2 {
+  font-size: 18px;
+  margin: 4px 0 0;
+}
+
+.thermal-slip p {
+  margin: 1px 0;
+}
+
+.thermal-section-title {
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.thermal-center {
+  text-align: center;
+}
+
+.thermal-header {
+  text-align: center;
+}
+
+.thermal-header-with-logo {
+  display: grid;
+  grid-template-columns: var(--thermal-logo-column) minmax(0, 1fr);
+  align-items: start;
+  gap: 6px;
+  text-align: left;
+}
+
+.thermal-logo-box {
+  display: flex;
+  align-items: flex-start;
+  justify-content: flex-start;
+  min-width: 0;
+}
+
+.thermal-logo-box img {
+  display: block;
+  width: var(--thermal-logo-size);
+  max-width: var(--thermal-logo-size);
+  max-height: var(--thermal-logo-size);
+  object-fit: contain;
+  margin: 0;
+}
+
+.thermal-header-details {
+  min-width: 0;
+  text-align: center;
+}
+
+.thermal-header-with-logo .thermal-header-details {
+  text-align: right;
+}
+
+.thermal-upi img {
+  width: var(--thermal-upi-size);
+  height: var(--thermal-upi-size);
+  display: block;
+  margin: 4px auto;
+  image-rendering: pixelated;
+}
+
+.thermal-rule {
+  border-top: 1px dashed #0f172a;
+  margin: 5px 0;
+}
+
+.thermal-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 4px;
+  margin: 1px 0;
+}
+
+.thermal-row span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.thermal-row strong {
+  flex-shrink: 0;
+  text-align: right;
+}
+
+.thermal-total {
+  font-size: calc(var(--thermal-total-base) + var(--thermal-total-adjust));
+  margin-top: 4px;
+}
+
+.thermal-table {
+  width: 100%;
+  border-collapse: collapse;
+  table-layout: fixed;
+}
+
+.thermal-table th {
+  text-align: left;
+  border-bottom: 1px dashed #0f172a;
+  padding-bottom: 2px;
+}
+
+.thermal-table td {
+  padding: 2px 1px 2px 0;
+  vertical-align: top;
+  overflow-wrap: anywhere;
+}
+
+.thermal-table th:nth-child(2),
+.thermal-table td:nth-child(2) {
+  text-align: center;
+  width: var(--thermal-qty-col);
+}
+
+.thermal-table th:last-child,
+.thermal-table td:last-child {
+  text-align: right;
+  width: var(--thermal-amount-col);
+}
+
+.thermal-table-wide th:nth-child(3),
+.thermal-table-wide td:nth-child(3) {
+  text-align: right;
+  width: var(--thermal-rate-col);
+}
+
+.kot-item {
+  font-size: 14px;
+  padding: 6px 0;
+  border-bottom: 1px dashed #cbd5e1;
+}
+
+.kot-note {
+  font-size: 11px;
+  margin-top: 2px;
+}
+
+.print-button {
+  display: block;
+  margin: 0 auto 12px;
+  padding: 8px 12px;
+  border-radius: 8px;
+  background: #2563eb;
+  color: white;
+  font-weight: 700;
+}
+
+@page {
+  size: var(--receipt-width, 80mm) auto;
+  margin: 0;
+}
+
+@media print {
+  html, body, #root {
+    width: 100%;
+    min-height: auto;
+    background: white;
+    overflow: visible;
+  }
+
+  .thermal-page {
+    padding: 0;
+    background: white;
+  }
+
+  .thermal-slip {
+    width: var(--receipt-width, 80mm);
+    max-width: var(--receipt-width, 80mm);
+    box-shadow: none;
+    margin: 0;
+    padding: 1mm 1.5mm 1mm 1mm;
+    font-size: calc(var(--thermal-font-base) + var(--thermal-font-adjust));
+    line-height: var(--thermal-line-height);
+  }
+
+  .thermal-slip h1 { font-size: calc(var(--thermal-heading-base) + var(--thermal-heading-adjust)); }
+  .thermal-header-with-logo { grid-template-columns: max(7mm, var(--thermal-logo-column)) minmax(0, 1fr); gap: 1.5mm; }
+  .thermal-logo-box img { width: max(6mm, var(--thermal-logo-size)); max-width: max(6mm, var(--thermal-logo-size)); max-height: max(6mm, var(--thermal-logo-size)); }
+  .thermal-total { font-size: calc(var(--thermal-total-base) + var(--thermal-total-adjust)); }
+  .thermal-rule { margin: 3px 0; }
+  .thermal-table td { padding: 1px 1px 1px 0; }
+  .thermal-upi img { width: var(--thermal-upi-size); height: var(--thermal-upi-size); }
+}
+
+/* ─── Transitions ────────────────────────────────────── */
+.transition-default { transition: all 0.15s ease; }
+.sidebar-transition { transition: width 0.2s ease; }
+
+/* ─── Sidebar ────────────────────────────────────────── */
+/* On md+ screens the sidebar is always visible as a slim 56px column.
+   The main-content has md:pl-14 applied in AppShell. */
+.main-content {
+  overflow-x: hidden;
+}
+
+/* Scrollbar hide utility */
+.scrollbar-hide {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+.scrollbar-hide::-webkit-scrollbar { display: none; }
+
+/* ─── Sidebar slide animation ────────────────────────── */
+@keyframes slideInLeft {
+  from { transform: translateX(-100%); opacity: 0; }
+  to   { transform: translateX(0);    opacity: 1; }
+}
+.sidebar-enter { animation: slideInLeft 0.25s ease-out; }
+
+/* ─── KDS fullscreen ─────────────────────────────────── */
+.kds-fullscreen {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  background: #0F172A;
+}
+
+/* ─── Animated pulse for new KOT ────────────────────── */
+@keyframes kotPulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(245, 158, 11, 0.4); }
+  50% { box-shadow: 0 0 0 8px rgba(245, 158, 11, 0); }
+}
+.kot-new-pulse { animation: kotPulse 2s ease-in-out 3; }
+
+/* ─── Radial table menu ──────────────────────────────── */
+@keyframes radialPop {
+  0%   { opacity: 0; transform: translate(-50%, -50%) scale(0.2); }
+  70%  { transform: translate(-50%, -50%) scale(1.12); }
+  100% { opacity: 1; transform: translate(-50%, -50%) scale(1); }
+}
+@keyframes radialFadeIn {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+@keyframes radialCardPop {
+  0%   { opacity: 0; transform: translate(-50%, -50%) scale(0.5); }
+  70%  { transform: translate(-50%, -50%) scale(1.05); }
+  100% { opacity: 1; transform: translate(-50%, -50%) scale(1); }
+}
+.radial-btn {
+  animation: radialPop 0.35s cubic-bezier(0.34, 1.56, 0.64, 1) both;
+}
+.radial-card {
+  animation: radialCardPop 0.3s cubic-bezier(0.34, 1.56, 0.64, 1) both;
+}
+.radial-overlay {
+  animation: radialFadeIn 0.2s ease both;
+}
+
+@keyframes menuPop {
+  0%   { opacity: 0; transform: scale(0.92); }
+  100% { opacity: 1; transform: scale(1); }
+}
+.menu-pop {
+  animation: menuPop 0.22s cubic-bezier(0.34, 1.56, 0.64, 1) both;
+}

@@ -1,0 +1,179 @@
+import { create } from 'zustand'
+import { persist } from 'zustand/middleware'
+import type { User, Outlet } from '../lib/types'
+import { fetchCloudSnapshot, runCloudLogin } from '../lib/cloudSync'
+import { isTauriDesktop } from '../lib/localDb'
+import { useBillingStore } from './billingStore'
+import { toPublicUser, useStaffStore, type StaffAccount } from './staffStore'
+
+interface AuthStore {
+  user: User | null
+  outlet: Outlet | null
+  isAuthenticated: boolean
+  bypassStaffLogin: boolean
+  showStaffLoginOnDesktop: boolean
+  firstRunComplete: boolean
+  login: (emailOrPhone: string, password: string) => Promise<{ success: boolean; error?: string }>
+  autoLoginIfEnabled: () => boolean
+  completeFirstRun: (account: StaffAccount) => void
+  setBypassStaffLogin: (enabled: boolean) => void
+  setShowStaffLoginOnDesktop: (enabled: boolean) => void
+  logout: () => void
+}
+
+export const useAuthStore = create<AuthStore>()(
+  persist(
+    (set) => ({
+      user: null,
+      outlet: null,
+      isAuthenticated: false,
+      bypassStaffLogin: false,
+      showStaffLoginOnDesktop: false,
+      firstRunComplete: false,
+
+      login: async (emailOrPhone, password) => {
+        const account = useStaffStore.getState().findByLogin(emailOrPhone)
+
+        if (!account) {
+          const billing = useBillingStore.getState()
+          const serverUrl = billing.cloudSync.serverUrl || 'https://bhojpatra-cloud.yash-v-shinde.workers.dev'
+          try {
+            const session = await runCloudLogin(serverUrl, emailOrPhone, password)
+            if (session.user.tenantId === 'platform' || session.user.id === 'usr_super_admin') {
+              return { success: false, error: 'This is a platform administrator account. Use the Cloud Admin panel to manage customers.' }
+            }
+            const outlet = session.outlets[0]
+            if (!outlet) return { success: false, error: 'No outlet is assigned to this login' }
+
+            const cloudAuth = { accountLogin: emailOrPhone, accountSecret: password }
+            const remote = await fetchCloudSnapshot(outlet.id, serverUrl, cloudAuth)
+            if (remote.exists) {
+              useBillingStore.getState().importSnapshot(remote.payload)
+            } else {
+              useBillingStore.getState().reset()
+              useBillingStore.getState().updateOutlet(outlet)
+            }
+
+            useBillingStore.getState().updateCloudSyncSettings({
+              enabled: true,
+              serverUrl,
+              tenantId: session.user.tenantId,
+              outletId: outlet.id,
+              accountLogin: emailOrPhone,
+              accountSecret: password,
+              lastSyncedAt: new Date().toISOString(),
+            })
+
+            const cloudAccount: StaffAccount = {
+              ...session.user,
+              password,
+              pin: session.user.pin || password,
+              restaurantName: session.user.restaurantName || outlet.name,
+            }
+            useStaffStore.getState().replaceStaff([cloudAccount, ...useStaffStore.getState().staff])
+            set({
+              user: { ...session.user, lastLoginAt: new Date().toISOString() },
+              outlet,
+              isAuthenticated: true,
+            })
+            return { success: true }
+          } catch (error) {
+            return { success: false, error: error instanceof Error ? error.message : 'Staff account not found' }
+          }
+        }
+        if (account.status === 'inactive') return { success: false, error: 'This staff login is deactivated' }
+        if (account.status === 'halted') return { success: false, error: 'This staff login is halted by admin' }
+
+        const now = Date.now()
+        if (account.accessStartsAt && new Date(account.accessStartsAt).getTime() > now) {
+          return { success: false, error: 'This staff login is not active yet' }
+        }
+        if (account.accessEndsAt && new Date(account.accessEndsAt).getTime() < now) {
+          return { success: false, error: 'This staff login duration has expired' }
+        }
+
+        const validPasswords = [account.password, account.pin ?? '']
+        if (!validPasswords.includes(password)) {
+          return { success: false, error: 'Invalid credentials' }
+        }
+
+        set({
+          user: { ...toPublicUser(account), lastLoginAt: new Date().toISOString() },
+          outlet: useBillingStore.getState().outlet,
+          isAuthenticated: true,
+        })
+
+        return { success: true }
+      },
+
+      autoLoginIfEnabled: () => {
+        const state = useAuthStore.getState()
+        const shouldBypass = isTauriDesktop() ? !state.showStaffLoginOnDesktop : state.bypassStaffLogin
+        if (!shouldBypass || state.isAuthenticated) return false
+        const staff = useStaffStore.getState().staff
+        const account = staff.find(candidate => candidate.status === 'active' && candidate.role === 'owner') ||
+          staff.find(candidate => candidate.status === 'active' && candidate.role === 'admin') ||
+          staff.find(candidate => candidate.status === 'active')
+        if (!account) return false
+
+        set({
+          user: { ...toPublicUser(account), lastLoginAt: new Date().toISOString() },
+          outlet: useBillingStore.getState().outlet,
+          isAuthenticated: true,
+        })
+        return true
+      },
+
+      completeFirstRun: (account) => {
+        set({
+          user: { ...toPublicUser(account), lastLoginAt: new Date().toISOString() },
+          outlet: useBillingStore.getState().outlet,
+          isAuthenticated: true,
+          firstRunComplete: true,
+          showStaffLoginOnDesktop: false,
+          bypassStaffLogin: true,
+        })
+      },
+
+      setBypassStaffLogin: (enabled) => {
+        set({ bypassStaffLogin: enabled })
+        if (enabled) useAuthStore.getState().autoLoginIfEnabled()
+      },
+
+      setShowStaffLoginOnDesktop: (enabled) => {
+        set({ showStaffLoginOnDesktop: enabled, bypassStaffLogin: !enabled })
+        if (!enabled) useAuthStore.getState().autoLoginIfEnabled()
+      },
+
+      logout: () => {
+        set({ user: null, outlet: null, isAuthenticated: false })
+      },
+    }),
+    {
+      name: 'bhojpatra-auth-v2',
+      version: 4,
+      partialize: (state) => ({
+        user: state.user,
+        outlet: state.outlet,
+        isAuthenticated: state.isAuthenticated,
+        bypassStaffLogin: state.bypassStaffLogin,
+        showStaffLoginOnDesktop: state.showStaffLoginOnDesktop,
+        firstRunComplete: state.firstRunComplete,
+      }),
+      migrate: (persisted) => {
+        const state = persisted as Partial<AuthStore>
+        if (state.user?.tenantId === 'platform' || state.user?.id === 'usr_super_admin') {
+          return { user: null, outlet: null, isAuthenticated: false, bypassStaffLogin: false, showStaffLoginOnDesktop: false, firstRunComplete: false }
+        }
+        return {
+          user: state.user ?? null,
+          outlet: state.outlet ?? null,
+          isAuthenticated: state.isAuthenticated ?? false,
+          bypassStaffLogin: state.bypassStaffLogin ?? false,
+          showStaffLoginOnDesktop: state.showStaffLoginOnDesktop ?? false,
+          firstRunComplete: state.firstRunComplete ?? Boolean(state.user),
+        }
+      },
+    }
+  )
+)

@@ -1,0 +1,27 @@
+{
+  "name": "bhojpatra-cloud",
+  "private": true,
+  "version": "1.0.3",
+  "description": "BhojPatra Cloud - Restaurant Management SaaS",
+  "scripts": {
+    "dev": "node scripts/dev-tauri.mjs",
+    "web:dev": "corepack pnpm --filter web dev:open",
+    "build": "corepack pnpm --filter web build",
+    "deploy:web": "corepack pnpm --filter worker exec wrangler pages deploy ../web/dist --project-name bhojpatra-web --branch main --commit-dirty=true",
+    "preview": "corepack pnpm --filter web preview",
+    "desktop:dev": "node scripts/dev-tauri.mjs",
+    "desktop:build": "corepack pnpm --filter web tauri:build",
+    "dev:worker": "corepack pnpm --filter worker dev",
+    "db:migrate:local": "corepack pnpm --filter worker exec wrangler d1 migrations apply bhojpatra-db --local",
+    "db:migrate:prod": "corepack pnpm --filter worker exec wrangler d1 migrations apply bhojpatra-db --remote",
+    "deploy:worker": "corepack pnpm --filter worker run deploy",
+    "typecheck": "corepack pnpm -r typecheck",
+    "print-bridge": "node tools/print-bridge.mjs"
+  },
+  "devDependencies": {
+    "typescript": "^5.4.5"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

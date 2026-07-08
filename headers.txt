@@ -1,0 +1,14 @@
+HTTP/1.1 200 OK
+Date: Wed, 08 Jul 2026 09:05:03 GMT
+Content-Type: application/json
+Content-Length: 398
+Connection: keep-alive
+Set-Cookie: rf_session=dXNyX3N1cGVyX2FkbWluOjE3ODM1MDE1MDM1Njk6MWNiYTBiNjctN2JhZS00YzAwLWFjYWMtZjBmOWE5ZDc0ZTM1.3745f7e356696df2e8627352ee1acf4e2799ddd7a6ae8920329296c0ab53cca7; Max-Age=43200; Path=/; HttpOnly; Secure; SameSite=None
+Vary: Origin
+Access-Control-Allow-Credentials: true
+Report-To: {"group":"cf-nel","max_age":604800,"endpoints":[{"url":"https://a.nel.cloudflare.com/report/v4?s=IIVTELy8VrGNFZ54J3DA6P0DiBtHW6stsz%2FeoMW6bJqYexka6Y29uKEyWw5CKSZZ0w%2FQtZp78s2WuzwsUVJmqapue1aW2xhSQL0hKp%2FfVvs5jOQ52lOaY8MaHY8zyA8nIFiKyWKIOjh8aDhdt1JSnz0yIzSsA7yCSfaF8bbRUgiO52OFPYbZ0g%3D%3D"}]}
+Nel: {"report_to":"cf-nel","success_fraction":0.0,"max_age":604800}
+Server: cloudflare
+CF-RAY: a17decc8ff6b5941-SIN
+alt-svc: h3=":443"; ma=86400
+

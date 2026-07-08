@@ -1,0 +1,5 @@
+{
+  "main": "tools/print-bridge-sea.cjs",
+  "output": "release/print-bridge.blob",
+  "disableExperimentalSEAWarning": true
+}

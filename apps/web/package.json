@@ -1,0 +1,47 @@
+{
+  "name": "web",
+  "private": true,
+  "version": "0.0.4",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "dev:open": "vite --open /app/tables",
+    "build": "tsc && vite build",
+    "preview": "vite preview",
+    "deploy:pages": "corepack pnpm --filter worker exec wrangler pages deploy ../web/dist --project-name bhojpatra-web --branch main --commit-dirty=true",
+    "typecheck": "tsc --noEmit",
+    "tauri:dev": "cargo tauri dev",
+    "tauri:build": "powershell -ExecutionPolicy Bypass -File ./scripts/Invoke-TauriSignedBuild.ps1",
+    "tauri:build:win7": "powershell -ExecutionPolicy Bypass -File ./scripts/Invoke-TauriSignedBuild.ps1 -Config src-tauri/tauri.windows7.conf.json",
+    "tauri:build:x86": "powershell -ExecutionPolicy Bypass -File ./scripts/Invoke-TauriSignedBuild.ps1 -Target i686-pc-windows-msvc",
+    "tauri:build:win7:x86": "powershell -ExecutionPolicy Bypass -File ./scripts/Invoke-TauriSignedBuild.ps1 -Target i686-pc-windows-msvc -Config src-tauri/tauri.windows7.conf.json",
+    "tauri:android:init": "cargo tauri android init",
+    "tauri:android:dev": "cargo tauri android dev",
+    "tauri:android:build": "cargo tauri android build --apk --target aarch64"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "^2.0.0",
+    "@tauri-apps/plugin-process": "^2.3.1",
+    "@tauri-apps/plugin-updater": "^2.10.1",
+    "clsx": "^2.1.1",
+    "lucide-react": "^0.395.0",
+    "qrcode": "^1.5.4",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "react-router-dom": "^6.23.1",
+    "recharts": "^2.12.7",
+    "zustand": "^4.5.2"
+  },
+  "devDependencies": {
+    "@types/qrcode": "^1.5.6",
+    "@types/react": "^18.3.3",
+    "@types/react-dom": "^18.3.0",
+    "@vitejs/plugin-react": "^4.3.1",
+    "autoprefixer": "^10.4.19",
+    "postcss": "^8.4.38",
+    "tailwindcss": "^3.4.4",
+    "typescript": "^5.4.5",
+    "vite": "^5.3.1",
+    "vite-plugin-pwa": "^0.20.1"
+  }
+}
