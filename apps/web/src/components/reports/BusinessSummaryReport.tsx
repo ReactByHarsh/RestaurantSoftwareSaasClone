@@ -14,7 +14,7 @@ export default function BusinessSummaryReport({ fromDate, toDate }: Props) {
     // 1. Filter orders by date range
     // The dates are in YYYY-MM-DD. order.businessDate is also YYYY-MM-DD.
     const filteredOrders = orders.filter(
-      o => o.businessDate >= fromDate && o.businessDate <= toDate && o.paymentStatus === 'paid' && o.status !== 'cancelled'
+      o => o.businessDate >= fromDate && o.businessDate <= toDate && o.paymentStatus === 'paid' && !['cancelled', 'void'].includes(o.status) && o.totalPaise > 0
     )
     const orderIds = new Set(filteredOrders.map(o => o.id))
 
@@ -127,7 +127,7 @@ export default function BusinessSummaryReport({ fromDate, toDate }: Props) {
     const itemsReturned = 0
     const amtReturned = 0
     const duplicatePrints = 0
-    const allOrdersInRange = orders.filter(o => o.businessDate >= fromDate && o.businessDate <= toDate && o.status !== 'cancelled')
+    const allOrdersInRange = orders.filter(o => o.businessDate >= fromDate && o.businessDate <= toDate && !['cancelled', 'void'].includes(o.status) && o.totalPaise > 0)
     const duePayments = allOrdersInRange.filter(o => o.paymentStatus !== 'paid').reduce((sum, o) => sum + o.totalPaise, 0)
 
     // Customer summary

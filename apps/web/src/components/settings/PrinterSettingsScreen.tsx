@@ -593,6 +593,7 @@ export default function PrinterSettingsScreen() {
                   ['showGstinOnFirstBill', 'GSTIN on first bill'],
                   ['showGstinOnSecondBill', 'GSTIN on second bill'],
                   ['showKotToken', 'Show KOT token number'],
+                  ['showBillPartLabel', 'Show bill part label'],
                   ['directKotPrint', 'Direct KOT print'],
                   ['directReceiptPrint', 'Direct bill print'],
                   ['directProformaPrint', 'Direct proforma print'],
@@ -637,8 +638,32 @@ export default function PrinterSettingsScreen() {
                 <ReceiptText size={18} className="text-primary" strokeWidth={2.5} />
                 <h2 className="text-sm font-black text-slate-800 tracking-tight">KOT Preview</h2>
               </div>
-              <div className="p-4 bg-slate-50">
-                <pre className="rounded-2xl border border-slate-200 bg-white p-4 text-[11px] leading-5 text-slate-800 whitespace-pre-wrap overflow-auto">{previewKotText}</pre>
+              <div className="thermal-page !min-h-0 !bg-slate-100" style={{ ['--receipt-width' as string]: draftSettings.receiptWidth }} data-receipt-width={draftSettings.receiptWidth} data-heading-size={draftSettings.headingSize} data-font-size={draftSettings.fontSize}>
+                <section className="thermal-slip kot-slip !mb-0">
+                  <div className="thermal-center">
+                    <h1>KITCHEN ORDER TICKET</h1>
+                    <p>{outlet.name}</p>
+                    {draftSettings.showKotToken && <div className="kot-token">{previewKot.kotNo}</div>}
+                  </div>
+                  <div className="thermal-rule" />
+                  <div className="thermal-row"><span>Order</span><strong>{previewKot.orderNo}</strong></div>
+                  <div className="thermal-row"><span>Type</span><strong>{previewKot.orderType.replace('_', ' ')}</strong></div>
+                  <div className="thermal-row"><span>Time</span><strong>{new Date(previewKot.createdAt).toLocaleString('en-IN')}</strong></div>
+                  <div className="kot-meta-grid">
+                    {previewKot.tableName && <div className="kot-meta-box"><span>Table</span><strong>{previewKot.tableName}</strong></div>}
+                    <div className="kot-meta-box"><span>Items</span><strong>{previewKot.items.reduce((sum, item) => sum + item.quantity, 0)}</strong></div>
+                  </div>
+                  <div className="thermal-rule" />
+                  {previewKot.items.map((item) => (
+                    <div className="kot-item" key={item.id}>
+                      <div><strong>{item.quantity} x {item.name}</strong></div>
+                      {item.note && <div className="kot-note">Note: {item.note}</div>}
+                      {item.modifiers?.length ? <div className="kot-note">+ {item.modifiers.join(', ')}</div> : null}
+                    </div>
+                  ))}
+                  <div className="kot-total">TOTAL ITEMS: {previewKot.items.reduce((sum, item) => sum + item.quantity, 0)}</div>
+                </section>
+                <pre className="sr-only">{previewKotText}</pre>
               </div>
             </section>
           </div>

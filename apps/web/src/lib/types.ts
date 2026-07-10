@@ -37,6 +37,10 @@ export interface User {
   paymentReceived?: boolean
   renewalPaymentReceived?: boolean
   paymentNote?: string
+  paymentAmount?: number
+  paymentDate?: string
+  renewalAmount?: number
+  renewalDate?: string
 }
 
 export interface Outlet {

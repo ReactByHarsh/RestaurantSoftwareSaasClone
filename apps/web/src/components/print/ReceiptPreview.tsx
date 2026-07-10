@@ -170,7 +170,7 @@ export default function ReceiptPreview({
 
           <div className="thermal-rule" />
           <div className="thermal-center">
-            <p>BILL PART {part.partIndex} OF {part.partCount}</p>
+            {printSettings.showBillPartLabel !== false && <p>BILL PART {part.partIndex} OF {part.partCount}</p>}
             <p>{printSettings.footerText || 'Thank you. Please visit again.'}</p>
           </div>
         </section>

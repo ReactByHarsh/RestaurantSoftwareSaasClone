@@ -26,6 +26,43 @@ import { useStaffStore } from './store/staffStore'
 import { isTauriDesktop } from './lib/localDb'
 import { fetchCloudSnapshot } from './lib/cloudSync'
 
+function getNormalizedSnapshotIfNeeded(state: ReturnType<typeof useBillingStore.getState>) {
+  const normalized = state.exportSnapshot()
+
+  if (normalized.orders.length !== state.orders.length) return normalized
+  if (normalized.orderItems.length !== state.orderItems.length) return normalized
+  if (normalized.kots.length !== state.kots.length) return normalized
+  if (normalized.payments.length !== state.payments.length) return normalized
+  if (normalized.tables.length !== state.tables.length) return normalized
+
+  const currentSavedCartKeys = Object.keys(state.savedCarts ?? {}).sort()
+  const normalizedSavedCartKeys = Object.keys(normalized.savedCarts ?? {}).sort()
+  if (currentSavedCartKeys.length !== normalizedSavedCartKeys.length) return normalized
+  if (currentSavedCartKeys.some((key, index) => key !== normalizedSavedCartKeys[index])) return normalized
+
+  const currentTablesById = new Map(state.tables.map((table) => [table.id, table]))
+  for (const normalizedTable of normalized.tables) {
+    const currentTable = currentTablesById.get(normalizedTable.id)
+    if (!currentTable) return normalized
+    if (currentTable.status !== normalizedTable.status) return normalized
+    if (currentTable.activeOrderId !== normalizedTable.activeOrderId) return normalized
+  }
+
+  return null
+}
+
+function parseDateBoundary(value?: string, boundary: 'start' | 'end' = 'end') {
+  if (!value) return null
+  const match = value.match(/^(\d{4})-(\d{2})-(\d{2})$/)
+  if (!match) {
+    const parsed = new Date(value)
+    return Number.isNaN(parsed.getTime()) ? null : parsed.getTime()
+  }
+  return boundary === 'start'
+    ? new Date(Number(match[1]), Number(match[2]) - 1, Number(match[3]), 0, 0, 0, 0).getTime()
+    : new Date(Number(match[1]), Number(match[2]) - 1, Number(match[3]), 23, 59, 59, 999).getTime()
+}
+
 function ProtectedRoute({ children, permission }: { children: React.ReactNode; permission?: Permission }) {
   const { isAuthenticated, user } = useAuthStore()
   if (!isAuthenticated) return <Navigate to="/login" replace />
@@ -36,13 +73,47 @@ function ProtectedRoute({ children, permission }: { children: React.ReactNode; p
 }
 
 export default function App() {
-  const { user, autoLoginIfEnabled, showStaffLoginOnDesktop } = useAuthStore()
+  const { user, autoLoginIfEnabled, showStaffLoginOnDesktop, logout } = useAuthStore()
   const staffCount = useStaffStore((state) => state.staff.length)
   const defaultRoute = user ? getDefaultRoute(user.role) : '/app/tables'
 
   useEffect(() => {
     autoLoginIfEnabled()
   }, [autoLoginIfEnabled])
+
+  useEffect(() => {
+    if (!user || user.tenantId === 'platform') return
+    const currentTime = Date.now()
+    const renewalEndsAt = parseDateBoundary(user.renewalDate, 'end')
+    if (renewalEndsAt !== null && renewalEndsAt < currentTime) {
+      logout()
+      return
+    }
+    const accessEndsAt = parseDateBoundary(user.accessEndsAt, 'end')
+    if (accessEndsAt !== null && accessEndsAt < currentTime) {
+      logout()
+    }
+  }, [logout, user])
+
+  useEffect(() => {
+    let reconciling = false
+    const initialState = useBillingStore.getState()
+    const initialSnapshot = getNormalizedSnapshotIfNeeded(initialState)
+    if (initialSnapshot) {
+      reconciling = true
+      initialState.importSnapshot(initialSnapshot, true)
+      reconciling = false
+    }
+
+    return useBillingStore.subscribe((state) => {
+      if (reconciling) return
+      const normalized = getNormalizedSnapshotIfNeeded(state)
+      if (!normalized) return
+      reconciling = true
+      state.importSnapshot(normalized, true)
+      reconciling = false
+    })
+  }, [])
 
   useEffect(() => {
     return realtimeClient.subscribe((event) => {

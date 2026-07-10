@@ -16,6 +16,8 @@ type Bindings = {
   SESSION_SECRET?: string
   REALTIME_HUB?: DurableObjectNamespace
   RESEND_API_KEY?: string
+  AGENTMAIL_API_KEY?: string
+  AGENTMAIL_INBOX_ID?: string
   ALERT_FROM_EMAIL?: string
   ALERT_TO_EMAIL?: string
   ALERT_REPLY_TO_EMAIL?: string
@@ -52,6 +54,8 @@ type SnapshotRecord = {
   payload: SnapshotPayload
   updatedAt: string
 }
+
+const SUPPORT_PHONE = '9028414428'
 
 function getDynamicOutlet(user: User) {
   return {
@@ -205,6 +209,13 @@ function cloudAdminHtml() {
     .form-row label { font-size:11px; font-weight:800; text-transform:uppercase; letter-spacing:.07em; color:var(--muted); margin-bottom:4px; }
     .form-row input, .form-row select, .form-row textarea { border:1.5px solid var(--line); border-radius:10px; padding:9px 11px; font:inherit; font-size:14px; outline:none; width:100%; }
     .form-row input:focus, .form-row select:focus, .form-row textarea:focus { border-color:var(--brand); box-shadow:0 0 0 3px rgba(241,90,36,.1); }
+    .date-tools { margin-top:16px; border:1px solid var(--line); background:linear-gradient(180deg, #fff7ed 0%, #fff 100%); border-radius:16px; padding:14px; }
+    .date-tools h4 { margin:0; font-size:13px; letter-spacing:-.01em; }
+    .date-tools p { margin:4px 0 0; font-size:12px; color:var(--muted); }
+    .date-chip-row { display:flex; flex-wrap:wrap; gap:8px; margin-top:12px; }
+    .date-chip { border:1px solid #fed7aa; background:#fff; color:#9a3412; border-radius:999px; padding:7px 12px; font-size:12px; font-weight:800; cursor:pointer; }
+    .date-chip:hover { background:#fff7ed; }
+    .date-helper-summary { margin-top:12px; border-radius:12px; background:#fff; border:1px solid #fdba74; color:#9a3412; padding:10px 12px; font-size:12px; font-weight:700; }
     .chk-row { display:flex; align-items:center; gap:8px; padding:8px 0; } .chk-row label { text-transform:none; letter-spacing:0; font-size:13px; color:var(--ink); font-weight:700; }
     table { width:100%; border-collapse:collapse; font-size:13px; }
     th { color:var(--muted); font-size:11px; text-transform:uppercase; letter-spacing:.08em; padding:10px 12px; border-bottom:2px solid var(--line); text-align:left; background:var(--soft); position:sticky; top:0; }
@@ -284,6 +295,18 @@ function cloudAdminHtml() {
           <div class="form-row"><label>Renewal Date</label><input id="fRenewalDate" type="date" /></div>
           <div class="form-row"><label>Renewal Amount (Rs)</label><input id="fRenewalAmount" type="number" min="0" step="0.01" placeholder="0.00" /></div>
           <div class="form-row"><label>Payment Note</label><input id="fPaymentNote" placeholder="Optional note" /></div>
+        </div>
+        <div class="date-tools">
+          <h4>Quick Renewal Date Setup</h4>
+          <p>Choose a cycle and BhojPatra will fill Access Ends and Renewal Date together.</p>
+          <div class="date-chip-row">
+            <button type="button" class="date-chip" data-cycle-base="today">Start Today</button>
+            <button type="button" class="date-chip" data-cycle-months="1">+1 Month</button>
+            <button type="button" class="date-chip" data-cycle-months="3">+3 Months</button>
+            <button type="button" class="date-chip" data-cycle-months="6">+6 Months</button>
+            <button type="button" class="date-chip" data-cycle-months="12">+12 Months</button>
+          </div>
+          <div class="date-helper-summary" id="dateHelperSummary">Pick a quick cycle or enter the dates manually.</div>
         </div>
         <div style="display:flex;gap:20px;margin-top:14px;flex-wrap:wrap">
           <div class="chk-row"><input type="checkbox" id="fPaymentReceived" checked /><label>Payment Received</label></div>
@@ -1082,21 +1105,94 @@ async function upsertUser(db: D1Database, user: User) {
   ).run()
 }
 
-function getAlertRecipients(env: Bindings) {
-  return (env.ALERT_TO_EMAIL || '')
-    .split(',')
+const EMAIL_ADDRESS_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
+
+function parseAlertRecipients(rawValue?: string) {
+  const entries = (rawValue || '')
+    .split(/[\n,;]+/)
     .map((value) => value.trim())
     .filter(Boolean)
+
+  const valid: string[] = []
+  const invalid: string[] = []
+
+  for (const entry of entries) {
+    const normalized = entry.replace(/^.*<([^>]+)>.*$/, '$1').trim()
+    if (EMAIL_ADDRESS_PATTERN.test(normalized)) {
+      valid.push(normalized)
+    } else {
+      invalid.push(entry)
+    }
+  }
+
+  return { valid, invalid }
+}
+
+function getAlertRecipients(env: Bindings) {
+  return parseAlertRecipients(env.ALERT_TO_EMAIL).valid
+}
+
+function parseDateBoundary(value?: string, boundary: 'start' | 'end' = 'end') {
+  if (!value) return null
+  const match = value.match(/^(\d{4})-(\d{2})-(\d{2})$/)
+  if (!match) {
+    const parsed = new Date(value)
+    return Number.isNaN(parsed.getTime()) ? null : parsed.getTime()
+  }
+  return boundary === 'start'
+    ? new Date(Number(match[1]), Number(match[2]) - 1, Number(match[3]), 0, 0, 0, 0).getTime()
+    : new Date(Number(match[1]), Number(match[2]) - 1, Number(match[3]), 23, 59, 59, 999).getTime()
 }
 
 function formatAlertDate(value?: string) {
-  return value ? new Date(value).toLocaleDateString('en-IN') : 'Not set'
+  const parsed = parseDateBoundary(value, 'start')
+  return parsed === null ? 'Not set' : new Date(parsed).toLocaleDateString('en-IN')
 }
 
 function formatAlertAmount(value?: number) {
   return value === undefined
     ? 'Not set'
     : new Intl.NumberFormat('en-IN', { style: 'currency', currency: 'INR', maximumFractionDigits: 2 }).format(value)
+}
+
+function getUserAccessIssue(user: Pick<User, 'accessStartsAt' | 'accessEndsAt' | 'renewalDate'>) {
+  const currentTime = Date.now()
+  const accessStartsAt = parseDateBoundary(user.accessStartsAt, 'start')
+  if (accessStartsAt !== null && accessStartsAt > currentTime) {
+    return { code: 'not_started', message: 'This login is not active yet' }
+  }
+
+  const renewalDate = parseDateBoundary(user.renewalDate, 'end')
+  if (renewalDate !== null && renewalDate < currentTime) {
+    return { code: 'renewal_expired', message: `Renewal date has expired. Contact ${SUPPORT_PHONE} to renew access.` }
+  }
+
+  const accessEndsAt = parseDateBoundary(user.accessEndsAt, 'end')
+  if (accessEndsAt !== null && accessEndsAt < currentTime) {
+    return { code: 'access_expired', message: 'This login has expired' }
+  }
+
+  return null
+}
+
+function getAlertEmailConfig(env: Bindings) {
+  const apiKey = env.AGENTMAIL_API_KEY?.trim()
+  if (!apiKey) throw new Error('AgentMail API key is not configured')
+  const recipients = parseAlertRecipients(env.ALERT_TO_EMAIL)
+  const to = recipients.valid
+  if (to.length === 0) throw new Error('Alert recipient email is not configured')
+  if (recipients.invalid.length > 0) {
+    throw new Error(`Invalid alert recipient email: ${recipients.invalid.join(', ')}`)
+  }
+  const replyToRecipients = parseAlertRecipients(env.ALERT_REPLY_TO_EMAIL)
+  if (replyToRecipients.invalid.length > 0) {
+    throw new Error(`Invalid reply-to email: ${replyToRecipients.invalid.join(', ')}`)
+  }
+  return {
+    apiKey,
+    to,
+    replyTo: replyToRecipients.valid,
+  }
 }
 
 function escapeHtml(value: string) {
@@ -1108,30 +1204,89 @@ function escapeHtml(value: string) {
     .replaceAll("'", '&#39;')
 }
 
-async function sendResendEmail(env: Bindings, subject: string, html: string, text: string) {
-  if (!env.RESEND_API_KEY) return false
-  const to = getAlertRecipients(env)
-  if (!env.ALERT_FROM_EMAIL || to.length === 0) return false
+const AGENTMAIL_ALERTS_CLIENT_ID = 'bhojpatra-alerts-inbox-v1'
+const AGENTMAIL_ALERTS_CACHE_KEY = 'agentmail:alerts:inbox'
 
-  const response = await fetch('https://api.resend.com/emails', {
+type AgentMailInboxRecord = {
+  inboxId: string
+  email?: string
+}
+
+async function getCachedAgentMailInbox(env: Bindings) {
+  if (env.AGENTMAIL_INBOX_ID?.trim()) {
+    return { inboxId: env.AGENTMAIL_INBOX_ID.trim() } satisfies AgentMailInboxRecord
+  }
+  if (!env.CACHE) return null
+  const raw = await env.CACHE.get(AGENTMAIL_ALERTS_CACHE_KEY)
+  if (!raw) return null
+  try {
+    const parsed = JSON.parse(raw) as AgentMailInboxRecord
+    return parsed?.inboxId ? parsed : null
+  } catch {
+    return null
+  }
+}
+
+async function ensureAgentMailInbox(env: Bindings) {
+  const cached = await getCachedAgentMailInbox(env)
+  if (cached?.inboxId) return cached
+
+  const config = getAlertEmailConfig(env)
+  const response = await fetch('https://api.agentmail.to/v0/inboxes', {
     method: 'POST',
     headers: {
-      Authorization: `Bearer ${env.RESEND_API_KEY}`,
+      Authorization: `Bearer ${config.apiKey}`,
       'Content-Type': 'application/json',
     },
     body: JSON.stringify({
-      from: env.ALERT_FROM_EMAIL,
-      to,
-      reply_to: env.ALERT_REPLY_TO_EMAIL || undefined,
-      subject,
-      html,
-      text,
+      username: 'bhojpatra-alerts',
+      display_name: 'BhojPatra Alerts',
+      client_id: AGENTMAIL_ALERTS_CLIENT_ID,
     }),
   })
 
   if (!response.ok) {
     const details = await response.text().catch(() => '')
-    throw new Error(`Resend email failed (${response.status}): ${details || response.statusText}`)
+    throw new Error(`AgentMail inbox setup failed (${response.status}): ${details || response.statusText}`)
+  }
+
+  const payload = await response.json<any>().catch(() => ({}))
+  const record: AgentMailInboxRecord = {
+    inboxId: typeof payload?.inbox_id === 'string' ? payload.inbox_id : '',
+    email: typeof payload?.email === 'string' ? payload.email : undefined,
+  }
+  if (!record.inboxId) {
+    throw new Error('AgentMail inbox setup failed: inbox id missing in response')
+  }
+  if (env.CACHE) {
+    await env.CACHE.put(AGENTMAIL_ALERTS_CACHE_KEY, JSON.stringify(record))
+  }
+  return record
+}
+
+async function sendAlertEmail(env: Bindings, subject: string, html: string, text: string) {
+  const config = getAlertEmailConfig(env)
+  const inbox = await ensureAgentMailInbox(env)
+
+  const response = await fetch(`https://api.agentmail.to/v0/inboxes/${encodeURIComponent(inbox.inboxId)}/messages/send`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${config.apiKey}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      to: config.to,
+      subject,
+      html,
+      text,
+      reply_to: config.replyTo.length ? config.replyTo : undefined,
+      labels: ['bhojpatra', 'renewal-alert'],
+    }),
+  })
+
+  if (!response.ok) {
+    const details = await response.text().catch(() => '')
+    throw new Error(`AgentMail email failed (${response.status}): ${details || response.statusText}`)
   }
 
   return true
@@ -1159,7 +1314,7 @@ async function sendCustomerChangeAlert(env: Bindings, action: 'created' | 'updat
     <h2>Customer ${action} in BhojPatra Cloud Admin</h2>
     <ul>${lines.map((line) => `<li>${escapeHtml(line)}</li>`).join('')}</ul>
   `
-  return sendResendEmail(env, subject, html, text)
+  return sendAlertEmail(env, subject, html, text)
 }
 
 type ExpiringCustomerRow = {
@@ -1175,14 +1330,13 @@ type ExpiringCustomerRow = {
 
 async function sendRenewalDigest(env: Bindings) {
   if (!env.DB) return
-  const to = getAlertRecipients(env)
-  if (!env.RESEND_API_KEY || !env.ALERT_FROM_EMAIL || to.length === 0) return
+  getAlertEmailConfig(env)
 
   const now = new Date()
-  const sevenDaysFromNow = new Date(now)
-  sevenDaysFromNow.setDate(now.getDate() + 7)
+  const tenDaysFromNow = new Date(now)
+  tenDaysFromNow.setDate(now.getDate() + 10)
   const today = now.toISOString().slice(0, 10)
-  const cutoff = sevenDaysFromNow.toISOString().slice(0, 10)
+  const cutoff = tenDaysFromNow.toISOString().slice(0, 10)
   const { results } = await env.DB.prepare(`
     SELECT restaurant_name, name, email, phone, tenant_id, access_ends_at, renewal_date, renewal_amount
     FROM users
@@ -1214,7 +1368,7 @@ async function sendRenewalDigest(env: Bindings) {
     </tr>`
   }).join('')
 
-  await sendResendEmail(
+  await sendAlertEmail(
     env,
     `BhojPatra renewal digest: ${results.length} customer${results.length === 1 ? '' : 's'} need attention`,
     `<h2>Upcoming access and renewal dates</h2><table border="1" cellpadding="8" cellspacing="0"><thead><tr><th>Restaurant</th><th>Login</th><th>Access ends</th><th>Renewal date</th><th>Renewal amount</th></tr></thead><tbody>${htmlRows}</tbody></table>`,
@@ -1347,23 +1501,27 @@ async function findUserByCredentials(db: D1Database, login: string, password: st
   const passwordMatch = await verifySecret(user.password, password)
   const pinMatch = await verifySecret(user.pin, password)
   if (!passwordMatch && !pinMatch) return undefined
-  const now = Date.now()
-  if (user.accessStartsAt && new Date(user.accessStartsAt).getTime() > now) return undefined
-  if (user.accessEndsAt && new Date(user.accessEndsAt).getTime() < now) return undefined
   return user
 }
 
 async function getAuthenticatedUser(c: { env: Bindings; req: any }) {
   if (!c.env.DB) return { response: Response.json({ error: 'Database binding is not configured' }, { status: 500 }) }
   const basicUser = await findUserByBasicAuth(c.env.DB, c.req.header?.('Authorization') ?? c.req.raw?.headers?.get?.('Authorization'))
-  if (basicUser) return { user: basicUser }
+  if (basicUser) {
+    const issue = getUserAccessIssue(basicUser)
+    if (!issue) return { user: basicUser }
+    return { response: Response.json({ error: issue.message }, { status: 403 }) }
+  }
 
   const requestUrl = c.req.url ? new URL(c.req.url) : new URL(c.req.raw?.url)
   const queryLogin = requestUrl.searchParams.get('login')
   const querySecret = requestUrl.searchParams.get('secret')
   if (queryLogin && querySecret) {
     const queryUser = await findUserByCredentials(c.env.DB, queryLogin, querySecret)
-    if (queryUser) return { user: queryUser }
+    if (queryUser) {
+      const issue = getUserAccessIssue(queryUser)
+      if (!issue) return { user: queryUser }
+    }
   }
 
   const sessionToken = getCookie(c as any, SESSION_COOKIE)
@@ -1372,7 +1530,12 @@ async function getAuthenticatedUser(c: { env: Bindings; req: any }) {
     const userId = await verifySessionToken(sessionToken, secret)
     if (userId) {
       const user = await findUserById(c.env.DB, userId)
-      if (user && user.status === 'active') return { user }
+      if (user && user.status === 'active') {
+        const issue = getUserAccessIssue(user)
+        if (!issue) return { user }
+        deleteCookie(c as any, SESSION_COOKIE, { path: '/' })
+        return { response: Response.json({ error: issue.message }, { status: 403 }) }
+      }
     }
   }
 
@@ -1454,9 +1617,8 @@ app.post('/api/v1/auth/login', async (c) => {
   const user = await findUserByCredentials(c.env.DB, body.data.emailOrPhone, body.data.password)
   if (!user) return c.json({ error: 'Invalid credentials' }, 401)
   if (user.tenantId === 'platform') return c.json({ error: 'Invalid credentials' }, 401)
-  const now = Date.now()
-  if (user.accessStartsAt && new Date(user.accessStartsAt).getTime() > now) return c.json({ error: 'This login is not active yet' }, 403)
-  if (user.accessEndsAt && new Date(user.accessEndsAt).getTime() < now) return c.json({ error: 'This login has expired' }, 403)
+  const issue = getUserAccessIssue(user)
+  if (issue) return c.json({ error: issue.message }, 403)
   await c.env.DB.prepare('UPDATE users SET last_login_at = ?, updated_at = ? WHERE id = ?')
     .bind(new Date().toISOString(), new Date().toISOString(), user.id).run()
 
@@ -1486,9 +1648,8 @@ app.post('/api/v1/admin/login', async (c) => {
   if (!c.env.DB) return c.json({ error: 'Database binding is not configured' }, 500)
   const user = await findUserByCredentials(c.env.DB, body.data.emailOrPhone, body.data.password)
   if (!user || user.tenantId !== 'platform') return c.json({ error: 'Invalid credentials' }, 401)
-  const now = Date.now()
-  if (user.accessStartsAt && new Date(user.accessStartsAt).getTime() > now) return c.json({ error: 'This login is not active yet' }, 403)
-  if (user.accessEndsAt && new Date(user.accessEndsAt).getTime() < now) return c.json({ error: 'This login has expired' }, 403)
+  const issue = getUserAccessIssue(user)
+  if (issue) return c.json({ error: issue.message }, 403)
   await c.env.DB.prepare('UPDATE users SET last_login_at = ?, updated_at = ? WHERE id = ?')
     .bind(new Date().toISOString(), new Date().toISOString(), user.id).run()
 
@@ -1967,7 +2128,7 @@ app.post('/api/v1/admin/test-email', async (c) => {
   const auth = await getPlatformAdmin(c)
   if ('response' in auth) return auth.response
   try {
-    const result = await sendResendEmail(c.env, 'BhojPatra - Test Email', '<h2>Email configuration is working!</h2>', 'Email configuration is working!')
+    const result = await sendAlertEmail(c.env, 'BhojPatra - Test Email', '<h2>Email configuration is working!</h2>', 'Email configuration is working!')
     return c.json({ ok: true, sent: result })
   } catch (err: any) {
     return c.json({ error: 'Test failed: ' + (err?.message || 'unknown') }, 500)
@@ -1978,11 +2139,14 @@ app.post('/api/v1/admin/test-email', async (c) => {
 app.get('/api/v1/admin/email-config', async (c) => {
   const auth = await getPlatformAdmin(c)
   if ('response' in auth) return auth.response
-  const recipients = getAlertRecipients(c.env)
+  const recipients = parseAlertRecipients(c.env.ALERT_TO_EMAIL)
+  const inbox = await getCachedAgentMailInbox(c.env)
   return c.json({
-    configured: !!(c.env.RESEND_API_KEY && c.env.ALERT_FROM_EMAIL && recipients.length > 0),
-    from: c.env.ALERT_FROM_EMAIL || '(not set)',
-    to: recipients,
+    configured: !!(c.env.AGENTMAIL_API_KEY && recipients.valid.length > 0),
+    provider: 'agentmail',
+    from: inbox?.inboxId || c.env.AGENTMAIL_INBOX_ID || '(auto-created on first send)',
+    to: recipients.valid,
+    invalidTo: recipients.invalid,
     replyTo: c.env.ALERT_REPLY_TO_EMAIL || '(not set)',
   })
 })

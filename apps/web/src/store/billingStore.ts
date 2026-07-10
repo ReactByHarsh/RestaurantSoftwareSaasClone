@@ -75,6 +75,7 @@ export interface PrintSettings {
   showGstinOnSecondBill: boolean
   showKotToken: boolean
   showTaxInvoiceLabel: boolean
+  showBillPartLabel: boolean
   upiId: string
   showUpiQrOnBill: boolean
   showUpiIdOnBill: boolean
@@ -291,6 +292,7 @@ const DEFAULT_PRINT_SETTINGS: PrintSettings = {
   showGstinOnSecondBill: true,
   showKotToken: true,
   showTaxInvoiceLabel: true,
+  showBillPartLabel: true,
   upiId: '',
   showUpiQrOnBill: false,
   showUpiIdOnBill: false,
@@ -526,16 +528,21 @@ function mergeSavedCarts(remote: Record<string, CartItem[]> = {}, local: Record<
   return cleanSavedCarts({ ...remote, ...local })
 }
 
+function getActiveItemCountByOrder(orderItems: OrderItem[]) {
+  const itemCountByOrder = new Map<string, number>()
+  orderItems.forEach((item) => {
+    if (item.status !== 'cancelled') itemCountByOrder.set(item.orderId, (itemCountByOrder.get(item.orderId) ?? 0) + item.quantity)
+  })
+  return itemCountByOrder
+}
+
 function isClosedOrder(order?: Order | null) {
   return !order || ['paid', 'cancelled', 'void'].includes(order.status)
 }
 
 function reconcileSnapshot(snapshot: BillingSnapshot): BillingSnapshot {
   const savedCarts = cleanSavedCarts(snapshot.savedCarts)
-  const itemCountByOrder = new Map<string, number>()
-  snapshot.orderItems.forEach((item) => {
-    if (item.status !== 'cancelled') itemCountByOrder.set(item.orderId, (itemCountByOrder.get(item.orderId) ?? 0) + item.quantity)
-  })
+  const itemCountByOrder = getActiveItemCountByOrder(snapshot.orderItems)
 
   const tableByOrderId = new Map<string, RestaurantTable>()
   snapshot.tables.forEach((table) => {
@@ -2272,7 +2279,6 @@ export const useBillingStore = create<BillingStore>()(
               jobName: `${type === 'proforma' ? 'Proforma' : 'Bill'} ${order.orderNo} ${part.title}`,
               text: part.text,
               browserUrl: url,
-              logoDataUrl: state.outlet.logoDataUrl || undefined,
               qrCodes: part.upiPaymentUrl ? [{ data: part.upiPaymentUrl, label: 'SCAN TO PAY' }] : undefined,
             }
             try {
@@ -2473,7 +2479,14 @@ export const useBillingStore = create<BillingStore>()(
 
       getTodaySummary: () => {
         const state = get()
-        const paidOrders = state.orders.filter((order) => order.businessDate === today() && order.paymentStatus === 'paid')
+        const itemCountByOrder = getActiveItemCountByOrder(state.orderItems)
+        const paidOrders = state.orders.filter((order) =>
+          order.businessDate === today() &&
+          order.paymentStatus === 'paid' &&
+          !['cancelled', 'void'].includes(order.status) &&
+          order.totalPaise > 0 &&
+          (itemCountByOrder.get(order.id) ?? 0) > 0
+        )
         const totalSalesPaise = paidOrders.reduce((sum, order) => sum + order.totalPaise, 0)
         const paymentModes = state.payments
           .filter((payment) => payment.status === 'success' && isCollectedPayment(payment.method) && paidOrders.some((order) => order.id === payment.orderId))
@@ -2483,7 +2496,7 @@ export const useBillingStore = create<BillingStore>()(
           }, {})
 
         const itemSales = state.orderItems
-          .filter((item) => paidOrders.some((order) => order.id === item.orderId))
+          .filter((item) => item.status !== 'cancelled' && paidOrders.some((order) => order.id === item.orderId))
           .reduce<Record<string, { qty: number; revenuePaise: number }>>((acc, item) => {
             acc[item.nameSnapshot] ??= { qty: 0, revenuePaise: 0 }
             acc[item.nameSnapshot].qty += item.quantity
@@ -2503,7 +2516,12 @@ export const useBillingStore = create<BillingStore>()(
           totalSalesPaise,
           orderCount: paidOrders.length,
           avgOrderValuePaise: paidOrders.length ? Math.round(totalSalesPaise / paidOrders.length) : 0,
-          openTableCount: state.tables.filter((table) => table.activeOrderId).length,
+          openTableCount: state.tables.filter((table) => {
+            if (!table.activeOrderId) return false
+            const linkedOrder = state.orders.find((order) => order.id === table.activeOrderId)
+            if (!linkedOrder || ['paid', 'cancelled', 'void'].includes(linkedOrder.status)) return false
+            return (itemCountByOrder.get(linkedOrder.id) ?? 0) > 0 || (linkedOrder.tableId ? (state.savedCarts[linkedOrder.tableId]?.length ?? 0) > 0 : false)
+          }).length,
           cancelledPaise: state.orders.filter((order) => order.status === 'cancelled').reduce((sum, order) => sum + order.totalPaise, 0),
           discountPaise: paidOrders.reduce((sum, order) => sum + order.discountPaise, 0),
           paymentModes: Object.entries(paymentModes).map(([method, amountPaise]) => ({ method: method as PaymentMethod, amountPaise })),

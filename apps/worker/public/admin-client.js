@@ -24,6 +24,38 @@ var dt = function(v) {
   return v ? new Date(v).toLocaleDateString('en-IN') : '--';
 };
 
+var ymd = function(date) {
+  var year = date.getFullYear();
+  var month = String(date.getMonth() + 1).padStart(2, '0');
+  var day = String(date.getDate()).padStart(2, '0');
+  return year + '-' + month + '-' + day;
+};
+
+var parseYmd = function(value, endOfDay) {
+  if (!value) return null;
+  var match = String(value).match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!match) {
+    var parsed = new Date(value);
+    return isNaN(parsed.getTime()) ? null : parsed;
+  }
+  return new Date(Number(match[1]), Number(match[2]) - 1, Number(match[3]), endOfDay ? 23 : 0, endOfDay ? 59 : 0, endOfDay ? 59 : 0, endOfDay ? 999 : 0);
+};
+
+var addMonths = function(value, months) {
+  var base = parseYmd(value, false) || new Date();
+  var result = new Date(base.getFullYear(), base.getMonth(), base.getDate());
+  result.setMonth(result.getMonth() + months);
+  return ymd(result);
+};
+
+var daysUntil = function(value) {
+  var target = parseYmd(value, false);
+  if (!target) return null;
+  var now = new Date();
+  var today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  return Math.round((target.getTime() - today.getTime()) / 86400000);
+};
+
 var rs = function(v) {
   if (v === undefined || v === null || v === '') return '--';
   return new Intl.NumberFormat('en-IN', { style:'currency', currency:'INR', maximumFractionDigits:2 }).format(Number(v));
@@ -89,6 +121,7 @@ function setForm(user) {
   $('btnCancelForm').style.display = user ? '' : 'none';
   $('pwHint').textContent = user ? '(leave empty to keep)' : '*';
   $('fPassword').required = !user && !$('fPhone').value && !$('fEmail').value;
+  syncDateSummary();
 }
 
 function clearForm() {
@@ -96,6 +129,35 @@ function clearForm() {
   setForm(null);
   $('credsBox').style.display = 'none';
   msg($('formMsg'), '');
+}
+
+function syncDateSummary() {
+  var summary = $('dateHelperSummary');
+  if (!summary) return;
+  var start = $('fAccessStartsAt').value || $('fPaymentDate').value;
+  var renewal = $('fRenewalDate').value;
+  var accessEnd = $('fAccessEndsAt').value;
+  if (!start && !renewal && !accessEnd) {
+    summary.textContent = 'Pick a quick cycle or enter the dates manually.';
+    return;
+  }
+  var renewalDays = daysUntil(renewal);
+  var accessDays = daysUntil(accessEnd);
+  var parts = [];
+  if (start) parts.push('Start: ' + dt(start));
+  if (renewal) parts.push('Renewal: ' + dt(renewal) + (renewalDays !== null ? ' (' + (renewalDays === 0 ? 'due today' : renewalDays > 0 ? renewalDays + ' day(s) left' : Math.abs(renewalDays) + ' day(s) overdue') + ')' : ''));
+  if (accessEnd) parts.push('Access ends: ' + dt(accessEnd) + (accessDays !== null ? ' (' + (accessDays === 0 ? 'today' : accessDays > 0 ? accessDays + ' day(s) left' : Math.abs(accessDays) + ' day(s) overdue') + ')' : ''));
+  summary.textContent = parts.join(' | ');
+}
+
+function applyRenewalCycle(months) {
+  var base = $('fPaymentDate').value || $('fAccessStartsAt').value || ymd(new Date());
+  if (!$('fPaymentDate').value) $('fPaymentDate').value = base;
+  if (!$('fAccessStartsAt').value) $('fAccessStartsAt').value = base;
+  var target = addMonths(base, months);
+  $('fRenewalDate').value = target;
+  $('fAccessEndsAt').value = target;
+  syncDateSummary();
 }
 
 function showModal(title, body, actions) {
@@ -119,7 +181,9 @@ async function loadStaff() {
   var active = staff.filter(function(u) { return u.status === 'active'; }).length;
   var halted = staff.filter(function(u) { return u.status === 'halted'; }).length;
   var expiring = staff.filter(function(u) {
-    return u.accessEndsAt && new Date(u.accessEndsAt).getTime() < Date.now() + 7*86400000;
+    var accessDays = daysUntil(u.accessEndsAt);
+    var renewalDays = daysUntil(u.renewalDate);
+    return (accessDays !== null && accessDays >= 0 && accessDays <= 10) || (renewalDays !== null && renewalDays >= 0 && renewalDays <= 10);
   }).length;
   var totalData = staff.reduce(function(s, u) { return s + ((u.dataCounts && u.dataCounts.score) || 0); }, 0);
 
@@ -137,15 +201,19 @@ async function loadStaff() {
     var c = u.dataCounts || {};
     var now = Date.now();
     var endsAt = u.accessEndsAt ? new Date(u.accessEndsAt).getTime() : 0;
-    var accessClass = endsAt && endsAt < now ? 'pill-inactive' : endsAt && endsAt < now + 7*86400000 ? 'pill-halted' : 'pill-active';
+    var accessDays = daysUntil(u.accessEndsAt);
+    var renewalDays = daysUntil(u.renewalDate);
+    var accessClass = endsAt && endsAt < now ? 'pill-inactive' : endsAt && endsAt < now + 10*86400000 ? 'pill-halted' : 'pill-active';
     var statusPill = u.status === 'active' ? 'pill-active' : u.status === 'halted' ? 'pill-halted' : 'pill-inactive';
     var statusActionLabel = u.status === 'active' ? 'Halt Account' : u.status === 'halted' ? 'Reactivate' : 'Activate';
+    var renewalHint = renewalDays === null ? '' : renewalDays < 0 ? '<br><span style="font-size:11px;color:var(--bad);font-weight:800">Renewal overdue by ' + Math.abs(renewalDays) + ' day(s)</span>' : renewalDays <= 10 ? '<br><span style="font-size:11px;color:#9a3412;font-weight:800">Renewal due in ' + renewalDays + ' day(s)</span>' : '';
+    var accessHint = accessDays === null ? '' : accessDays < 0 ? '<br><span style="font-size:11px;color:var(--bad);font-weight:800">Access expired</span>' : accessDays <= 10 ? '<br><span style="font-size:11px;color:#92400e;font-weight:800">Access ends in ' + accessDays + ' day(s)</span>' : '';
     return '<tr>' +
       '<td><strong>' + esc(u.restaurantName || u.name || '-') + '</strong><br><span style="font-size:11px;color:var(--muted)">' + esc(u.tenantId) + '</span></td>' +
       '<td>' + esc(u.email || u.phone || '-') + '<br><span class="pill pill-paid">' + esc(u.role) + '</span></td>' +
       '<td><span class="pill ' + statusPill + '">' + esc(u.status) + '</span>' + (u.paymentNote ? '<br><span style="font-size:11px">' + esc(u.paymentNote) + '</span>' : '') + '</td>' +
-      '<td><span class="pill ' + accessClass + '">' + esc(dt(u.accessEndsAt)) + '</span><br><span style="font-size:11px;color:var(--muted)">Starts ' + esc(dt(u.accessStartsAt)) + '</span></td>' +
-      '<td>Paid: ' + esc(dt(u.paymentDate)) + ' &middot; ' + esc(rs(u.paymentAmount)) + '<br>Renewal: ' + esc(dt(u.renewalDate)) + ' &middot; ' + esc(rs(u.renewalAmount)) + '</td>' +
+      '<td><span class="pill ' + accessClass + '">' + esc(dt(u.accessEndsAt)) + '</span><br><span style="font-size:11px;color:var(--muted)">Starts ' + esc(dt(u.accessStartsAt)) + '</span>' + accessHint + '</td>' +
+      '<td>Paid: ' + esc(dt(u.paymentDate)) + ' &middot; ' + esc(rs(u.paymentAmount)) + '<br>Renewal: ' + esc(dt(u.renewalDate)) + ' &middot; ' + esc(rs(u.renewalAmount)) + renewalHint + '</td>' +
       '<td>Menu ' + (c.menuItems || 0) + ' | Orders ' + (c.orders || 0) + ' | KOTs ' + (c.kots || 0) + '<br>Payments ' + (c.payments || 0) + ' | Tables ' + (c.tables || 0) + ' | Score ' + (c.score || 0) + (c.updatedAt ? '<br><span style="font-size:10px;color:var(--muted)">Sync: ' + esc(new Date(c.updatedAt).toLocaleString('en-IN')) + '</span>' : '') + '</td>' +
       '<td><div class="actions-cell">' +
         '<button class="btn-sm btn-ghost" data-edit="' + esc(u.id) + '">Edit</button>' +
@@ -362,6 +430,26 @@ $('btnSubmitCustomer').addEventListener('click', async function() {
 $('btnClearForm').addEventListener('click', clearForm);
 $('btnCancelForm').addEventListener('click', clearForm);
 $('btnRefresh').addEventListener('click', function() { loadStaff(); });
+
+document.querySelectorAll('[data-cycle-base]').forEach(function(btn) {
+  btn.addEventListener('click', function() {
+    var today = ymd(new Date());
+    $('fPaymentDate').value = today;
+    $('fAccessStartsAt').value = today;
+    syncDateSummary();
+  });
+});
+
+document.querySelectorAll('[data-cycle-months]').forEach(function(btn) {
+  btn.addEventListener('click', function() {
+    applyRenewalCycle(Number(btn.getAttribute('data-cycle-months') || '0'));
+  });
+});
+
+['fPaymentDate', 'fAccessStartsAt', 'fAccessEndsAt', 'fRenewalDate'].forEach(function(id) {
+  var input = $(id);
+  if (input) input.addEventListener('change', syncDateSummary);
+});
 
 $('btnSendDigest').addEventListener('click', async function() {
   $('btnSendDigest').disabled = true;

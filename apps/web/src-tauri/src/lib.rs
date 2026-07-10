@@ -726,10 +726,9 @@ fn logo_to_esc_pos_raster(data_url: &str) -> Vec<u8> {
         Ok(img) => img,
         Err(_) => return vec![],
     };
-    // Keep restaurant logos small on thermal paper. The old 384px limit filled
-    // most of an 80mm receipt and made uploaded logos print like a banner.
-    const MAX_WIDTH: u32 = 72;
-    const MAX_HEIGHT: u32 = 48;
+    // Keep logos readable without turning them into a full-width banner.
+    const MAX_WIDTH: u32 = 120;
+    const MAX_HEIGHT: u32 = 80;
     let (orig_w, orig_h) = img.dimensions();
     let scale = (MAX_WIDTH as f64 / orig_w.max(1) as f64)
         .min(MAX_HEIGHT as f64 / orig_h.max(1) as f64)
@@ -771,13 +770,12 @@ fn logo_to_esc_pos_raster(data_url: &str) -> Vec<u8> {
     let y_l = (height % 256) as u8;
     let y_h = (height / 256) as u8;
     let mut out: Vec<u8> = Vec::new();
-    // Left align so the logo remains a small mark, not a centered masthead.
-    out.extend_from_slice(&[0x1b, 0x61, 0x00]);
+    out.extend_from_slice(&[0x1b, 0x61, 0x01]);
     // GS v 0 header
     out.extend_from_slice(&[0x1d, 0x76, 0x30, 0x00, x_l, x_h, y_l, y_h]);
     // Bitmap data
     out.extend_from_slice(&bitmap);
-    // Newline + left align
+    // Newline + left align for the receipt text that follows.
     out.extend_from_slice(&[0x0a, 0x1b, 0x61, 0x00]);
     out
 }

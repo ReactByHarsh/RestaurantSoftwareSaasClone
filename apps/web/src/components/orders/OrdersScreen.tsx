@@ -41,11 +41,24 @@ export default function OrdersScreen({ onBack }: Props = {}) {
   const [addPaymentOrderId, setAddPaymentOrderId] = useState<string | null>(null)
   const [cancelPaymentsOrderId, setCancelPaymentsOrderId] = useState<string | null>(null)
 
+  const activeItemCountByOrder = useMemo(() => {
+    const index = new Map<string, number>()
+    orderItems.forEach(item => {
+      if (item.status === 'cancelled') return
+      index.set(item.orderId, (index.get(item.orderId) ?? 0) + item.quantity)
+    })
+    return index
+  }, [orderItems])
+
   const filtered = useMemo(() => {
     const from = new Date(fromDate).getTime()
     const to = new Date(toDate).getTime() + 86400000 // end of day
 
     return orders.filter(o => {
+      if (['cancelled', 'void'].includes(o.status)) return false
+      if (o.totalPaise <= 0) return false
+      if ((activeItemCountByOrder.get(o.id) ?? 0) <= 0) return false
+
       const orderTime = new Date(o.createdAt).getTime()
       if (orderTime < from || orderTime >= to) return false
       
@@ -57,7 +70,7 @@ export default function OrdersScreen({ onBack }: Props = {}) {
       }
       return true
     }).sort((a, b) => b.createdAt.localeCompare(a.createdAt))
-  }, [orders, fromDate, toDate, search])
+  }, [orders, fromDate, toDate, search, activeItemCountByOrder])
 
   const itemsByOrderId = useMemo(() => {
     const index = new Map<string, typeof orderItems>()

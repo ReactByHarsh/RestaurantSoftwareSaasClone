@@ -14,6 +14,7 @@ type ReceiptPrintInfo = {
   showGstinOnSecondBill?: boolean
   showKotToken: boolean
   showTaxInvoiceLabel?: boolean
+  showBillPartLabel?: boolean
   upiId?: string
   showUpiQrOnBill?: boolean
   showUpiIdOnBill?: boolean
@@ -211,23 +212,30 @@ function partTotals(items: OrderItem[]) {
 
 export function buildKotPrintText(kot: KOT, outlet: OutletPrintInfo, settings: ReceiptPrintInfo) {
   const width = widths[settings.receiptWidth]
-  const lines = [center('KITCHEN ORDER', width), center(outlet.name, width)]
-  if (settings.showKotToken) lines.push(center(kot.kotNo, width))
+  const itemCount = kot.items.reduce((sum, item) => sum + item.quantity, 0)
+  const lines = [
+    rule(width, '='),
+    center('KITCHEN ORDER TICKET', width),
+    center(outlet.name, width),
+  ]
+  if (settings.showKotToken) {
+    lines.push(center(kot.kotNo, width))
+  }
   lines.push(
-    rule(width),
+    rule(width, '='),
     columns('Order', kot.orderNo, width),
     ...(kot.tableName ? [columns('Table', kot.tableName, width)] : []),
     columns('Type', kot.orderType.replace(/_/g, ' '), width),
-    columns('Time', new Date(kot.createdAt).toLocaleTimeString('en-IN'), width),
+    columns('Time', new Date(kot.createdAt).toLocaleString('en-IN'), width),
     rule(width),
   )
   kot.items.forEach(item => {
-    lines.push(`${item.quantity} x ${item.name}`)
-    if (item.modifiers?.length) lines.push(`  + ${item.modifiers.join(', ')}`)
-    if (item.note) lines.push(`  NOTE: ${item.note}`)
-    lines.push('')
+    lines.push(`${String(item.quantity).padStart(2)} x ${item.name}`.slice(0, width))
+    if (item.modifiers?.length) lines.push(`   + ${item.modifiers.join(', ')}`.slice(0, width))
+    if (item.note) lines.push(`   NOTE: ${item.note}`.slice(0, width))
+    lines.push(rule(width, '.'))
   })
-  lines.push(rule(width), center(`Items: ${kot.items.reduce((sum, item) => sum + item.quantity, 0)}`, width))
+  lines.push(center(`TOTAL ITEMS: ${itemCount}`, width), rule(width, '='))
   return lines.join('\n')
 }
 
@@ -349,7 +357,9 @@ export function buildReceiptPrintParts(
     const upiPaymentUrl = buildReceiptUpiPaymentUrl(order, settings, paymentAmountPaise)
     if (showPaymentDetails) lines.push(...paymentSummaryLines(order, payments, width))
     lines.push(...upiPaymentLines(order, settings, paymentAmountPaise, width))
-    lines.push(rule(width), center(`BILL PART ${partIndex} OF ${partCount}`, width), center(settings.footerText || 'Thank you. Please visit again.', width))
+    lines.push(rule(width))
+    if (settings.showBillPartLabel !== false) lines.push(center(`BILL PART ${partIndex} OF ${partCount}`, width))
+    lines.push(center(settings.footerText || 'Thank you. Please visit again.', width))
 
     return {
       section: section.section,

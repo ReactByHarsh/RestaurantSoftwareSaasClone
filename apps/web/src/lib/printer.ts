@@ -347,7 +347,7 @@ async function printNative(settings: PrinterTransportSettings, job: PrintJob) {
       autoCut: settings.autoCut !== false,
       openCashDrawer: Boolean(settings.openCashDrawer),
       qrCodes: job.qrCodes ?? [],
-      logoDataUrl: job.logoDataUrl ?? null,
+      logoDataUrl: null,
     },
   })
 }
@@ -363,6 +363,7 @@ async function printBridge(settings: PrinterTransportSettings, job: PrintJob) {
       jobName: job.jobName,
       contentType: 'text/plain',
       content: job.text,
+      logoDataUrl: null,
       options: { raw: true, autoCut: settings.autoCut !== false, openCashDrawer: Boolean(settings.openCashDrawer), qrCodes: job.qrCodes ?? [] },
     }),
   })

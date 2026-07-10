@@ -27,6 +27,35 @@ function isCloudAccount(account: StaffAccount) {
   return account.tenantId && account.tenantId !== LOCAL_TENANT_ID && account.tenantId !== 'platform'
 }
 
+function parseDateBoundary(value?: string, boundary: 'start' | 'end' = 'end') {
+  if (!value) return null
+  const match = value.match(/^(\d{4})-(\d{2})-(\d{2})$/)
+  if (!match) {
+    const parsed = new Date(value)
+    return Number.isNaN(parsed.getTime()) ? null : parsed.getTime()
+  }
+  return boundary === 'start'
+    ? new Date(Number(match[1]), Number(match[2]) - 1, Number(match[3]), 0, 0, 0, 0).getTime()
+    : new Date(Number(match[1]), Number(match[2]) - 1, Number(match[3]), 23, 59, 59, 999).getTime()
+}
+
+function getAccountAccessError(account: Pick<StaffAccount, 'accessStartsAt' | 'accessEndsAt' | 'renewalDate'>) {
+  const currentTime = Date.now()
+  const accessStartsAt = parseDateBoundary(account.accessStartsAt, 'start')
+  if (accessStartsAt !== null && accessStartsAt > currentTime) {
+    return 'This staff login is not active yet'
+  }
+  const renewalDate = parseDateBoundary(account.renewalDate, 'end')
+  if (renewalDate !== null && renewalDate < currentTime) {
+    return 'Renewal date has expired. Contact 9028414428 to renew access.'
+  }
+  const accessEndsAt = parseDateBoundary(account.accessEndsAt, 'end')
+  if (accessEndsAt !== null && accessEndsAt < currentTime) {
+    return 'This staff login duration has expired'
+  }
+  return null
+}
+
 export const useAuthStore = create<AuthStore>()(
   persist(
     (set) => ({
@@ -86,7 +115,8 @@ export const useAuthStore = create<AuthStore>()(
           } catch (error) {
             if (account && isCloudAccount(account)) {
               const validPasswords = [account.password, account.pin ?? '']
-              if (validPasswords.includes(password) && account.status === 'active') {
+              const accessError = getAccountAccessError(account)
+              if (validPasswords.includes(password) && account.status === 'active' && !accessError) {
                 set({
                   user: { ...toPublicUser(account), lastLoginAt: new Date().toISOString() },
                   outlet: useBillingStore.getState().outlet,
@@ -94,20 +124,17 @@ export const useAuthStore = create<AuthStore>()(
                 })
                 return { success: true }
               }
+              if (validPasswords.includes(password) && accessError) {
+                return { success: false, error: accessError }
+              }
             }
             return { success: false, error: error instanceof Error ? error.message : 'Staff account not found' }
           }
         }
         if (account.status === 'inactive') return { success: false, error: 'This staff login is deactivated' }
         if (account.status === 'halted') return { success: false, error: 'This staff login is halted by admin' }
-
-        const now = Date.now()
-        if (account.accessStartsAt && new Date(account.accessStartsAt).getTime() > now) {
-          return { success: false, error: 'This staff login is not active yet' }
-        }
-        if (account.accessEndsAt && new Date(account.accessEndsAt).getTime() < now) {
-          return { success: false, error: 'This staff login duration has expired' }
-        }
+        const accessError = getAccountAccessError(account)
+        if (accessError) return { success: false, error: accessError }
 
         const validPasswords = [account.password, account.pin ?? '']
         if (!validPasswords.includes(password)) {
@@ -132,6 +159,7 @@ export const useAuthStore = create<AuthStore>()(
           staff.find(candidate => candidate.status === 'active' && candidate.role === 'admin') ||
           staff.find(candidate => candidate.status === 'active')
         if (!account) return false
+        if (getAccountAccessError(account)) return false
 
         set({
           user: { ...toPublicUser(account), lastLoginAt: new Date().toISOString() },

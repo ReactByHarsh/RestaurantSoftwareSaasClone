@@ -853,10 +853,10 @@ namespace BhojPatra.NativePrintBridge
             using (var sourceStream = new MemoryStream(imageBytes))
             using (var sourceImage = Image.FromStream(sourceStream))
             {
-                // Resize to max 72x48 pixels for most thermal printers
-                var maxWidth = 72;
-                var maxHeight = 48;
-                var ratio = Math.Min((double)maxWidth / sourceImage.Width, (double)maxHeight / sourceImage.Height);
+                // Keep logos readable without turning them into a full-width banner.
+                var maxWidth = 120;
+                var maxHeight = 80;
+                var ratio = Math.Min(1.0, Math.Min((double)maxWidth / sourceImage.Width, (double)maxHeight / sourceImage.Height));
                 var newWidth = Math.Max(1, (int)(sourceImage.Width * ratio));
                 var newHeight = Math.Max(1, (int)(sourceImage.Height * ratio));
 
@@ -890,6 +890,7 @@ namespace BhojPatra.NativePrintBridge
                     // ESC/POS GS v 0 — raster bit image
                     using (var output = new MemoryStream())
                     {
+                        output.Write(new byte[] { 0x1b, 0x61, 0x01 }, 0, 3); // center logo
                         // GS v 0 m xL xH yL yH d1...dk
                         output.WriteByte(0x1d); // GS
                         output.WriteByte(0x76); // v
@@ -899,8 +900,8 @@ namespace BhojPatra.NativePrintBridge
                         output.WriteByte((byte)(newHeight % 256)); // yL
                         output.WriteByte((byte)(newHeight / 256)); // yH
                         output.Write(rasterData, 0, rasterData.Length);
-                        // Add line feed after logo
-                        output.WriteByte(0x0a);
+                        // Add line feed after logo and restore left alignment for text.
+                        output.Write(new byte[] { 0x0a, 0x1b, 0x61, 0x00 }, 0, 4);
 
                         return output.ToArray();
                     }
