@@ -110,6 +110,7 @@ struct LanSaveStatePayload {
     tenant_id: String,
     payload: Value,
     client_id: Option<String>,
+    expected_updated_at: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -204,6 +205,14 @@ fn open_database(app: &AppHandle) -> Result<Connection, String> {
           value TEXT NOT NULL,
           updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         );
+        CREATE TABLE IF NOT EXISTS app_state_history (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          key TEXT NOT NULL,
+          value TEXT NOT NULL,
+          archived_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE INDEX IF NOT EXISTS idx_app_state_history_key_id
+          ON app_state_history(key, id DESC);
       ",
         )
         .map_err(to_error)?;
@@ -289,20 +298,40 @@ fn ensure_windows_firewall_rules() {
 fn ensure_windows_firewall_rules() {}
 
 fn read_json(connection: &Connection, key: &str) -> Result<Option<Value>, String> {
-    let stored = connection
-        .query_row("SELECT value FROM app_state WHERE key = ?1", [key], |row| {
-            row.get::<_, String>(0)
-        })
+    let mut candidates = Vec::new();
+    if let Some(stored) = connection
+        .query_row("SELECT value FROM app_state WHERE key = ?1", [key], |row| row.get::<_, String>(0))
         .optional()
+        .map_err(to_error)?
+    {
+        candidates.push(stored);
+    }
+    let mut statement = connection
+        .prepare("SELECT value FROM app_state_history WHERE key = ?1 ORDER BY id DESC LIMIT 20")
         .map_err(to_error)?;
-
-    stored
-        .map(|payload| serde_json::from_str(&payload).map_err(to_error))
-        .transpose()
+    let history = statement
+        .query_map([key], |row| row.get::<_, String>(0))
+        .map_err(to_error)?;
+    for value in history.flatten() {
+        candidates.push(value);
+    }
+    for payload in candidates {
+        if let Ok(value) = serde_json::from_str(&payload) {
+            return Ok(Some(value));
+        }
+    }
+    Ok(None)
 }
 
 fn write_json(connection: &Connection, key: &str, value: &Value) -> Result<(), String> {
     let payload = serde_json::to_string(value).map_err(to_error)?;
+    connection
+        .execute(
+            "INSERT INTO app_state_history (key, value)
+             SELECT key, value FROM app_state WHERE key = ?1 AND value <> ?2",
+            params![key, payload],
+        )
+        .map_err(to_error)?;
     connection
         .execute(
             "
@@ -315,7 +344,23 @@ fn write_json(connection: &Connection, key: &str, value: &Value) -> Result<(), S
             params![key, payload],
         )
         .map_err(to_error)?;
+    connection
+        .execute(
+            "DELETE FROM app_state_history
+             WHERE key = ?1 AND id NOT IN (
+               SELECT id FROM app_state_history WHERE key = ?1 ORDER BY id DESC LIMIT 20
+             )",
+            [key],
+        )
+        .map_err(to_error)?;
     Ok(())
+}
+
+fn state_updated_at(connection: &Connection, key: &str) -> Result<Option<String>, String> {
+    connection
+        .query_row("SELECT updated_at FROM app_state WHERE key = ?1", [key], |row| row.get(0))
+        .optional()
+        .map_err(to_error)
 }
 
 fn normalize_login(value: &str) -> String {
@@ -569,6 +614,20 @@ fn snapshot_score(snapshot: Option<&Value>) -> usize {
     ]
     .into_iter()
     .sum()
+}
+
+fn would_erase_core_restaurant_data(existing: Option<&Value>, incoming: &Value) -> bool {
+    let Some(existing) = existing.and_then(Value::as_object) else {
+        return false;
+    };
+    let Some(incoming) = incoming.as_object() else {
+        return true;
+    };
+    ["tables", "floors", "menuItems", "menuCategories"].iter().any(|key| {
+        let current_count = existing.get(*key).and_then(Value::as_array).map_or(0, Vec::len);
+        let next_count = incoming.get(*key).and_then(Value::as_array).map_or(0, Vec::len);
+        current_count > 0 && next_count == 0
+    })
 }
 
 fn is_private_ipv4(address: Ipv4Addr) -> bool {
@@ -1059,6 +1118,12 @@ fn save_local_state(
 ) -> Result<(), String> {
     require_license(&guard)?;
     let connection = open_database(&app)?;
+    let existing = read_snapshot(&connection)?;
+    if (snapshot_score(Some(&snapshot)) == 0 && snapshot_score(existing.as_ref()) > 0)
+        || would_erase_core_restaurant_data(existing.as_ref(), &snapshot)
+    {
+        return Err("Refused to replace existing restaurant setup with an incomplete snapshot".to_string());
+    }
     write_json(&connection, "snapshot", &snapshot)?;
     write_json(&connection, "staff", &staff)?;
     let outlet_id = snapshot_outlet(&snapshot).id;
@@ -1235,6 +1300,9 @@ async fn lan_get_state(
             Json(json!({ "error": error })),
         )
     })?;
+    let stored_updated_at = state_updated_at(&connection, "snapshot").map_err(|error| {
+        (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": error })))
+    })?;
     let mut response_headers = HeaderMap::new();
     response_headers.insert(
         header::CACHE_CONTROL,
@@ -1246,7 +1314,7 @@ async fn lan_get_state(
           "exists": true,
           "outletId": outlet.id,
           "tenantId": outlet.tenant_id,
-          "updatedAt": chrono::Utc::now().to_rfc3339(),
+          "updatedAt": stored_updated_at.unwrap_or_else(|| chrono::Utc::now().to_rfc3339()),
           "payload": payload,
         })
     } else {
@@ -1288,15 +1356,29 @@ async fn lan_put_state(
             Json(json!({ "error": error })),
         )
     })?;
+    let existing_updated_at = state_updated_at(&connection, "snapshot").map_err(|error| {
+        (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": error })))
+    })?;
+    if let (Some(expected), Some(actual)) = (&body.expected_updated_at, &existing_updated_at) {
+        if expected != actual {
+            return Err((StatusCode::CONFLICT, Json(json!({
+              "error": "Restaurant data changed on another device. Refresh and retry.",
+              "updatedAt": actual,
+              "payload": existing,
+            }))));
+        }
+    }
     let incoming_score = snapshot_score(Some(&body.payload));
     let existing_score = snapshot_score(existing.as_ref());
-    if incoming_score == 0 && existing_score > 0 {
+    if (incoming_score == 0 && existing_score > 0)
+        || would_erase_core_restaurant_data(existing.as_ref(), &body.payload)
+    {
         return Ok(Json(json!({
           "ok": true,
           "outletId": outlet_id,
-          "updatedAt": chrono::Utc::now().to_rfc3339(),
+          "updatedAt": existing_updated_at.unwrap_or_else(|| chrono::Utc::now().to_rfc3339()),
           "skipped": true,
-          "reason": "Ignored empty snapshot over existing restaurant data",
+          "reason": "Ignored a snapshot that would erase existing restaurant setup data",
           "payload": existing,
         })));
     }
@@ -1366,19 +1448,19 @@ async fn handle_lan_socket(
             let Some(Ok(message)) = message else { break; };
             match message {
               Message::Text(text) => {
+                if text.as_str() == "ping" {
+                  let _ = sender.send(Message::Text("pong".into())).await;
+                  continue;
+                }
                 let event = match serde_json::from_str::<Value>(&text) {
                   Ok(value) => value,
                   Err(_) => continue,
                 };
-                if event.get("type").and_then(Value::as_str) == Some("STATE_UPDATED") {
-                  if let Some(payload) = event.get("payload") {
-                    if let Ok(connection) = open_database(&state.app) {
-                      let _ = write_json(&connection, "snapshot", payload);
-                    }
-                    let _ = state.app.emit("lan_state_updated", payload);
-                  }
+                // State writes must go through the authenticated HTTP endpoint so
+                // empty-snapshot and optimistic-concurrency guards cannot be bypassed.
+                if event.get("type").and_then(Value::as_str) != Some("STATE_UPDATED") {
+                  let _ = state.broadcaster.send(event.to_string());
                 }
-                let _ = state.broadcaster.send(event.to_string());
               }
               Message::Ping(payload) => {
                 let _ = sender.send(Message::Pong(payload)).await;

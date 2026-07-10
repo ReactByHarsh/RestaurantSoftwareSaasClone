@@ -178,6 +178,10 @@ ordersRouter.post('/', async (c) => {
   if (!body.success) return c.json({ error: 'Invalid order', details: body.error.errors }, 400)
   
   const order = body.data
+  const user = (c as any).get('user')
+  if (user?.tenant_id !== 'platform' && order.outletId !== `out_${user?.tenant_id}`) {
+    return c.json({ error: 'Forbidden' }, 403)
+  }
   const tenantId = tenantIdFromOutlet(order.outletId)
   
   try {
@@ -249,6 +253,10 @@ ordersRouter.put('/:id', async (c) => {
   if (!body.success) return c.json({ error: 'Invalid order' }, 400)
   
   const order = body.data
+  const user = (c as any).get('user')
+  if (user?.tenant_id !== 'platform' && order.outletId !== `out_${user?.tenant_id}`) {
+    return c.json({ error: 'Forbidden' }, 403)
+  }
   const tenantId = tenantIdFromOutlet(order.outletId)
   
   try {

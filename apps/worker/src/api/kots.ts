@@ -154,6 +154,10 @@ kotsRouter.post('/:outletId', async (c) => {
   if (!db) return c.json({ error: 'DB not configured' }, 500)
   
   const outletId = c.req.param('outletId')
+  const user = (c as any).get('user')
+  if (user?.tenant_id !== 'platform' && outletId !== `out_${user?.tenant_id}`) {
+    return c.json({ error: 'Forbidden' }, 403)
+  }
   const body = kotSchema.safeParse(await c.req.json())
   if (!body.success) return c.json({ error: 'Invalid KOT' }, 400)
   
@@ -211,6 +215,10 @@ kotsRouter.put('/:outletId/:id', async (c) => {
   if (!db) return c.json({ error: 'DB not configured' }, 500)
   
   const outletId = c.req.param('outletId')
+  const user = (c as any).get('user')
+  if (user?.tenant_id !== 'platform' && outletId !== `out_${user?.tenant_id}`) {
+    return c.json({ error: 'Forbidden' }, 403)
+  }
   const body = kotSchema.safeParse(await c.req.json())
   if (!body.success) return c.json({ error: 'Invalid KOT' }, 400)
   

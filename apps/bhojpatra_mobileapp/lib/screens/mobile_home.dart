@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
 import '../models/session.dart';
@@ -27,6 +28,9 @@ class _MobileHomeState extends State<MobileHome> {
   String? _error;
   bool _connected = false;
   int _reconnectAttempt = 0;
+  int _socketGeneration = 0;
+  Timer? _reconnectTimer;
+  Timer? _heartbeatTimer;
   String? _lastUpdatedAt;
   String? _lastSyncAt;
 
@@ -46,6 +50,9 @@ class _MobileHomeState extends State<MobileHome> {
 
   @override
   void dispose() {
+    _socketGeneration++;
+    _reconnectTimer?.cancel();
+    _heartbeatTimer?.cancel();
     _socket?.sink.close();
     super.dispose();
   }
@@ -84,13 +91,20 @@ class _MobileHomeState extends State<MobileHome> {
   }
 
   void _connectRealtime() {
+    _reconnectTimer?.cancel();
+    _heartbeatTimer?.cancel();
+    final generation = ++_socketGeneration;
     _socket?.sink.close();
     try {
       _socket = _api.connectRealtime();
       setState(() => _connected = false);
       _socket!.stream.listen(
         (message) {
-          if (message is! String || message == 'pong') return;
+          if (generation != _socketGeneration || message is! String) return;
+          if (message == 'pong') {
+            if (mounted && !_connected) setState(() => _connected = true);
+            return;
+          }
           final event = jsonDecode(message) as Map<String, dynamic>;
           final payload = event['payload'];
           final eventType = text(event['type']);
@@ -119,8 +133,14 @@ class _MobileHomeState extends State<MobileHome> {
             setState(() => _lastUpdatedAt = timestamp);
           }
         },
-        onError: (_) {},
+        onError: (_) {
+          if (generation == _socketGeneration && mounted) {
+            setState(() => _connected = false);
+          }
+        },
         onDone: () {
+          if (generation != _socketGeneration) return;
+          _heartbeatTimer?.cancel();
           if (mounted) {
             setState(() => _connected = false);
           }
@@ -128,11 +148,17 @@ class _MobileHomeState extends State<MobileHome> {
               ? 20
               : [2, 3, 5, 8, 13, 20][_reconnectAttempt];
           _reconnectAttempt = (_reconnectAttempt + 1).clamp(0, 5);
-          Future.delayed(Duration(seconds: delaySeconds), () {
-            if (mounted) _connectRealtime();
+          _reconnectTimer = Timer(Duration(seconds: delaySeconds), () {
+            if (mounted && generation == _socketGeneration) _connectRealtime();
           });
         },
       );
+      _heartbeatTimer = Timer.periodic(const Duration(seconds: 15), (_) {
+        if (!mounted || generation != _socketGeneration) return;
+        try {
+          _socket?.sink.add('ping');
+        } catch (_) {}
+      });
     } catch (_) {}
   }
 
@@ -151,14 +177,32 @@ class _MobileHomeState extends State<MobileHome> {
     }
     setState(() => _syncing = true);
     try {
-      await _api.saveState(next);
+      final accepted = await _api.saveState(next);
       if (mounted) {
         final now = DateTime.now().toIso8601String();
         setState(() {
-          _snapshot = next;
+          _snapshot = accepted;
           _lastSyncAt = now;
           _lastUpdatedAt = now;
         });
+      }
+    } on StateConflictException catch (error) {
+      if (mounted) {
+        setState(() {
+          if (error.currentSnapshot != null) {
+            _snapshot = error.currentSnapshot!;
+          }
+          _lastUpdatedAt = error.updatedAt.isEmpty
+              ? DateTime.now().toIso8601String()
+              : error.updatedAt;
+        });
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text(
+              'Another device updated the restaurant. Latest data loaded; please retry your action.',
+            ),
+          ),
+        );
       }
     } catch (error) {
       if (mounted) {

@@ -381,4 +381,5 @@ export interface RealtimeEvent {
   outletId: string
   payload: Record<string, unknown>
   timestamp: string
+  clientId?: string
 }

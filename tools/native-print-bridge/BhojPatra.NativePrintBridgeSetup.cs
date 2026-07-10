@@ -39,6 +39,7 @@ namespace BhojPatra.NativePrintBridgeSetup
                 CreateStartupFallback(bridgePath);
                 TryCreateScheduledTask(bridgePath);
                 CreateStartMenuShortcuts(installDir, bridgePath);
+                EnsureDesktopLanFirewallRules();
 
                 StartBridge(bridgePath);
                 var health = WaitForHealth();
@@ -215,6 +216,32 @@ namespace BhojPatra.NativePrintBridgeSetup
                 UseShellExecute = true,
                 WindowStyle = ProcessWindowStyle.Hidden
             });
+        }
+
+        private static void EnsureDesktopLanFirewallRules()
+        {
+            var command =
+                "/c netsh advfirewall firewall delete rule name=\"BhojPatra Desk LAN TCP 3000\" & " +
+                "netsh advfirewall firewall add rule name=\"BhojPatra Desk LAN TCP 3000\" dir=in action=allow protocol=TCP localport=3000 profile=private,domain description=\"BhojPatra Desk LAN realtime API\" & " +
+                "netsh advfirewall firewall delete rule name=\"BhojPatra Desk LAN Discovery UDP 3001\" & " +
+                "netsh advfirewall firewall add rule name=\"BhojPatra Desk LAN Discovery UDP 3001\" dir=in action=allow protocol=UDP localport=3001 profile=private,domain description=\"BhojPatra Desk mobile discovery\"";
+            try
+            {
+                var process = Process.Start(new ProcessStartInfo
+                {
+                    FileName = "cmd.exe",
+                    Arguments = command,
+                    UseShellExecute = true,
+                    Verb = "runas",
+                    WindowStyle = ProcessWindowStyle.Hidden
+                });
+                if (process != null) process.WaitForExit(30000);
+            }
+            catch
+            {
+                // The bridge still works locally if UAC is declined. Diagnostics
+                // explains that the desktop LAN ports must then be allowed manually.
+            }
         }
 
         private static string WaitForHealth()

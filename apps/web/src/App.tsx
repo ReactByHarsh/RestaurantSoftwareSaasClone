@@ -24,7 +24,7 @@ import { realtimeClient } from './lib/realtime'
 import { useBillingStore } from './store/billingStore'
 import { useStaffStore } from './store/staffStore'
 import { isTauriDesktop } from './lib/localDb'
-import { fetchCloudSnapshot } from './lib/cloudSync'
+import { fetchCloudSnapshot, getSnapshotDataScore, saveCloudSnapshot } from './lib/cloudSync'
 
 function getNormalizedSnapshotIfNeeded(state: ReturnType<typeof useBillingStore.getState>) {
   const normalized = state.exportSnapshot()
@@ -116,33 +116,52 @@ export default function App() {
   }, [])
 
   useEffect(() => {
-    return realtimeClient.subscribe((event) => {
-      if (event.type !== 'STATE_UPDATED') return
-      const payload = event.payload
-      if (!payload || !Array.isArray((payload as any).orders) || !Array.isArray((payload as any).tables)) return
-      useBillingStore.getState().importSnapshot(payload as any, true)
-    })
-  }, [])
-
-  useEffect(() => {
-    if (!user) return
+    if (!user || isTauriDesktop()) return
     const cloud = useBillingStore.getState().cloudSync
     if (!cloud.enabled || !cloud.serverUrl || !cloud.outletId || !cloud.accountLogin || !cloud.accountSecret) return
     if (user.tenantId === 'platform') return
 
     const auth = { accountLogin: cloud.accountLogin, accountSecret: cloud.accountSecret }
     let cancelled = false
+    let hydrated = false
+    let applyingRemote = false
+    let saveTimer: number | undefined
+
+    const withActiveCloudCredentials = (payload: any) => ({
+      ...payload,
+      cloudSync: {
+        ...(payload.cloudSync ?? {}),
+        ...cloud,
+        enabled: true,
+        accountSecret: cloud.accountSecret,
+      },
+    })
 
     const refreshCloudData = async () => {
       try {
         const remote = await fetchCloudSnapshot(cloud.outletId, cloud.serverUrl, auth)
         if (cancelled) return
         if (remote.exists) {
-          useBillingStore.getState().importSnapshot(remote.payload)
-          useBillingStore.getState().updateCloudSyncSettings({ lastSyncedAt: new Date().toISOString() })
+          const billing = useBillingStore.getState()
+          const localSnapshot = billing.exportSnapshot()
+          const belongsToCurrentTenant = localSnapshot.outlet.tenantId === user.tenantId
+          const localUploadedAt = Date.parse(cloud.lastCloudUploadedAt ?? '')
+          const remoteUpdatedAt = Date.parse(remote.updatedAt)
+          const remoteIsNewer = Number.isFinite(remoteUpdatedAt)
+            && (!Number.isFinite(localUploadedAt) || remoteUpdatedAt > localUploadedAt)
+          if (!belongsToCurrentTenant || getSnapshotDataScore(localSnapshot) === 0 || remoteIsNewer) {
+            applyingRemote = true
+            billing.importSnapshot(withActiveCloudCredentials(remote.payload))
+            applyingRemote = false
+          }
+          applyingRemote = true
+          billing.updateCloudSyncSettings({ lastSyncedAt: remote.updatedAt, lastCloudDownloadedAt: remote.updatedAt })
+          applyingRemote = false
         }
       } catch {
         // Network error — keep using local data as fallback.
+      } finally {
+        hydrated = true
       }
     }
 
@@ -155,8 +174,54 @@ export default function App() {
       accountSecret: cloud.accountSecret,
     })
 
+    const unsubscribeRealtime = realtimeClient.subscribe((event) => {
+      if (event.type !== 'STATE_UPDATED') return
+      const payload = event.payload as any
+      if (!payload || !Array.isArray(payload.orders) || !Array.isArray(payload.tables)) return
+      applyingRemote = true
+      useBillingStore.getState().importSnapshot(withActiveCloudCredentials(payload), true)
+      useBillingStore.getState().updateCloudSyncSettings({
+        lastSyncedAt: event.timestamp,
+        lastCloudDownloadedAt: event.timestamp,
+      })
+      applyingRemote = false
+    })
+
+    const unsubscribeStore = useBillingStore.subscribe(() => {
+      if (!hydrated || applyingRemote || cancelled) return
+      window.clearTimeout(saveTimer)
+      saveTimer = window.setTimeout(async () => {
+        if (cancelled) return
+        const current = useBillingStore.getState()
+        const currentCloud = current.cloudSync
+        if (!currentCloud.enabled || !currentCloud.accountLogin || !currentCloud.accountSecret) return
+        try {
+          const result = await saveCloudSnapshot(
+            currentCloud.outletId,
+            currentCloud.tenantId || current.outlet.tenantId,
+            current.exportSnapshot(),
+            realtimeClient.getClientId(),
+            currentCloud.serverUrl,
+            { accountLogin: currentCloud.accountLogin, accountSecret: currentCloud.accountSecret },
+          )
+          if (cancelled) return
+          applyingRemote = true
+          if (result.skipped && result.payload) {
+            current.importSnapshot(withActiveCloudCredentials(result.payload), true)
+          }
+          current.updateCloudSyncSettings({ lastSyncedAt: result.updatedAt, lastCloudUploadedAt: result.updatedAt })
+          applyingRemote = false
+        } catch (error) {
+          console.error('Web cloud autosave failed', error)
+        }
+      }, 750)
+    })
+
     return () => {
       cancelled = true
+      window.clearTimeout(saveTimer)
+      unsubscribeStore()
+      unsubscribeRealtime()
     }
   }, [user?.id])
 

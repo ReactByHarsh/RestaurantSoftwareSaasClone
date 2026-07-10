@@ -115,6 +115,7 @@ export default function DesktopBootstrap({ children }: { children: ReactNode }) 
     }
 
     const hydrateRestaurantState = async () => {
+      let loadedSuccessfully = false
       try {
         const data = await loadDesktopState()
         if (disposed) return
@@ -126,13 +127,15 @@ export default function DesktopBootstrap({ children }: { children: ReactNode }) 
         if (data?.staff?.length) {
           useStaffStore.getState().replaceStaff(data.staff)
         }
+        loadedSuccessfully = true
       } catch (error) {
         console.error('Failed to load desktop state', error)
+        useUIStore.getState().addToast('error', 'Local restaurant data could not be loaded. Automatic saving is paused to protect the existing database.', 'Data Protection')
       } finally {
         if (disposed) return
-        hydrationComplete = true
+        hydrationComplete = loadedSuccessfully
         setReady(true)
-        queueSave()
+        if (loadedSuccessfully) queueSave()
         scheduleCloudSync()
         if (isTauriDesktop()) void runAutoUpdate()
         const cloud = useBillingStore.getState().cloudSync

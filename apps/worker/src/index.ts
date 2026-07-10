@@ -140,6 +140,7 @@ const appSnapshotSchema = z.object({
   payload: z.record(z.unknown()),
   clientId: z.string().optional(),
   messageId: z.string().optional(),
+  expectedUpdatedAt: z.string().optional(),
 })
 
 const customerAccountSchema = staffSchema.and(z.object({
@@ -373,6 +374,18 @@ function getSnapshotDataScore(payload: Record<string, unknown> | null | undefine
   ].reduce((score, value) => score + value, 0)
 }
 
+function wouldEraseCoreRestaurantData(
+  existing: Record<string, unknown> | null | undefined,
+  incoming: Record<string, unknown>,
+) {
+  if (!existing) return false
+  return ['tables', 'floors', 'menuItems', 'menuCategories'].some((key) => {
+    const current = existing[key]
+    const next = incoming[key]
+    return Array.isArray(current) && current.length > 0 && (!Array.isArray(next) || next.length === 0)
+  })
+}
+
 type SnapshotCounts = {
   menuItems: number
   menuCategories: number
@@ -518,17 +531,17 @@ async function projectSnapshotToRelational(db: D1Database, outletId: string, sna
   ).run()
 
   const scopedDeleteTables = [
-    'restaurant_tables',
-    'floors',
-    'stations',
-    'menu_items',
-    'menu_categories',
-    'inventory_items',
     'payments',
     'kot_items',
     'kots',
     'order_items',
     'orders',
+    'restaurant_tables',
+    'menu_items',
+    'floors',
+    'stations',
+    'menu_categories',
+    'inventory_items',
     'audit_logs',
   ]
   for (const table of scopedDeleteTables) {
@@ -961,7 +974,8 @@ export class RealtimeHub {
     if (existing) {
       try {
         const existingPayload = JSON.parse(existing.payload_json) as Record<string, unknown>
-        if (getSnapshotDataScore(data.payload) === 0 && getSnapshotDataScore(existingPayload) > 0) {
+        if ((getSnapshotDataScore(data.payload) === 0 && getSnapshotDataScore(existingPayload) > 0)
+          || wouldEraseCoreRestaurantData(existingPayload, data.payload)) {
           const message = JSON.stringify({
             type: 'STATE_UPDATED',
             updatedAt: existing.updated_at,
@@ -1760,15 +1774,23 @@ app.put('/api/v1/outlets/:outletId/state', async (c) => {
   if (outletId !== `out_${body.data.tenantId}`) return c.json({ error: 'Outlet does not belong to tenant' }, 403)
 
   const existing = await readSnapshotRow(db, outletId)
+  if (body.data.expectedUpdatedAt && existing?.updatedAt && body.data.expectedUpdatedAt !== existing.updatedAt) {
+    return c.json({
+      error: 'Restaurant data changed on another device. Refresh and retry.',
+      outletId,
+      updatedAt: existing.updatedAt,
+      payload: existing.payload,
+    }, 409)
+  }
   const incomingScore = getSnapshotDataScore(body.data.payload)
   const existingScore = getSnapshotDataScore(existing?.payload)
-  if (incomingScore === 0 && existingScore > 0) {
+  if ((incomingScore === 0 && existingScore > 0) || wouldEraseCoreRestaurantData(existing?.payload, body.data.payload)) {
     return c.json({
       ok: true,
       outletId,
       updatedAt: existing?.updatedAt ?? new Date().toISOString(),
       skipped: true,
-      reason: 'Ignored empty snapshot over existing restaurant data',
+      reason: 'Ignored a snapshot that would erase existing restaurant setup data',
       payload: existing?.payload,
     })
   }
@@ -1783,7 +1805,20 @@ app.put('/api/v1/outlets/:outletId/state', async (c) => {
     }).catch((error) => console.error('Optional realtime mirror failed:', error)))
   }
 
-  const persistSnapshot = db.prepare(`
+  if (existing) {
+    await db.prepare(`
+      INSERT INTO app_snapshot_history (outlet_id, tenant_id, payload_json, archived_at)
+      VALUES (?, ?, ?, ?)
+    `).bind(outletId, existing.tenantId, JSON.stringify(existing.payload), updatedAt).run()
+    await db.prepare(`
+      DELETE FROM app_snapshot_history
+      WHERE outlet_id = ? AND id NOT IN (
+        SELECT id FROM app_snapshot_history WHERE outlet_id = ? ORDER BY id DESC LIMIT 20
+      )
+    `).bind(outletId, outletId).run()
+  }
+
+  await db.prepare(`
     INSERT INTO app_snapshots (outlet_id, tenant_id, payload_json, updated_at)
     VALUES (?, ?, ?, ?)
     ON CONFLICT(outlet_id) DO UPDATE SET
@@ -1794,7 +1829,7 @@ app.put('/api/v1/outlets/:outletId/state', async (c) => {
 
   const projectSnapshot = projectSnapshotToRelational(db, outletId, body.data.payload, updatedAt)
     .catch((error) => console.error('Snapshot projection failed:', error))
-  c.executionCtx.waitUntil(Promise.all([persistSnapshot, projectSnapshot]))
+  c.executionCtx.waitUntil(projectSnapshot)
 
   return c.json({ ok: true, outletId, updatedAt })
 })

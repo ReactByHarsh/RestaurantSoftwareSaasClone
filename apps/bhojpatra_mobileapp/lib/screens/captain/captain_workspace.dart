@@ -605,7 +605,7 @@ class _MenuAndCartView extends StatelessWidget {
                         style: const TextStyle(
                           fontWeight: FontWeight.w900,
                           fontSize: 18,
-                          color: Color(0xff0f6b47),
+                          color: Color(0xfff36b21),
                         ),
                       ),
                     ],

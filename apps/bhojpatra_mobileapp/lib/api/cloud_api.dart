@@ -9,6 +9,7 @@ class CloudApi {
   CloudApi(this.session);
 
   final SavedSession session;
+  String? _lastStateUpdatedAt;
 
   String get _base => cleanBase(session.serverUrl);
 
@@ -112,12 +113,13 @@ class CloudApi {
     }
     final payload = jsonDecode(response.body) as Map<String, dynamic>;
     if (payload['exists'] == true && payload['payload'] is Map) {
+      _lastStateUpdatedAt = text(payload['updatedAt']);
       return Map<String, dynamic>.from(payload['payload'] as Map);
     }
     return emptySnapshot(session);
   }
 
-  Future<void> saveState(Map<String, dynamic> snapshot) async {
+  Future<Map<String, dynamic>> saveState(Map<String, dynamic> snapshot) async {
     final tenantId = text(
       snapshotValue(snapshot, 'outlet', 'tenantId'),
       fallback: session.tenantId,
@@ -132,11 +134,31 @@ class CloudApi {
         'payload': snapshot,
         'clientId':
             'flutter-${session.role}-${DateTime.now().millisecondsSinceEpoch}',
+        if (_lastStateUpdatedAt != null)
+          'expectedUpdatedAt': _lastStateUpdatedAt,
       }),
     );
+    final payload = _jsonMap(response.body);
+    if (response.statusCode == 409) {
+      throw StateConflictException(
+        text(payload['error'], fallback: 'Restaurant data changed'),
+        payload['payload'] is Map
+            ? Map<String, dynamic>.from(payload['payload'] as Map)
+            : null,
+        text(payload['updatedAt']),
+      );
+    }
     if (response.statusCode < 200 || response.statusCode >= 300) {
       throw Exception('Cloud sync save failed (${response.statusCode})');
     }
+    _lastStateUpdatedAt = text(
+      payload['updatedAt'],
+      fallback: _lastStateUpdatedAt ?? '',
+    );
+    if (payload['payload'] is Map) {
+      return Map<String, dynamic>.from(payload['payload'] as Map);
+    }
+    return snapshot;
   }
 
   WebSocketChannel connectRealtime() {
@@ -153,6 +175,21 @@ class CloudApi {
         );
     return WebSocketChannel.connect(uri);
   }
+}
+
+class StateConflictException implements Exception {
+  const StateConflictException(
+    this.message,
+    this.currentSnapshot,
+    this.updatedAt,
+  );
+
+  final String message;
+  final Map<String, dynamic>? currentSnapshot;
+  final String updatedAt;
+
+  @override
+  String toString() => message;
 }
 
 Map<String, dynamic> _jsonMap(String body) {
