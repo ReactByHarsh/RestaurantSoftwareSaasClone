@@ -250,7 +250,14 @@ export default function PaymentDrawer({ onClose }: Props) {
                           value={p.amount || ''}
                           onChange={(e) => {
                             const val = parseFloat(e.target.value) || 0;
-                            setPayments(prev => prev.map((item, i) => i === idx ? { ...item, amount: val, returnAmt: Math.max(0, item.tender - val) } : item))
+                            setPayments(prev => prev.map((item, i) => {
+                              if (i !== idx) return item
+                              // If the row was an exact-tender payment, editing its amount
+                              // means the cashier is changing the tender itself (for example
+                              // Cash remaining -> ₹500), not asking for change.
+                              const tender = item.tender === item.amount ? val : item.tender
+                              return { ...item, amount: val, tender, returnAmt: Math.max(0, tender - val) }
+                            }))
                           }}
                           className="w-full bg-slate-100 border-none rounded py-1.5 px-2 text-sm text-right font-bold text-slate-700 outline-none focus:ring-2 focus:ring-primary/50"
                         />

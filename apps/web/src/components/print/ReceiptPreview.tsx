@@ -153,7 +153,7 @@ export default function ReceiptPreview({
                 <p className="thermal-section-title">UPI PAYMENT</p>
                 <img src={upiQrByPart[part.section]} alt="UPI payment QR" />
                 {printSettings.showUpiIdOnBill === true && <p>{printSettings.upiId}</p>}
-                <p>{formatPaise(part.combinedNetPaise ?? part.netPaise)}</p>
+                <p>{formatPaise(part.upiAmountPaise ?? part.combinedNetPaise ?? part.netPaise)}</p>
               </div>
             </>
           )}

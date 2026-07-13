@@ -37,6 +37,8 @@ export interface ReceiptPrintPart {
   foodNetPaise?: number
   previousPartsNetPaise?: number
   combinedNetPaise?: number
+  /** Amount encoded in the UPI QR, which may be only one part of a split payment. */
+  upiAmountPaise?: number
   showPaymentDetails: boolean
   showGstin: boolean
   documentLabel: string
@@ -123,6 +125,20 @@ function paymentSummaryLines(order: Order, payments: Payment[], width: number) {
       .map(([method, amount]) => columns(method.toUpperCase(), money(amount), width)),
     columns('Pending', money(pendingPaise), width),
   ]
+}
+
+function receiptUpiAmountPaise(order: Order, payments: Payment[]) {
+  const successfulPayments = payments.filter((payment) => payment.status === 'success')
+  // Once a bill has been settled, encode only the amount actually assigned to UPI.
+  // This prevents a cash + UPI split from generating a QR for the full bill again.
+  if (successfulPayments.length > 0) {
+    return successfulPayments
+      .filter((payment) => payment.method === 'upi')
+      .reduce((sum, payment) => sum + payment.amountPaise, 0)
+  }
+  // Draft/proforma receipts have no payment rows yet, so the full payable amount is
+  // the amount the customer should be invited to pay by UPI.
+  return Math.max(0, order.totalPaise)
 }
 
 function upiPaymentLines(order: Order, settings: ReceiptPrintInfo, amountPaise: number, width: number) {
@@ -304,7 +320,7 @@ export function buildReceiptPrintText(
     lines.push(columns('Paid', money(order.paidPaise), width))
     payments.forEach(payment => lines.push(columns(payment.method.toUpperCase(), money(payment.amountPaise), width)))
   }
-  lines.push(...upiPaymentLines(order, settings, order.totalPaise, width))
+  lines.push(...upiPaymentLines(order, settings, receiptUpiAmountPaise(order, payments), width))
   lines.push(rule(width), center(settings.footerText, width))
   return lines.join('\n')
 }
@@ -337,7 +353,7 @@ export function buildReceiptPrintParts(
     const printItems = section.printItems
     const totals = section.totals
     const previousPartsNetPaise = partCount > 1 && partIndex === partCount ? Math.max(0, grandTotalPaise - totals.netPaise) : undefined
-    const paymentAmountPaise = previousPartsNetPaise !== undefined ? grandTotalPaise : totals.netPaise
+    const paymentAmountPaise = receiptUpiAmountPaise(order, payments)
     const lines = [
       center(settings.businessName || outlet.name, width),
       ...(outlet.address ? wrappedCentered(outlet.address, width) : []),
@@ -393,6 +409,7 @@ export function buildReceiptPrintParts(
       ...totals,
       previousPartsNetPaise,
       combinedNetPaise: previousPartsNetPaise !== undefined ? grandTotalPaise : undefined,
+      upiAmountPaise: paymentAmountPaise,
       showPaymentDetails,
       showGstin: shouldShowGstin(settings, partIndex, partCount),
       documentLabel,
