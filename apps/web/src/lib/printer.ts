@@ -305,10 +305,6 @@ function isPrivateLanHost(hostname: string) {
   const host = hostname.replace(/^\[|\]$/g, '').toLowerCase()
   if (host === 'localhost' || host.endsWith('.pages.dev') || host.endsWith('.workers.dev')) return false
   if (host.endsWith('.local')) return true
-  // Local printer DNS names are commonly single-label names such as `POS80` or
-  // `receipt-printer`. They are not public DNS names, so allow them as explicit
-  // LAN targets instead of sending the unnormalised value to the bridge.
-  if (/^[a-z0-9][a-z0-9-]*$/i.test(host)) return true
   const parts = host.split('.').map(part => Number(part))
   if (parts.length !== 4 || parts.some(part => !Number.isInteger(part) || part < 0 || part > 255)) return false
   return parts[0] === 10 ||
@@ -327,7 +323,8 @@ export function normalizeNetworkPrinterAddress(value?: string) {
       if (!parsed.hostname) return ''
       return `tcp://${parsed.hostname}:${parsed.port || '9100'}`
     }
-    if (['http:', 'https:'].includes(parsed.protocol) && isPrivateLanHost(parsed.hostname)) {
+    if (['http:', 'https:'].includes(parsed.protocol) &&
+      (isPrivateLanHost(parsed.hostname) || /^[a-z0-9][a-z0-9-]*$/i.test(parsed.hostname))) {
       return `tcp://${parsed.hostname}:${parsed.port || '9100'}`
     }
   } catch {
@@ -337,7 +334,12 @@ export function normalizeNetworkPrinterAddress(value?: string) {
   const hostPort = raw.match(/^([a-z0-9.-]+|\[[a-f0-9:]+\])(?::(\d{2,5}))?$/i)
   if (!hostPort) return ''
   const host = hostPort[1].replace(/^\[|\]$/g, '')
-  if (!isPrivateLanHost(host)) return ''
+  const hasExplicitPort = Boolean(hostPort[2])
+  const isSingleLabelHost = /^[a-z0-9][a-z0-9-]*$/i.test(host)
+  // A bare value such as POS-80C is overwhelmingly likely to be a Windows
+  // printer queue name. Only treat a single-label value as LAN when the user
+  // explicitly supplies a port (POS-80C:9100) or a URL scheme.
+  if (!isPrivateLanHost(host) && !(hasExplicitPort && isSingleLabelHost)) return ''
   if (!/^[a-z0-9.-]+$|^[a-f0-9:]+$/i.test(host)) return ''
   return `tcp://${host}:${hostPort[2] || '9100'}`
 }

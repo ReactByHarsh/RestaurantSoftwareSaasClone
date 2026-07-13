@@ -24,7 +24,7 @@ namespace BhojPatra.NativePrintBridge
 {
     internal static class Program
     {
-        internal const string Version = "3.1.1-host-recovery";
+        internal const string Version = "3.1.2-queue-name-fix";
         private static readonly string[] SupportedFeatures = new[] { "qr", "cashdrawer", "logo", "network-print", "printer-status", "lan-host", "lan-discovery", "lan-realtime", "offline-state", "log-rotation", "graceful-shutdown" };
         private static readonly JavaScriptSerializer Json = new JavaScriptSerializer { MaxJsonLength = 20 * 1024 * 1024 };
         private static readonly object LastErrorLock = new object();
@@ -726,6 +726,16 @@ namespace BhojPatra.NativePrintBridge
 
         public static void Print(string printer, string content, string jobName, PrintOptions options)
         {
+            var installed = ListPrinters();
+            var exactInstalledPrinter = installed
+                .Select(row => Convert.ToString(row["name"]))
+                .FirstOrDefault(name => String.Equals(name, (printer ?? "").Trim(), StringComparison.OrdinalIgnoreCase));
+            if (!String.IsNullOrWhiteSpace(exactInstalledPrinter))
+            {
+                RawPrinter.Send(exactInstalledPrinter, EscPosBytes(content, options), jobName);
+                return;
+            }
+
             NetworkTarget target;
             if (TryParseNetworkTarget(printer, out target))
             {
@@ -733,7 +743,7 @@ namespace BhojPatra.NativePrintBridge
                 // target. This keeps working even when a customer saved a hostname
                 // that Windows can no longer resolve, while preserving raw TCP for
                 // printers that are not installed in the spooler.
-                var installedQueue = ResolveNetworkQueue(target, ListPrinters());
+                var installedQueue = ResolveNetworkQueue(target, installed);
                 if (!String.IsNullOrWhiteSpace(installedQueue))
                 {
                     RawPrinter.Send(installedQueue, EscPosBytes(content, options), jobName);
@@ -743,7 +753,6 @@ namespace BhojPatra.NativePrintBridge
                 return;
             }
 
-            var installed = ListPrinters();
             var resolvedPrinter = ResolveInstalledPrinter(printer, installed, null);
             if (String.IsNullOrWhiteSpace(resolvedPrinter))
             {
@@ -1166,9 +1175,17 @@ namespace BhojPatra.NativePrintBridge
 
             var match = Regex.Match(raw, @"^([a-z0-9.-]+|\[[a-f0-9:]+\])(?::(\d{2,5}))?$", RegexOptions.IgnoreCase);
             if (!match.Success) return false;
+            var rawHost = match.Groups[1].Value.Trim('[', ']');
+            IPAddress parsedAddress;
+            var hasExplicitPort = match.Groups[2].Success;
+            var isIpAddress = IPAddress.TryParse(rawHost, out parsedAddress);
+            var isMdnsHost = rawHost.EndsWith(".local", StringComparison.OrdinalIgnoreCase);
+            // POS-80C, XP-80C and similar values are Windows queue names, not DNS
+            // hosts. A raw hostname is a LAN target only when a port is explicit.
+            if (!hasExplicitPort && !isIpAddress && !isMdnsHost) return false;
             var port = 9100;
             if (match.Groups[2].Success) Int32.TryParse(match.Groups[2].Value, out port);
-            target = new NetworkTarget(match.Groups[1].Value.Trim('[', ']'), port);
+            target = new NetworkTarget(rawHost, port);
             return true;
         }
 
