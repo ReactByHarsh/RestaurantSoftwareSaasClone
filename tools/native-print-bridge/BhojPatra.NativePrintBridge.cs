@@ -24,7 +24,7 @@ namespace BhojPatra.NativePrintBridge
 {
     internal static class Program
     {
-        internal const string Version = "3.1.0-all-in-one-resilient";
+        internal const string Version = "3.1.1-host-recovery";
         private static readonly string[] SupportedFeatures = new[] { "qr", "cashdrawer", "logo", "network-print", "printer-status", "lan-host", "lan-discovery", "lan-realtime", "offline-state", "log-rotation", "graceful-shutdown" };
         private static readonly JavaScriptSerializer Json = new JavaScriptSerializer { MaxJsonLength = 20 * 1024 * 1024 };
         private static readonly object LastErrorLock = new object();

@@ -580,7 +580,7 @@ export default function SettingsScreen() {
                     The bridge starts with Windows, keeps printer settings and restaurant data locally, and connects captain and kitchen phones through the restaurant router even when the internet is unavailable.
                   </p>
                   {!lanStatus?.running && (
-                    <a href="/downloads/BhojPatra-Printer-Bridge-Setup.exe?v=3.1.0" className="mt-3 inline-flex rounded-xl bg-slate-900 px-3 py-2 text-[10px] font-black text-white">
+                    <a href="/downloads/BhojPatra-Printer-Bridge-Setup.exe?v=3.1.1" className="mt-3 inline-flex rounded-xl bg-slate-900 px-3 py-2 text-[10px] font-black text-white">
                       DOWNLOAD / REPAIR BRIDGE
                     </a>
                   )}

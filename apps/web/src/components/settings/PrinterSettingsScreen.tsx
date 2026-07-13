@@ -576,7 +576,7 @@ export default function PrinterSettingsScreen() {
                     )}
                     <div className="flex flex-col gap-2 rounded-lg bg-slate-50 p-2.5 sm:flex-row sm:items-center sm:justify-between">
                       <p className="text-[10px] font-bold text-slate-500">All-in-one Windows bridge with automatic startup and crash recovery. Your printer and paper settings stay saved on this computer.</p>
-                      <a href="/downloads/BhojPatra-Printer-Bridge-Setup.exe?v=3.1.0" download className="inline-flex min-h-8 shrink-0 items-center justify-center gap-1.5 rounded-lg bg-primary px-3 py-2 text-[10px] font-black text-white">
+                      <a href="/downloads/BhojPatra-Printer-Bridge-Setup.exe?v=3.1.1" download className="inline-flex min-h-8 shrink-0 items-center justify-center gap-1.5 rounded-lg bg-primary px-3 py-2 text-[10px] font-black text-white">
                         <Download size={13} /> DOWNLOAD ALL-IN-ONE BRIDGE
                       </a>
                     </div>
