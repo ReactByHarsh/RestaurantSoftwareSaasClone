@@ -420,19 +420,60 @@ async function printBridge(settings: PrinterTransportSettings, job: PrintJob) {
   if (!settings.printerName.trim()) throw new Error('Select a printer queue in Settings first.')
   await waitForBridge(settings.bridgeUrl)
   const networkTarget = normalizeNetworkPrinterAddress(settings.printerName)
-  const response = await fetch(`${resolveBridgeUrlInput(settings.bridgeUrl)}/print`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
-    body: JSON.stringify({
-      printer: networkTarget || settings.printerName,
-      jobName: job.jobName,
-      contentType: 'text/plain',
-      content: job.text,
-      logoDataUrl: job.logoDataUrl ?? null,
-      options: { raw: true, autoCut: settings.autoCut !== false, openCashDrawer: Boolean(settings.openCashDrawer), qrCodes: job.qrCodes ?? [] },
-    }),
+  const requestedPrinter = networkTarget || settings.printerName
+  const sendToBridge = async (printer: string) => {
+    const response = await fetch(`${resolveBridgeUrlInput(settings.bridgeUrl)}/print`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+      body: JSON.stringify({
+        printer,
+        jobName: job.jobName,
+        contentType: 'text/plain',
+        content: job.text,
+        logoDataUrl: job.logoDataUrl ?? null,
+        options: { raw: true, autoCut: settings.autoCut !== false, openCashDrawer: Boolean(settings.openCashDrawer), qrCodes: job.qrCodes ?? [] },
+      }),
+    })
+    if (!response.ok) throw new Error(await bridgeErrorMessage(response))
+  }
+
+  try {
+    await sendToBridge(requestedPrinter)
+  } catch (error) {
+    // A stale hostname can fail even while the bridge and the Windows queue are
+    // healthy. Enumerate queues once and retry through the installed queue so the
+    // cashier does not need to know the printer's IP address.
+    if (!networkTarget || !isHostResolutionError(error)) throw error
+    let fallback: string | undefined
+    try {
+      fallback = await findInstalledQueueFallback(settings.bridgeUrl, networkTarget)
+    } catch {
+      throw error
+    }
+    if (!fallback) throw error
+    await sendToBridge(fallback)
+  }
+}
+
+function isHostResolutionError(error: unknown) {
+  return /no such host|enotfound|name or service not known|could not resolve/i.test(error instanceof Error ? error.message : String(error || ''))
+}
+
+async function findInstalledQueueFallback(bridgeUrl: string | undefined, networkTarget: string) {
+  const printers = await discoverBridgePrinters(bridgeUrl)
+  const parsed = new URL(networkTarget)
+  const host = parsed.hostname.toLowerCase()
+  const hostKey = host.replace(/[^a-z0-9]/g, '')
+  const fields = (printer: BridgePrinter) => `${printer.name} ${printer.label} ${printer.portName ?? ''} ${printer.driverName ?? ''}`.toLowerCase()
+  const matching = printers.filter((printer) => {
+    const value = fields(printer)
+    return value.includes(host) || value.replace(/[^a-z0-9]/g, '').includes(hostKey)
   })
-  if (!response.ok) throw new Error(await bridgeErrorMessage(response))
+  if (matching.length === 1) return matching[0].name
+
+  const preferred = printers.filter((printer) => printer.isDefault || /pos|thermal|receipt|printer|epson|rongta|kpc|80mm|58mm/i.test(fields(printer)))
+  if (preferred.length === 1) return preferred[0].name
+  return printers.length === 1 ? printers[0].name : undefined
 }
 
 async function bridgeErrorMessage(response: Response) {
