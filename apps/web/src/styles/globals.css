@@ -104,9 +104,9 @@ button, a, [role="button"] { min-height: 32px; }
   --thermal-heading-base: 11.5px;
   --thermal-total-base: 10.75px;
   --thermal-line-height: 1.14;
-  --thermal-qty-col: 16px;
-  --thermal-rate-col: 34px;
-  --thermal-amount-col: 40px;
+  --thermal-qty-col: 18px;
+  --thermal-rate-col: 48px;
+  --thermal-amount-col: 54px;
   --thermal-logo-size: 32px;
   --thermal-upi-size: 90px;
 }
@@ -116,9 +116,9 @@ button, a, [role="button"] { min-height: 32px; }
   --thermal-heading-base: 12.5px;
   --thermal-total-base: 11.5px;
   --thermal-line-height: 1.16;
-  --thermal-qty-col: 18px;
-  --thermal-rate-col: 38px;
-  --thermal-amount-col: 46px;
+  --thermal-qty-col: 20px;
+  --thermal-rate-col: 52px;
+  --thermal-amount-col: 58px;
   --thermal-logo-size: 38px;
   --thermal-upi-size: 100px;
 }
@@ -215,6 +215,13 @@ button, a, [role="button"] { min-height: 32px; }
 .thermal-header-details {
   min-width: 0;
   text-align: center;
+  width: 100%;
+}
+
+.thermal-header-details p {
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  word-break: normal;
 }
 
 .thermal-upi img {
@@ -262,6 +269,7 @@ button, a, [role="button"] { min-height: 32px; }
   text-align: left;
   border-bottom: 1px dashed #0f172a;
   padding-bottom: 2px;
+  white-space: nowrap;
 }
 
 .thermal-table td {
@@ -269,6 +277,24 @@ button, a, [role="button"] { min-height: 32px; }
   vertical-align: top;
   overflow-wrap: anywhere;
 }
+
+.thermal-table td:first-child,
+.thermal-table th:first-child {
+  min-width: 0;
+}
+
+.thermal-table th:not(:first-child),
+.thermal-table td:not(:first-child) {
+  white-space: nowrap;
+  overflow-wrap: normal;
+  word-break: normal;
+  font-variant-numeric: tabular-nums;
+}
+
+.thermal-table col.thermal-item-col { width: auto; }
+.thermal-table col.thermal-qty-col { width: var(--thermal-qty-col); }
+.thermal-table col.thermal-rate-col { width: var(--thermal-rate-col); }
+.thermal-table col.thermal-amount-col { width: var(--thermal-amount-col); }
 
 .thermal-table th:nth-child(2),
 .thermal-table td:nth-child(2) {
@@ -286,6 +312,20 @@ button, a, [role="button"] { min-height: 32px; }
 .thermal-table-wide td:nth-child(3) {
   text-align: right;
   width: var(--thermal-rate-col);
+}
+
+.thermal-table-wide th:nth-child(2),
+.thermal-table-wide td:nth-child(2) {
+  padding-left: 2px;
+  padding-right: 2px;
+}
+
+.thermal-table-wide th:nth-child(3),
+.thermal-table-wide td:nth-child(3),
+.thermal-table-wide th:nth-child(4),
+.thermal-table-wide td:nth-child(4) {
+  padding-left: 2px;
+  padding-right: 0;
 }
 
 .kot-slip {

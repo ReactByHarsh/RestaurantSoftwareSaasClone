@@ -156,13 +156,19 @@ export async function fetchCloudStaff(serverUrl?: string, auth?: CloudAuth): Pro
   return response.json() as Promise<{ staff: StaffAccount[] }>
 }
 
-export async function createCloudStaff(account: StaffAccount): Promise<{ user: StaffAccount }> {
-  await syncCloudStaff([account])
+export async function createCloudStaff(account: StaffAccount, serverUrl?: string, auth?: CloudAuth): Promise<{ user: StaffAccount }> {
+  const result = await syncCloudStaff([account], serverUrl, auth)
+  if (!result.staff.some((candidate) => candidate.id === account.id)) {
+    throw new Error('Cloud did not save this staff login. Please check the owner account and try again.')
+  }
   return { user: account }
 }
 
-export async function updateCloudStaff(account: StaffAccount): Promise<{ user: StaffAccount }> {
-  await syncCloudStaff([account])
+export async function updateCloudStaff(account: StaffAccount, serverUrl?: string, auth?: CloudAuth): Promise<{ user: StaffAccount }> {
+  const result = await syncCloudStaff([account], serverUrl, auth)
+  if (!result.staff.some((candidate) => candidate.id === account.id)) {
+    throw new Error('Cloud did not update this staff login. Please try again.')
+  }
   return { user: account }
 }
 
@@ -170,7 +176,7 @@ export async function syncCloudStaff(staff: StaffAccount[], serverUrl?: string, 
   const cloud = currentCloudAuth()
   const baseUrl = serverUrl || cloud?.serverUrl
   const effectiveAuth = auth || cloud?.auth
-  if (!baseUrl || !effectiveAuth?.accountLogin || !effectiveAuth.accountSecret) return { staff }
+  if (!baseUrl) return { staff }
   const response = await fetch(`${cleanBaseUrl(baseUrl)}/api/v1/staff/sync`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Accept: 'application/json', ...authHeaders(effectiveAuth) },

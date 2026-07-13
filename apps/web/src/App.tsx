@@ -25,6 +25,7 @@ import { useBillingStore } from './store/billingStore'
 import { useStaffStore } from './store/staffStore'
 import { isTauriDesktop } from './lib/localDb'
 import { fetchCloudSnapshot, getSnapshotDataScore, saveCloudSnapshot } from './lib/cloudSync'
+import { getLanBridgeState, syncLanBridge } from './lib/lanBridge'
 
 function getNormalizedSnapshotIfNeeded(state: ReturnType<typeof useBillingStore.getState>) {
   const normalized = state.exportSnapshot()
@@ -222,6 +223,114 @@ export default function App() {
       window.clearTimeout(saveTimer)
       unsubscribeStore()
       unsubscribeRealtime()
+    }
+  }, [user?.id])
+
+  useEffect(() => {
+    if (!user || user.tenantId === 'platform' || isTauriDesktop()) return
+
+    let cancelled = false
+    let hydrated = false
+    let applyingLan = false
+    let lastBridgeUpdatedAt = ''
+    let syncTimer: number | undefined
+
+    const withActiveCloudCredentials = (payload: any) => {
+      const activeCloud = useBillingStore.getState().cloudSync
+      return {
+        ...payload,
+        cloudSync: {
+          ...(payload.cloudSync ?? {}),
+          ...activeCloud,
+          accountSecret: activeCloud.accountSecret,
+        },
+      }
+    }
+
+    const tenantMatches = (tenantId?: string, outletId?: string) => {
+      const billing = useBillingStore.getState()
+      return tenantId === user.tenantId
+        || tenantId === billing.outlet.tenantId
+        || outletId === billing.outlet.id
+    }
+
+    const pushCurrentState = async () => {
+      if (cancelled || applyingLan) return
+      try {
+        const result = await syncLanBridge(
+          useBillingStore.getState().exportSnapshot(),
+          useStaffStore.getState().staff,
+        )
+        if (!cancelled) lastBridgeUpdatedAt = result.updatedAt
+      } catch {
+        // The web app remains usable when the optional Windows bridge is absent.
+      }
+    }
+
+    const schedulePush = () => {
+      if (!hydrated || applyingLan || cancelled) return
+      window.clearTimeout(syncTimer)
+      syncTimer = window.setTimeout(() => void pushCurrentState(), 450)
+    }
+
+    const applyBridgeState = (remote: Awaited<ReturnType<typeof getLanBridgeState>>) => {
+      if (!remote.exists || !remote.payload || !tenantMatches(remote.tenantId, remote.outletId)) return
+      applyingLan = true
+      useBillingStore.getState().importSnapshot(withActiveCloudCredentials(remote.payload), true)
+      applyingLan = false
+      lastBridgeUpdatedAt = remote.updatedAt
+    }
+
+    const hydrate = async () => {
+      try {
+        const remote = await getLanBridgeState()
+        if (cancelled) return
+        const billing = useBillingStore.getState()
+        const cloud = billing.cloudSync
+        const localReference = Math.max(
+          Date.parse(cloud.lastSyncedAt ?? '') || 0,
+          Date.parse(cloud.lastCloudDownloadedAt ?? '') || 0,
+          Date.parse(cloud.lastCloudUploadedAt ?? '') || 0,
+        )
+        const bridgeTime = Date.parse(remote.updatedAt) || 0
+        if (remote.payload && (getSnapshotDataScore(billing.exportSnapshot()) === 0 || bridgeTime > localReference)) {
+          applyBridgeState(remote)
+        } else {
+          lastBridgeUpdatedAt = remote.updatedAt
+        }
+      } catch {
+        // Bridge may not be installed yet; retry through polling below.
+      } finally {
+        hydrated = true
+        void pushCurrentState()
+      }
+    }
+
+    const pollBridge = async () => {
+      if (cancelled || applyingLan) return
+      try {
+        const remote = await getLanBridgeState()
+        if (cancelled || !remote.updatedAt || remote.updatedAt === lastBridgeUpdatedAt) return
+        applyBridgeState(remote)
+      } catch {
+        // LAN hosting automatically resumes when the bridge starts again.
+      }
+    }
+
+    void hydrate()
+    const unsubscribeBilling = useBillingStore.subscribe(schedulePush)
+    const unsubscribeStaff = useStaffStore.subscribe(schedulePush)
+    const pollTimer = window.setInterval(() => void pollBridge(), 1200)
+    const onFocus = () => void pollBridge()
+    window.addEventListener('focus', onFocus)
+
+    return () => {
+      cancelled = true
+      window.clearTimeout(syncTimer)
+      window.clearInterval(pollTimer)
+      window.removeEventListener('focus', onFocus)
+      unsubscribeBilling()
+      unsubscribeStaff()
     }
   }, [user?.id])
 

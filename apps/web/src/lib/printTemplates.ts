@@ -52,6 +52,29 @@ function center(value: string, width: number) {
   return `${' '.repeat(Math.max(0, Math.floor((width - text.length) / 2)))}${text}`
 }
 
+function wrappedCentered(value: string, width: number) {
+  const words = value.trim().split(/\s+/).filter(Boolean)
+  if (!words.length) return []
+  const lines: string[] = []
+  let line = ''
+  words.forEach((word) => {
+    // Keep unusually long address tokens printable without overflowing the paper.
+    const chunks = word.match(new RegExp(`.{1,${Math.max(1, width)}}`, 'g')) ?? [word]
+    chunks.forEach((chunk) => {
+      if (!line) {
+        line = chunk
+      } else if (line.length + 1 + chunk.length <= width) {
+        line += ` ${chunk}`
+      } else {
+        lines.push(center(line, width))
+        line = chunk
+      }
+    })
+  })
+  if (line) lines.push(center(line, width))
+  return lines
+}
+
 function rule(width: number, char = '-') {
   return char.repeat(width)
 }
@@ -250,7 +273,7 @@ export function buildReceiptPrintText(
   const width = widths[settings.receiptWidth]
   const lines = [
     center(settings.businessName || outlet.name, width),
-    ...(outlet.address ? [center(outlet.address, width)] : []),
+    ...(outlet.address ? wrappedCentered(outlet.address, width) : []),
     ...(outlet.phone ? [center(`Ph: ${outlet.phone}`, width)] : []),
     ...(outlet.gstin && shouldShowGstin(settings) ? [center(`GSTIN: ${outlet.gstin}`, width)] : []),
     center(type === 'proforma' ? 'PROFORMA / ESTIMATE' : settings.headerText, width),
@@ -317,7 +340,7 @@ export function buildReceiptPrintParts(
     const paymentAmountPaise = previousPartsNetPaise !== undefined ? grandTotalPaise : totals.netPaise
     const lines = [
       center(settings.businessName || outlet.name, width),
-      ...(outlet.address ? [center(outlet.address, width)] : []),
+      ...(outlet.address ? wrappedCentered(outlet.address, width) : []),
       ...(outlet.phone ? [center(`Ph: ${outlet.phone}`, width)] : []),
       ...(outlet.gstin && shouldShowGstin(settings, partIndex, partCount) ? [center(`GSTIN: ${outlet.gstin}`, width)] : []),
       ...(type === 'proforma'

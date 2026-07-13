@@ -10,7 +10,7 @@ import {
   type LicenseStatus,
 } from '../../lib/localDb'
 import { checkForAppUpdate, downloadAndInstallUpdate } from '../../lib/appUpdater'
-import { runCloudLogin, saveCloudSnapshot, syncCloudStaff } from '../../lib/cloudSync'
+import { fetchCloudStaff, runCloudLogin, saveCloudSnapshot, syncCloudStaff } from '../../lib/cloudSync'
 import { realtimeClient } from '../../lib/realtime'
 import { useBillingStore } from '../../store/billingStore'
 import { useStaffStore } from '../../store/staffStore'
@@ -31,6 +31,7 @@ export default function DesktopBootstrap({ children }: { children: ReactNode }) 
     let saveTimer: number | undefined
     let hydrationComplete = false
     let cloudTimer: number | undefined
+    let staffTimer: number | undefined
     let unsubscribeBilling: (() => void) | undefined
     let unsubscribeStaff: (() => void) | undefined
     let unlistenLanState: (() => void) | undefined
@@ -85,7 +86,8 @@ export default function DesktopBootstrap({ children }: { children: ReactNode }) 
         const cloudAuth = { accountLogin: cloud.accountLogin, accountSecret: cloud.accountSecret }
         const localSnapshot = billing.exportSnapshot()
         await saveCloudSnapshot(outletId, tenantId, { ...localSnapshot, cloudSync: effectiveCloud }, `desktop-${reason}`, cloud.serverUrl, cloudAuth)
-        await syncCloudStaff(useStaffStore.getState().staff, cloud.serverUrl, cloudAuth)
+        const cloudStaff = await syncCloudStaff(useStaffStore.getState().staff, cloud.serverUrl, cloudAuth)
+        useStaffStore.getState().replaceStaff([...cloudStaff.staff, ...useStaffStore.getState().staff])
         const syncedAt = new Date().toISOString()
         useBillingStore.getState().updateCloudSyncSettings({
           tenantId,
@@ -97,6 +99,22 @@ export default function DesktopBootstrap({ children }: { children: ReactNode }) 
         if (reason === 'daily') useUIStore.getState().addToast('success', 'Daily cloud sync completed', 'Cloud Sync')
       } catch (error) {
         console.error('Cloud sync failed', error)
+      }
+    }
+
+    const refreshCloudStaff = async () => {
+      const cloud = useBillingStore.getState().cloudSync
+      if (!cloud.enabled || !cloud.serverUrl || !cloud.accountLogin || !cloud.accountSecret) return
+      try {
+        const result = await fetchCloudStaff(cloud.serverUrl, {
+          accountLogin: cloud.accountLogin,
+          accountSecret: cloud.accountSecret,
+        })
+        if (disposed) return
+        useStaffStore.getState().replaceStaff([...result.staff, ...useStaffStore.getState().staff])
+        queueSave()
+      } catch (error) {
+        console.error('Cloud staff refresh failed', error)
       }
     }
 
@@ -112,6 +130,8 @@ export default function DesktopBootstrap({ children }: { children: ReactNode }) 
           void syncCloudSnapshotNow('daily')
         }
       }, 15 * 60 * 1000)
+      window.clearInterval(staffTimer)
+      staffTimer = window.setInterval(() => void refreshCloudStaff(), 60 * 1000)
     }
 
     const hydrateRestaurantState = async () => {
@@ -137,6 +157,7 @@ export default function DesktopBootstrap({ children }: { children: ReactNode }) 
         setReady(true)
         if (loadedSuccessfully) queueSave()
         scheduleCloudSync()
+        void refreshCloudStaff()
         if (isTauriDesktop()) void runAutoUpdate()
         const cloud = useBillingStore.getState().cloudSync
         const last = cloud.lastSyncedAt ? new Date(cloud.lastSyncedAt) : null
@@ -173,6 +194,10 @@ export default function DesktopBootstrap({ children }: { children: ReactNode }) 
             useBillingStore.getState().importSnapshot(snapshot as any, true)
           })
           const unsubscribeRealtime = realtimeClient.subscribe((event) => {
+            if (event.type === 'STAFF_UPDATED') {
+              void refreshCloudStaff()
+              return
+            }
             if (event.type !== 'STATE_UPDATED') return
             const payload = event.payload
             if (!payload || !Array.isArray((payload as any).orders) || !Array.isArray((payload as any).tables)) return
@@ -182,6 +207,16 @@ export default function DesktopBootstrap({ children }: { children: ReactNode }) 
           unsubscribeBilling = () => {
             previousBillingUnsubscribe?.()
             unsubscribeRealtime()
+          }
+          const cloud = useBillingStore.getState().cloudSync
+          if (cloud.enabled && cloud.serverUrl && cloud.outletId && cloud.accountLogin && cloud.accountSecret) {
+            realtimeClient.connect({
+              serverUrl: cloud.serverUrl,
+              outletId: cloud.outletId,
+              accountLogin: cloud.accountLogin,
+              accountSecret: cloud.accountSecret,
+              clientId: 'desktop-lan-host',
+            })
           }
         } else {
           setReady(true)
@@ -203,9 +238,11 @@ export default function DesktopBootstrap({ children }: { children: ReactNode }) 
       hydrationComplete = false
       window.clearTimeout(saveTimer)
       window.clearInterval(cloudTimer)
+      window.clearInterval(staffTimer)
       unsubscribeBilling?.()
       unsubscribeStaff?.()
       unlistenLanState?.()
+      realtimeClient.disconnect()
     }
   }, [])
 

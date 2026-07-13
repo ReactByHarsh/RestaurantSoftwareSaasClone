@@ -9,6 +9,9 @@ import { useStaffStore } from '../../store/staffStore'
 import { checkForAppUpdate, downloadAndInstallUpdate } from '../../lib/appUpdater'
 import { runCloudLogin, saveCloudSnapshot, syncCloudStaff, type BillingSnapshot, type CloudSyncSettings } from '../../lib/cloudSync'
 import { getLanServerStatus, isTauriDesktop, type LanServerStatus } from '../../lib/localDb'
+import { getLanBridgeStatus, type LanBridgeStatus } from '../../lib/lanBridge'
+
+type DisplayLanStatus = LanServerStatus | LanBridgeStatus
 
 export default function SettingsScreen() {
   const navigate = useNavigate()
@@ -24,12 +27,25 @@ export default function SettingsScreen() {
   const [cloudBusy, setCloudBusy] = useState(false)
   const [updateBusy, setUpdateBusy] = useState(false)
   const [logoPreview, setLogoPreview] = useState(outlet.logoDataUrl ?? '')
-  const [lanStatus, setLanStatus] = useState<LanServerStatus | null>(null)
+  const [lanStatus, setLanStatus] = useState<DisplayLanStatus | null>(null)
   const [lanQrDataUrl, setLanQrDataUrl] = useState('')
 
   useEffect(() => {
-    if (!isTauriDesktop()) return
-    void getLanServerStatus().then(setLanStatus).catch(() => undefined)
+    let cancelled = false
+    const refresh = async () => {
+      try {
+        const status = isTauriDesktop() ? await getLanServerStatus() : await getLanBridgeStatus()
+        if (!cancelled && status) setLanStatus(status)
+      } catch {
+        if (!cancelled) setLanStatus(null)
+      }
+    }
+    void refresh()
+    const timer = window.setInterval(() => void refresh(), 10_000)
+    return () => {
+      cancelled = true
+      window.clearInterval(timer)
+    }
   }, [])
 
   useEffect(() => {
@@ -549,13 +565,27 @@ export default function SettingsScreen() {
                     <ShieldCheck size={16} />
                   </div>
                   <div>
-                    <p className="text-sm font-black text-slate-800">Counter login stays local.</p>
+                    <p className="text-sm font-black text-slate-800">Cloud and LAN stay synchronized.</p>
                     <p className="mt-1 text-[11px] font-bold leading-5 text-slate-600">
-                      Staff should still open the desktop app without a cloud login screen. Cloud sync should use a restaurant account saved here in Settings and run silently once per day.
+                      Products, tables, orders, KOTs, and staff accounts sync through the restaurant cloud account. BhojPatra Desk also keeps the same data available to phones over local Wi-Fi.
                     </p>
                   </div>
                 </div>
               </div>
+
+              {!isTauriDesktop() && (
+                <div className={`rounded-2xl border-2 p-4 ${lanStatus?.running ? 'border-emerald-100 bg-emerald-50/70' : 'border-amber-100 bg-amber-50/70'}`}>
+                  <p className="text-sm font-black text-slate-800">All-in-one Windows bridge {lanStatus?.running ? 'is connected' : 'is required for offline Wi-Fi'}</p>
+                  <p className="mt-1 text-[11px] font-bold leading-5 text-slate-600">
+                    The bridge starts with Windows, keeps printer settings and restaurant data locally, and connects captain and kitchen phones through the restaurant router even when the internet is unavailable.
+                  </p>
+                  {!lanStatus?.running && (
+                    <a href="/downloads/BhojPatra-Printer-Bridge-Setup.exe?v=3.0.1" className="mt-3 inline-flex rounded-xl bg-slate-900 px-3 py-2 text-[10px] font-black text-white">
+                      DOWNLOAD / REPAIR BRIDGE
+                    </a>
+                  )}
+                </div>
+              )}
 
               {lanStatus && (
                 <div className={`rounded-2xl border-2 p-4 ${lanStatus.running ? 'border-emerald-100 bg-emerald-50/70' : 'border-amber-100 bg-amber-50/70'}`}>

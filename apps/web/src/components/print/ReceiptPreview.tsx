@@ -101,6 +101,12 @@ export default function ReceiptPreview({
           <div className="thermal-rule" />
 
           <table className="thermal-table thermal-table-wide">
+            <colgroup>
+              <col className="thermal-item-col" />
+              <col className="thermal-qty-col" />
+              <col className="thermal-rate-col" />
+              <col className="thermal-amount-col" />
+            </colgroup>
             <thead>
               <tr><th>Item</th><th>Qty</th><th>Rate</th><th>Amount</th></tr>
             </thead>

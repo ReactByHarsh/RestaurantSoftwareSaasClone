@@ -4,6 +4,7 @@ $root = Split-Path -Parent $PSScriptRoot
 $releaseDir = Join-Path $root "release"
 $bridgeExe = Join-Path $releaseDir "bhojpatra-native-bridge.exe"
 $setupSource = Join-Path $root "tools\native-print-bridge\BhojPatra.NativePrintBridgeSetup.cs"
+$setupManifest = Join-Path $root "tools\native-print-bridge\setup.manifest"
 $setupExe = Join-Path $releaseDir "BhojPatra-Native-Print-Bridge-Setup.exe"
 
 & (Join-Path $root "tools\build-native-print-bridge.ps1")
@@ -22,6 +23,7 @@ if (!$csc) {
   /target:winexe `
   /optimize+ `
   /platform:anycpu `
+  /win32manifest:$setupManifest `
   /out:$setupExe `
   /resource:$bridgeExe,BhojPatra.NativePrintBridge.exe `
   /reference:System.dll `

@@ -386,6 +386,19 @@ function wouldEraseCoreRestaurantData(
   })
 }
 
+function preservesRoleRestrictedCollections(
+  existing: Record<string, unknown> | null | undefined,
+  incoming: Record<string, unknown>,
+) {
+  if (!existing) return true
+  const protectedKeys = [
+    'outlet', 'printSettings', 'cloudSync', 'appUpdate',
+    'menuCategories', 'menuItems', 'floors', 'stations',
+    'inventoryItems', 'purchaseEntries', 'payments',
+  ]
+  return protectedKeys.every((key) => JSON.stringify(existing[key] ?? null) === JSON.stringify(incoming[key] ?? null))
+}
+
 type SnapshotCounts = {
   menuItems: number
   menuCategories: number
@@ -1774,6 +1787,13 @@ app.put('/api/v1/outlets/:outletId/state', async (c) => {
   if (outletId !== `out_${body.data.tenantId}`) return c.json({ error: 'Outlet does not belong to tenant' }, 403)
 
   const existing = await readSnapshotRow(db, outletId)
+  const mobileOperationalRoles: Role[] = ['captain', 'kitchen']
+  if (!['owner', 'admin', 'manager', ...mobileOperationalRoles].includes(auth.user.role)) {
+    return c.json({ error: 'This role cannot update restaurant state' }, 403)
+  }
+  if (mobileOperationalRoles.includes(auth.user.role) && !preservesRoleRestrictedCollections(existing?.payload, body.data.payload)) {
+    return c.json({ error: 'This role can only update tables, orders, and kitchen workflow' }, 403)
+  }
   if (body.data.expectedUpdatedAt && existing?.updatedAt && body.data.expectedUpdatedAt !== existing.updatedAt) {
     return c.json({
       error: 'Restaurant data changed on another device. Refresh and retry.',

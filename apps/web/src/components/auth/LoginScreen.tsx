@@ -138,7 +138,7 @@ export default function LoginScreen() {
                 Captain phones and owner phones, both on one live restaurant system.
               </h1>
               <p className="mt-5 text-base font-semibold leading-7 text-white/82">
-                Captains can take orders and send KOTs over local Wi-Fi, while owners can view the latest daily cloud snapshot when they are away.
+                Captains, kitchen staff, and owners work on the same realtime restaurant data through local Wi-Fi when Desk is available, with secure live-cloud fallback when it is not.
               </p>
             </div>
           </div>

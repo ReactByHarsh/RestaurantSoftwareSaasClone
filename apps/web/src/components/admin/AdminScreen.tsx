@@ -60,7 +60,7 @@ export default function AdminScreen() {
   const [editingStation, setEditingStation] = useState<Station | null>(null)
   const [showStationModal, setShowStationModal] = useState(false)
   const { addToast } = useUIStore()
-  const { staff, addStaff, updateStaff, setStaffStatus } = useStaffStore()
+  const { staff, addStaff, updateStaff, setStaffStatus, removeStaff } = useStaffStore()
   const {
     floors,
     tables,
@@ -73,6 +73,7 @@ export default function AdminScreen() {
     kots,
     payments,
     auditLogs,
+    cloudSync,
     addFloor,
     updateFloor,
     deleteFloor,
@@ -84,6 +85,8 @@ export default function AdminScreen() {
     deleteStation,
     deleteDataSection,
   } = useBillingStore()
+  const cloudAuth = { accountLogin: cloudSync.accountLogin, accountSecret: cloudSync.accountSecret }
+  const shouldSyncCloud = cloudSync.enabled && Boolean(cloudSync.serverUrl) && user?.tenantId !== 'local_restaurant'
   const isPlatformAdmin = user?.tenantId === 'platform' && user.role === 'admin'
   const visibleTabs = isPlatformAdmin
     ? [
@@ -188,19 +191,36 @@ export default function AdminScreen() {
 
     try {
       if (editingStaff) {
-        updateStaff(editingStaff.id, { name, email, phone, password, role: finalRole, status, pin, accessStartsAt, accessEndsAt, tenantId, restaurantName, paymentReceived, renewalPaymentReceived, paymentNote })
-        const updated = useStaffStore.getState().staff.find(account => account.id === editingStaff.id)
-        if (updated) {
-          await updateCloudStaff(updated).catch((error) => {
-            console.warn('Cloud staff update skipped:', error)
-          })
+        const updated: StaffAccount = {
+          ...editingStaff,
+          name,
+          email: email || undefined,
+          phone: phone || undefined,
+          password: password || editingStaff.password,
+          role: finalRole,
+          status,
+          pin: pin || undefined,
+          accessStartsAt: accessStartsAt || undefined,
+          accessEndsAt: accessEndsAt || undefined,
+          tenantId,
+          restaurantName: restaurantName || undefined,
+          paymentReceived,
+          renewalPaymentReceived,
+          paymentNote: paymentNote || undefined,
         }
+        if (shouldSyncCloud) await updateCloudStaff(updated, cloudSync.serverUrl, cloudAuth)
+        updateStaff(editingStaff.id, updated)
         addToast('success', `${name}'s account was updated`)
       } else {
         const account = addStaff({ name, email, phone, password, role: finalRole, status, pin, accessStartsAt, accessEndsAt, tenantId, restaurantName, paymentReceived, renewalPaymentReceived, paymentNote })
-        await createCloudStaff(account).catch((error) => {
-          console.warn('Cloud staff create skipped:', error)
-        })
+        if (shouldSyncCloud) {
+          try {
+            await createCloudStaff(account, cloudSync.serverUrl, cloudAuth)
+          } catch (error) {
+            removeStaff(account.id)
+            throw error
+          }
+        }
         addToast('success', isPlatformAdmin ? `${restaurantName} client admin was created` : `${name}'s staff login was created`)
       }
       setShowStaffModal(false)
@@ -375,10 +395,13 @@ export default function AdminScreen() {
                         <button
                           onClick={async () => {
                             const nextStatus = account.status === 'active' ? 'halted' : 'active'
-                            setStaffStatus(account.id, nextStatus)
-                            const updated = useStaffStore.getState().staff.find(item => item.id === account.id)
-                            if (updated) await updateCloudStaff(updated)
-                            addToast('success', `${account.name} is now ${nextStatus}`)
+                            try {
+                              if (shouldSyncCloud) await updateCloudStaff({ ...account, status: nextStatus }, cloudSync.serverUrl, cloudAuth)
+                              setStaffStatus(account.id, nextStatus)
+                              addToast('success', `${account.name} is now ${nextStatus}`)
+                            } catch (error) {
+                              addToast('error', error instanceof Error ? error.message : 'Could not update cloud staff')
+                            }
                           }}
                           className={clsx('hover:underline font-black tracking-wider uppercase mr-3', account.status === 'active' ? 'text-amber-600' : 'text-emerald-600')}
                         >
@@ -386,10 +409,13 @@ export default function AdminScreen() {
                         </button>
                         <button
                           onClick={async () => {
-                            setStaffStatus(account.id, 'inactive')
-                            const updated = useStaffStore.getState().staff.find(item => item.id === account.id)
-                            if (updated) await updateCloudStaff(updated)
-                            addToast('success', `${account.name} is now deactivated`)
+                            try {
+                              if (shouldSyncCloud) await updateCloudStaff({ ...account, status: 'inactive' }, cloudSync.serverUrl, cloudAuth)
+                              setStaffStatus(account.id, 'inactive')
+                              addToast('success', `${account.name} is now deactivated`)
+                            } catch (error) {
+                              addToast('error', error instanceof Error ? error.message : 'Could not update cloud staff')
+                            }
                           }}
                           className="hover:underline font-black tracking-wider uppercase text-red-500"
                         >

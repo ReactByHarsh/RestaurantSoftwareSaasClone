@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import {
   CheckCircle2,
+  Download,
   Eye,
   FileText,
   Monitor,
@@ -18,11 +19,13 @@ import { useUIStore } from '../../store/uiStore'
 import { useBillingStore, type PrintSettings } from '../../store/billingStore'
 import type { BridgePrinter, PrinterConnectionMode } from '../../lib/printer'
 import {
+  checkBridgeHealth,
   DEFAULT_BRIDGE_URL,
   discoverBridgePrinters,
   discoverNativePrinters,
   nativePrintSupported,
   normalizeNetworkPrinterAddress,
+  normalizePrinterConnectionMode,
   requestUsbPrinter,
   resolveBridgeUrlInput,
   sendPrintJob,
@@ -79,27 +82,29 @@ const PREVIEW_MENU_ITEMS: MenuItem[] = [
 function createPreviewDraft(source: PrintSettings): PrintSettings {
   return {
     ...source,
-    connectionMode: source.connectionMode === 'system' ? 'browser' : source.connectionMode,
+    connectionMode: normalizePrinterConnectionMode(source.connectionMode),
     headingSize: source.headingSize ?? 'standard',
     fontSize: source.fontSize ?? 'standard',
   }
 }
 
 function preparePrintSettings(settings: PrintSettings): { value: PrintSettings } | { error: string } {
+  const connectionMode = normalizePrinterConnectionMode(settings.connectionMode)
   const trimmedPrinterName = settings.printerName.trim()
-  const lanTarget = settings.connectionMode === 'native'
+  const lanTarget = connectionMode === 'native'
     ? normalizeNetworkPrinterAddress(trimmedPrinterName)
     : normalizeNetworkPrinterAddress(settings.bridgeUrl)
   const bridgeUrl = lanTarget ? DEFAULT_BRIDGE_URL : resolveBridgeUrlInput(settings.bridgeUrl)
-  const printerName = settings.connectionMode === 'native' ? trimmedPrinterName : (lanTarget || trimmedPrinterName)
+  const printerName = connectionMode === 'native' ? trimmedPrinterName : (lanTarget || trimmedPrinterName)
 
-  if (settings.connectionMode !== 'browser' && !printerName) {
+  if (connectionMode !== 'browser' && !printerName) {
     return { error: 'Select or enter a printer before saving.' }
   }
 
   return {
     value: {
       ...settings,
+      connectionMode,
       printerName,
       bridgeUrl,
     },
@@ -112,10 +117,42 @@ export default function PrinterSettingsScreen() {
   const [draftSettings, setDraftSettings] = useState<PrintSettings>(() => createPreviewDraft(printSettings))
   const [detectedPrinters, setDetectedPrinters] = useState<BridgePrinter[]>([])
   const [printerBusy, setPrinterBusy] = useState(false)
+  const [bridgeStatus, setBridgeStatus] = useState<'idle' | 'checking' | 'online' | 'offline'>('idle')
+  const [bridgeVersion, setBridgeVersion] = useState('')
 
   useEffect(() => {
     setDraftSettings(createPreviewDraft(printSettings))
   }, [printSettings])
+
+  useEffect(() => {
+    if (draftSettings.connectionMode !== 'bridge') {
+      setBridgeStatus('idle')
+      return
+    }
+
+    let cancelled = false
+    const refreshHealth = async () => {
+      setBridgeStatus((current) => current === 'online' ? current : 'checking')
+      try {
+        const health = await checkBridgeHealth(draftSettings.bridgeUrl)
+        if (cancelled) return
+        setBridgeVersion(health.version ?? '')
+        setBridgeStatus('online')
+      } catch {
+        if (!cancelled) setBridgeStatus('offline')
+      }
+    }
+
+    void refreshHealth()
+    const timer = window.setInterval(() => void refreshHealth(), 30_000)
+    const onFocus = () => void refreshHealth()
+    window.addEventListener('focus', onFocus)
+    return () => {
+      cancelled = true
+      window.clearInterval(timer)
+      window.removeEventListener('focus', onFocus)
+    }
+  }, [draftSettings.bridgeUrl, draftSettings.connectionMode])
 
   const previewItems = useMemo<OrderItem[]>(() => ([
     {
@@ -242,6 +279,17 @@ export default function PrinterSettingsScreen() {
     setDraftSettings((current) => ({ ...current, [key]: value }))
   }
 
+  const selectConnectionMode = (mode: PrinterConnectionMode) => {
+    const normalizedMode = normalizePrinterConnectionMode(mode)
+    setDraftValue('connectionMode', normalizedMode)
+    // Persist the transport choice immediately on this computer. This prevents
+    // a cloud snapshot refresh or a browser reload from restoring legacy System mode.
+    updatePrintSettings({
+      connectionMode: normalizedMode,
+      ...(normalizedMode === 'bridge' ? { bridgeUrl: resolveBridgeUrlInput(draftSettings.bridgeUrl) } : {}),
+    })
+  }
+
   const handleUsbConnect = async () => {
     setPrinterBusy(true)
     try {
@@ -292,6 +340,7 @@ export default function PrinterSettingsScreen() {
       const selected = mergedPrinters.some((printer) => printer.name === draftSettings.printerName) ? draftSettings.printerName : (mergedPrinters[0]?.name ?? draftSettings.printerName)
 
       setDetectedPrinters(mergedPrinters)
+      setBridgeStatus('online')
       setDraftSettings((current) => ({
         ...current,
         connectionMode: 'bridge',
@@ -303,6 +352,7 @@ export default function PrinterSettingsScreen() {
       }))
       addToast('success', mergedPrinters.length > 0 ? `${mergedPrinters.length} printer${mergedPrinters.length === 1 ? '' : 's'} detected` : 'Bridge checked. Enter a LAN printer manually if needed.', 'Printer Setup')
     } catch (error) {
+      setBridgeStatus('offline')
       addToast('error', `${error instanceof Error ? error.message : 'Printer bridge unavailable'} Check the local bridge URL and CORS settings.`, 'Printer Setup')
     } finally {
       setPrinterBusy(false)
@@ -377,7 +427,7 @@ export default function PrinterSettingsScreen() {
     : draftSettings.connectionMode === 'webusb'
       ? 'Chrome USB'
       : draftSettings.connectionMode === 'bridge'
-        ? 'External bridge fallback'
+        ? bridgeStatus === 'online' ? `Local bridge online${bridgeVersion ? ` · ${bridgeVersion}` : ''}` : 'Local bridge offline'
         : 'System print dialog'
 
   return (
@@ -437,12 +487,12 @@ export default function PrinterSettingsScreen() {
                     ...(nativePrintSupported() ? [{ mode: 'native' as const, icon: Printer, title: 'Desktop Built-in', detail: 'Saved USB / Bluetooth / LAN' }] : []),
                     { mode: 'browser' as const, icon: Monitor, title: 'System', detail: 'Windows print dialog' },
                     { mode: 'webusb' as const, icon: Usb, title: 'Chrome USB', detail: 'Only WebUSB-compatible printers' },
-                    { mode: 'bridge' as const, icon: Server, title: 'External Bridge', detail: 'Local service / LAN raw' },
+                    { mode: 'bridge' as const, icon: Server, title: 'BhojPatra Local Bridge', detail: 'Recommended for Windows printers' },
                   ].map((option) => (
                     <button
                       key={option.mode}
                       type="button"
-                      onClick={() => setDraftValue('connectionMode', option.mode)}
+                      onClick={() => selectConnectionMode(option.mode)}
                       className={`p-3 rounded-xl border-2 text-left transition-all ${draftSettings.connectionMode === option.mode ? 'border-primary bg-white shadow-sm' : 'border-slate-200 bg-slate-50 hover:border-slate-300'}`}
                     >
                       <option.icon size={17} className={draftSettings.connectionMode === option.mode ? 'text-primary' : 'text-slate-400'} />
@@ -494,9 +544,15 @@ export default function PrinterSettingsScreen() {
 
                 {draftSettings.connectionMode === 'bridge' && (
                   <div className="rounded-xl bg-white border border-slate-200 p-3 space-y-3">
-                    <div>
-                      <p className="text-xs font-black text-slate-700">External local printer bridge</p>
-                      <p className="text-[10px] font-bold text-slate-500 mt-1">Fallback for local bridge or raw LAN printing. Enter the bridge URL or a printer IP like `192.168.1.50`.</p>
+                    <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+                      <div>
+                        <p className="text-xs font-black text-slate-700">BhojPatra local printer bridge</p>
+                        <p className="text-[10px] font-bold text-slate-500 mt-1">Runs automatically with Windows and supports installed USB, Bluetooth, and LAN printers.</p>
+                      </div>
+                      <span className={`inline-flex shrink-0 items-center gap-1 rounded-full px-2 py-1 text-[10px] font-black ${bridgeStatus === 'online' ? 'bg-emerald-50 text-emerald-700' : bridgeStatus === 'checking' ? 'bg-amber-50 text-amber-700' : 'bg-rose-50 text-rose-700'}`}>
+                        <CheckCircle2 size={12} />
+                        {bridgeStatus === 'online' ? `ONLINE${bridgeVersion ? ` · ${bridgeVersion}` : ''}` : bridgeStatus === 'checking' ? 'CHECKING' : 'OFFLINE'}
+                      </span>
                     </div>
                     <div className="grid grid-cols-1 sm:grid-cols-[1fr_auto] gap-2">
                       <input value={draftSettings.bridgeUrl} onChange={(event) => setDraftValue('bridgeUrl', event.target.value)} placeholder="Bridge URL or LAN printer IP/link" className="w-full px-3 py-2 rounded-xl border-2 border-slate-200 text-xs font-bold outline-none focus:border-primary/50" />
@@ -511,6 +567,12 @@ export default function PrinterSettingsScreen() {
                     ) : (
                       <input value={draftSettings.printerName} onChange={(event) => setDraftValue('printerName', event.target.value)} placeholder="Printer queue or LAN target, e.g. POS80 Printer or tcp://192.168.1.50:9100" className="w-full px-3 py-2 rounded-xl border-2 border-slate-200 text-sm font-bold outline-none focus:border-primary/50" />
                     )}
+                    <div className="flex flex-col gap-2 rounded-lg bg-slate-50 p-2.5 sm:flex-row sm:items-center sm:justify-between">
+                      <p className="text-[10px] font-bold text-slate-500">If this computer shows offline after restart, run Repair once. Your selected printer and paper settings stay saved on this computer.</p>
+                      <a href="/downloads/BhojPatra-Printer-Bridge-Setup.exe?v=3.0.1" download className="inline-flex min-h-8 shrink-0 items-center justify-center gap-1.5 rounded-lg bg-primary px-3 py-2 text-[10px] font-black text-white">
+                        <Download size={13} /> INSTALL / REPAIR BRIDGE
+                      </a>
+                    </div>
                   </div>
                 )}
               </div>

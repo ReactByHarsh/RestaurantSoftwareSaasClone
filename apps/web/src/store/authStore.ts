@@ -1,7 +1,7 @@
 import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
 import type { User, Outlet } from '../lib/types'
-import { fetchCloudSnapshot, runCloudLogin } from '../lib/cloudSync'
+import { fetchCloudSnapshot, runCloudLogin, syncCloudStaff } from '../lib/cloudSync'
 import { isTauriDesktop } from '../lib/localDb'
 import { useBillingStore } from './billingStore'
 import { toPublicUser, useStaffStore, type StaffAccount } from './staffStore'
@@ -25,6 +25,15 @@ export const LOCAL_TENANT_ID = 'local_restaurant'
 
 function isCloudAccount(account: StaffAccount) {
   return account.tenantId && account.tenantId !== LOCAL_TENANT_ID && account.tenantId !== 'platform'
+}
+
+async function verifyStoredCredential(stored: string | undefined, candidate: string) {
+  const value = stored?.trim() ?? ''
+  if (!value) return false
+  if (!value.startsWith('sha256$')) return value === candidate
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(candidate))
+  const hex = Array.from(new Uint8Array(digest)).map((byte) => byte.toString(16).padStart(2, '0')).join('')
+  return value === `sha256$${hex}`
 }
 
 function parseDateBoundary(value?: string, boundary: 'start' | 'end' = 'end') {
@@ -105,7 +114,15 @@ export const useAuthStore = create<AuthStore>()(
               pin: session.user.pin || password,
               restaurantName: session.user.restaurantName || outlet.name,
             }
-            useStaffStore.getState().replaceStaff([cloudAccount, ...useStaffStore.getState().staff])
+            const tenantStaff = [cloudAccount, ...useStaffStore.getState().staff]
+              .filter((account) => account.tenantId === session.user.tenantId)
+            try {
+              const syncedStaff = await syncCloudStaff(tenantStaff, serverUrl, cloudAuth)
+              useStaffStore.getState().replaceStaff([...syncedStaff.staff, ...tenantStaff])
+            } catch (error) {
+              console.error('Cloud staff reconciliation failed', error)
+              useStaffStore.getState().replaceStaff(tenantStaff)
+            }
             set({
               user: { ...session.user, lastLoginAt: new Date().toISOString() },
               outlet,
@@ -114,9 +131,13 @@ export const useAuthStore = create<AuthStore>()(
             return { success: true }
           } catch (error) {
             if (account && isCloudAccount(account)) {
-              const validPasswords = [account.password, account.pin ?? '']
+              const credentialChecks = await Promise.all([
+                verifyStoredCredential(account.password, password),
+                verifyStoredCredential(account.pin, password),
+              ])
+              const credentialsMatch = credentialChecks.some(Boolean)
               const accessError = getAccountAccessError(account)
-              if (validPasswords.includes(password) && account.status === 'active' && !accessError) {
+              if (credentialsMatch && account.status === 'active' && !accessError) {
                 set({
                   user: { ...toPublicUser(account), lastLoginAt: new Date().toISOString() },
                   outlet: useBillingStore.getState().outlet,
@@ -124,7 +145,7 @@ export const useAuthStore = create<AuthStore>()(
                 })
                 return { success: true }
               }
-              if (validPasswords.includes(password) && accessError) {
+              if (credentialsMatch && accessError) {
                 return { success: false, error: accessError }
               }
             }
@@ -136,8 +157,8 @@ export const useAuthStore = create<AuthStore>()(
         const accessError = getAccountAccessError(account)
         if (accessError) return { success: false, error: accessError }
 
-        const validPasswords = [account.password, account.pin ?? '']
-        if (!validPasswords.includes(password)) {
+        const credentialsMatch = (await verifyStoredCredential(account.password, password)) || (await verifyStoredCredential(account.pin, password))
+        if (!credentialsMatch) {
           return { success: false, error: 'Invalid credentials' }
         }
 

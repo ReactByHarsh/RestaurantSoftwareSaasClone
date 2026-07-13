@@ -91,9 +91,25 @@ class CloudApi {
       }
     }
 
+    // A browser-only BhojPatra SaaS session cannot host an inbound LAN server.
+    // Keep restaurant work available by falling back to the same live cloud
+    // account; LAN remains preferred whenever BhojPatra Desk is reachable.
+    try {
+      return await login(
+        defaultServerUrl,
+        loginId,
+        password,
+        mode: 'cloud_live',
+      );
+    } catch (error) {
+      errors.add(
+        'Cloud fallback: ${error.toString().replaceFirst('Exception: ', '')}',
+      );
+    }
+
     if (candidates.isEmpty) {
       throw Exception(
-        'BhojPatra Desk was not found. Keep desktop open, phone on same Wi-Fi/hotspot, and allow Windows Firewall for BhojPatra Desk.',
+        'BhojPatra Desk was not found on Wi-Fi and the cloud login also failed. Keep BhojPatra Desk open or check the staff login in the web Admin panel.',
       );
     }
     throw Exception(

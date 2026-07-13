@@ -25,7 +25,7 @@ import type { BillingSnapshot, CloudSyncSettings } from '../lib/cloudSync'
 import { createCloudOrder, updateCloudOrder, addCloudKOT, updateCloudKOT, addCloudPayment } from '../lib/cloudSync'
 import { calculateTax } from '../lib/money'
 import { realtimeClient } from '../lib/realtime'
-import { DEFAULT_BRIDGE_URL, sendPrintJob, type PrinterConnectionMode } from '../lib/printer'
+import { DEFAULT_BRIDGE_URL, normalizePrinterConnectionMode, sendPrintJob, type PrinterConnectionMode } from '../lib/printer'
 import { buildKotPrintText, buildReceiptPrintParts } from '../lib/printTemplates'
 import { isSaleableMenuItem } from '../lib/productTypes'
 import { DEFAULT_STATIONS } from '../lib/seedData'
@@ -307,6 +307,77 @@ const DEFAULT_PRINT_SETTINGS: PrintSettings = {
   directKotPrint: false,
   directReceiptPrint: false,
   directProformaPrint: false,
+}
+
+type DevicePrintSettings = Pick<PrintSettings,
+  | 'receiptWidth'
+  | 'headingSize'
+  | 'fontSize'
+  | 'printerName'
+  | 'connectionMode'
+  | 'usbVendorId'
+  | 'usbProductId'
+  | 'bridgeUrl'
+  | 'autoCut'
+  | 'openCashDrawer'
+  | 'directKotPrint'
+  | 'directReceiptPrint'
+  | 'directProformaPrint'
+>
+
+const DEVICE_PRINT_SETTINGS_KEY = 'bhojpatra-device-printer-settings-v1'
+
+function pickDevicePrintSettings(settings: PrintSettings): DevicePrintSettings {
+  return {
+    receiptWidth: settings.receiptWidth,
+    headingSize: settings.headingSize,
+    fontSize: settings.fontSize,
+    printerName: settings.printerName,
+    connectionMode: settings.connectionMode,
+    usbVendorId: settings.usbVendorId,
+    usbProductId: settings.usbProductId,
+    bridgeUrl: settings.bridgeUrl,
+    autoCut: settings.autoCut,
+    openCashDrawer: settings.openCashDrawer,
+    directKotPrint: settings.directKotPrint,
+    directReceiptPrint: settings.directReceiptPrint,
+    directProformaPrint: settings.directProformaPrint,
+  }
+}
+
+function readDevicePrintSettings(): Partial<DevicePrintSettings> | null {
+  if (typeof window === 'undefined') return null
+  try {
+    const raw = window.localStorage.getItem(DEVICE_PRINT_SETTINGS_KEY)
+    if (!raw) return null
+    const parsed = JSON.parse(raw)
+    return parsed && typeof parsed === 'object' ? parsed as Partial<DevicePrintSettings> : null
+  } catch {
+    return null
+  }
+}
+
+function saveDevicePrintSettings(settings: PrintSettings) {
+  if (typeof window === 'undefined') return
+  try {
+    window.localStorage.setItem(DEVICE_PRINT_SETTINGS_KEY, JSON.stringify(pickDevicePrintSettings(settings)))
+  } catch {
+    // The main Zustand persistence still retains these settings if storage is restricted.
+  }
+}
+
+function mergeDevicePrintSettings(incoming: Partial<PrintSettings> | undefined, localFallback?: PrintSettings): PrintSettings {
+  const base = { ...DEFAULT_PRINT_SETTINGS, ...incoming, connectionMode: normalizePrinterConnectionMode(incoming?.connectionMode) }
+  const device = readDevicePrintSettings() ?? (localFallback ? pickDevicePrintSettings(localFallback) : null)
+  const normalizedDevice = device
+    ? { ...device, connectionMode: normalizePrinterConnectionMode(device.connectionMode) }
+    : null
+  const bridgeWasChosen = base.connectionMode === 'bridge' || normalizedDevice?.connectionMode === 'bridge'
+  const merged = normalizedDevice
+    ? { ...base, ...normalizedDevice, connectionMode: bridgeWasChosen ? 'bridge' as const : normalizedDevice.connectionMode }
+    : base
+  saveDevicePrintSettings(merged)
+  return merged
 }
 
 const DEMO_CATEGORY_IDS = new Set(['cat_starters', 'cat_curries', 'cat_breads', 'cat_rice', 'cat_beverages'])
@@ -626,7 +697,7 @@ export const useBillingStore = create<BillingStore>()(
           ...normalized,
           tables: normalized.tables,
           outlet: { ...DEFAULT_OUTLET, ...normalized.outlet },
-          printSettings: { ...DEFAULT_PRINT_SETTINGS, ...normalized.printSettings },
+          printSettings: mergeDevicePrintSettings(normalized.printSettings, state.printSettings),
           cloudSync: { ...DEFAULT_CLOUD_SYNC_SETTINGS, ...normalized.cloudSync },
           appUpdate: { ...DEFAULT_APP_UPDATE_SETTINGS, ...normalized.appUpdate },
           purchaseEntries: normalized.purchaseEntries ?? [],
@@ -648,10 +719,18 @@ export const useBillingStore = create<BillingStore>()(
         auditLogs: addAudit(state, 'settings.outlet.updated', 'outlet', 'Outlet settings updated', state.outlet.id),
       })),
 
-      updatePrintSettings: (settings) => set((state) => ({
-        printSettings: { ...state.printSettings, ...settings },
-        auditLogs: addAudit(state, 'settings.print.updated', 'settings', 'Thermal print settings updated'),
-      })),
+      updatePrintSettings: (settings) => set((state) => {
+        const printSettings = {
+          ...state.printSettings,
+          ...settings,
+          connectionMode: normalizePrinterConnectionMode(settings.connectionMode ?? state.printSettings.connectionMode),
+        }
+        saveDevicePrintSettings(printSettings)
+        return {
+          printSettings,
+          auditLogs: addAudit(state, 'settings.print.updated', 'settings', 'Thermal print settings updated'),
+        }
+      }),
 
       updateCloudSyncSettings: (settings) => set((state) => ({
         cloudSync: { ...state.cloudSync, ...settings },
@@ -2285,8 +2364,13 @@ export const useBillingStore = create<BillingStore>()(
               const result = await sendPrintJob(state.printSettings, job)
               useUIStore.getState().addToast('success', result === 'direct' ? `${part.title} sent to printer` : `${part.title} opened in print dialog`, type === 'proforma' ? 'Proforma Print' : 'Bill Print')
             } catch (error) {
-              useUIStore.getState().addToast('error', `${error instanceof Error ? error.message : 'Direct print failed'} Opening the system print dialog instead.`)
-              await sendPrintJob({ ...state.printSettings, connectionMode: 'browser' }, job)
+              const message = error instanceof Error ? error.message : 'Direct print failed'
+              if (state.printSettings.connectionMode === 'bridge') {
+                useUIStore.getState().addToast('error', `${message} Local Bridge remains selected. Run the Bridge Repair installer and retry.`, 'Bill Print')
+              } else {
+                useUIStore.getState().addToast('error', `${message} Opening the system print dialog instead.`)
+                await sendPrintJob({ ...state.printSettings, connectionMode: 'browser' }, job)
+              }
             }
           }
         })()
@@ -2382,8 +2466,13 @@ export const useBillingStore = create<BillingStore>()(
               const result = await sendPrintJob(state.printSettings, job)
               useUIStore.getState().addToast('success', result === 'direct' ? `${part.title} sent to printer` : `${part.title} opened in print dialog`, 'Proforma Print')
             } catch (error) {
-              useUIStore.getState().addToast('error', `${error instanceof Error ? error.message : 'Direct proforma print failed'} Opening the system print dialog instead.`)
-              await sendPrintJob({ ...state.printSettings, connectionMode: 'browser' }, job)
+              const message = error instanceof Error ? error.message : 'Direct proforma print failed'
+              if (state.printSettings.connectionMode === 'bridge') {
+                useUIStore.getState().addToast('error', `${message} Local Bridge remains selected. Run the Bridge Repair installer and retry.`, 'Proforma Print')
+              } else {
+                useUIStore.getState().addToast('error', `${message} Opening the system print dialog instead.`)
+                await sendPrintJob({ ...state.printSettings, connectionMode: 'browser' }, job)
+              }
             }
           }
         })()
@@ -2409,8 +2498,13 @@ export const useBillingStore = create<BillingStore>()(
             useUIStore.getState().addToast('success', result === 'direct' ? `${kot.kotNo} sent to printer` : `${kot.kotNo} opened in print dialog`, 'KOT Print')
           })
           .catch(async (error) => {
-            useUIStore.getState().addToast('error', `${error instanceof Error ? error.message : 'Direct KOT print failed'} Opening the system print dialog instead.`)
-            await sendPrintJob({ ...state.printSettings, connectionMode: 'browser', openCashDrawer: false }, job)
+            const message = error instanceof Error ? error.message : 'Direct KOT print failed'
+            if (printSettings.connectionMode === 'bridge') {
+              useUIStore.getState().addToast('error', `${message} Local Bridge remains selected. Run the Bridge Repair installer and retry.`, 'KOT Print')
+            } else {
+              useUIStore.getState().addToast('error', `${message} Opening the system print dialog instead.`)
+              await sendPrintJob({ ...state.printSettings, connectionMode: 'browser', openCashDrawer: false }, job)
+            }
           })
       },
 
@@ -2589,6 +2683,7 @@ export const useBillingStore = create<BillingStore>()(
           ...currentState,
           ...persisted,
           ...normalized,
+          printSettings: mergeDevicePrintSettings(normalized.printSettings, persisted.printSettings),
           purchaseEntries: normalized.purchaseEntries ?? [],
           currentOrder,
           selectedTableId,

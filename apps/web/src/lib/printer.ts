@@ -2,6 +2,11 @@ import { invoke } from '@tauri-apps/api/core'
 
 export type PrinterConnectionMode = 'browser' | 'system' | 'webusb' | 'bridge' | 'native'
 
+export function normalizePrinterConnectionMode(mode?: PrinterConnectionMode): Exclude<PrinterConnectionMode, 'system'> {
+  if (mode === 'bridge' || mode === 'native' || mode === 'webusb') return mode
+  return 'browser'
+}
+
 export interface PrinterTransportSettings {
   connectionMode: PrinterConnectionMode
   printerName: string
@@ -27,6 +32,14 @@ export interface BridgePrinter {
   driverName?: string
   status?: string
   isDefault?: boolean
+}
+
+export interface BridgeHealth {
+  ok: boolean
+  service?: string
+  version?: string
+  spoolerStatus?: string
+  printerCount?: number
 }
 
 export interface PrintJob {
@@ -256,6 +269,38 @@ export function isLocalBridgeUrl(value?: string) {
   }
 }
 
+export async function checkBridgeHealth(bridgeUrl?: string, timeoutMs = 2500): Promise<BridgeHealth> {
+  const controller = new AbortController()
+  const timer = window.setTimeout(() => controller.abort(), timeoutMs)
+  try {
+    const response = await fetch(`${resolveBridgeUrlInput(bridgeUrl)}/health`, {
+      headers: { Accept: 'application/json' },
+      cache: 'no-store',
+      signal: controller.signal,
+    })
+    if (!response.ok) throw new Error(await bridgeErrorMessage(response))
+    const health = await response.json() as BridgeHealth
+    if (!health?.ok) throw new Error('The local printer bridge returned an unhealthy status.')
+    return health
+  } finally {
+    window.clearTimeout(timer)
+  }
+}
+
+async function waitForBridge(bridgeUrl?: string) {
+  let lastError: unknown
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    try {
+      return await checkBridgeHealth(bridgeUrl, 2500)
+    } catch (error) {
+      lastError = error
+      if (attempt < 3) await new Promise((resolve) => window.setTimeout(resolve, 700 * (attempt + 1)))
+    }
+  }
+  const detail = lastError instanceof Error && lastError.name !== 'AbortError' ? ` ${lastError.message}` : ''
+  throw new Error(`BhojPatra Printer Bridge is offline.${detail} Run the BhojPatra Printer Bridge repair installer once, then retry.`)
+}
+
 function isPrivateLanHost(hostname: string) {
   const host = hostname.replace(/^\[|\]$/g, '').toLowerCase()
   if (host === 'localhost' || host.endsWith('.pages.dev') || host.endsWith('.workers.dev')) return false
@@ -354,6 +399,7 @@ async function printNative(settings: PrinterTransportSettings, job: PrintJob) {
 
 async function printBridge(settings: PrinterTransportSettings, job: PrintJob) {
   if (!settings.printerName.trim()) throw new Error('Select a printer queue in Settings first.')
+  await waitForBridge(settings.bridgeUrl)
   const networkTarget = normalizeNetworkPrinterAddress(settings.printerName)
   const response = await fetch(`${resolveBridgeUrlInput(settings.bridgeUrl)}/print`, {
     method: 'POST',

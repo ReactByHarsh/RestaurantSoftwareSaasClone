@@ -25,6 +25,7 @@ use local_ip_address::{list_afinet_netifas, local_ip};
 use std::os::windows::process::CommandExt;
 
 use rusqlite::{params, Connection, OptionalExtension};
+use sha2::{Digest, Sha256};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tauri::{AppHandle, Emitter, Manager, State};
@@ -286,7 +287,7 @@ fn ensure_windows_firewall_rules() {
             name
         );
         let add_script = format!(
-            "netsh advfirewall firewall add rule name=\"{}\" dir=in action=allow protocol={} localport={} profile=private,domain description=\"{}\" | Out-Null",
+            "netsh advfirewall firewall add rule name=\"{}\" dir=in action=allow protocol={} localport={} profile=any edge=yes description=\"{}\" | Out-Null",
             name, protocol, port, description
         );
         let _ = powershell_command(&delete_script).output();
@@ -565,11 +566,19 @@ fn authenticate_credentials(
     }
     verify_account_access_window(&account)
         .map_err(|error| (StatusCode::FORBIDDEN, Json(json!({ "error": error }))))?;
+    let matches_secret = |stored: &str| {
+        if let Some(expected) = stored.strip_prefix("sha256$") {
+            let actual = hex::encode(Sha256::digest(secret.as_bytes()));
+            expected.eq_ignore_ascii_case(&actual)
+        } else {
+            stored == secret
+        }
+    };
     let valid_passwords = [Some(account.password.as_str()), account.pin.as_deref()];
     if !valid_passwords
         .into_iter()
         .flatten()
-        .any(|value| value == secret)
+        .any(matches_secret)
     {
         return Err((
             StatusCode::UNAUTHORIZED,
@@ -628,6 +637,45 @@ fn would_erase_core_restaurant_data(existing: Option<&Value>, incoming: &Value) 
         let next_count = incoming.get(*key).and_then(Value::as_array).map_or(0, Vec::len);
         current_count > 0 && next_count == 0
     })
+}
+
+fn preserves_role_restricted_collections(existing: Option<&Value>, incoming: &Value) -> bool {
+    let Some(existing) = existing.and_then(Value::as_object) else {
+        return true;
+    };
+    let Some(incoming) = incoming.as_object() else {
+        return false;
+    };
+    [
+        "outlet", "printSettings", "appUpdate",
+        "menuCategories", "menuItems", "floors", "stations",
+        "inventoryItems", "purchaseEntries", "payments",
+    ]
+    .iter()
+    .all(|key| existing.get(*key) == incoming.get(*key))
+}
+
+fn sanitize_snapshot_for_lan(snapshot: &Value) -> Value {
+    let mut sanitized = snapshot.clone();
+    if let Some(cloud) = sanitized.get_mut("cloudSync").and_then(Value::as_object_mut) {
+        cloud.insert("accountSecret".to_string(), Value::String(String::new()));
+    }
+    sanitized
+}
+
+fn preserve_cloud_secret(existing: Option<&Value>, incoming: &Value) -> Value {
+    let mut merged = incoming.clone();
+    let existing_secret = existing
+        .and_then(|value| value.get("cloudSync"))
+        .and_then(|value| value.get("accountSecret"))
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    if !existing_secret.is_empty() {
+        if let Some(cloud) = merged.get_mut("cloudSync").and_then(Value::as_object_mut) {
+            cloud.insert("accountSecret".to_string(), Value::String(existing_secret.to_string()));
+        }
+    }
+    merged
 }
 
 fn is_private_ipv4(address: Ipv4Addr) -> bool {
@@ -1310,12 +1358,13 @@ async fn lan_get_state(
     );
     let body = if let Some(payload) = snapshot {
         let outlet = snapshot_outlet(&payload);
+        let safe_payload = sanitize_snapshot_for_lan(&payload);
         json!({
           "exists": true,
           "outletId": outlet.id,
           "tenantId": outlet.tenant_id,
           "updatedAt": stored_updated_at.unwrap_or_else(|| chrono::Utc::now().to_rfc3339()),
-          "payload": payload,
+          "payload": safe_payload,
         })
     } else {
         json!({
@@ -1356,6 +1405,14 @@ async fn lan_put_state(
             Json(json!({ "error": error })),
         )
     })?;
+    if !["owner", "admin", "manager", "captain", "kitchen"].contains(&account.role.as_str()) {
+        return Err((StatusCode::FORBIDDEN, Json(json!({ "error": "This role cannot update restaurant state" }))));
+    }
+    if ["captain", "kitchen"].contains(&account.role.as_str())
+        && !preserves_role_restricted_collections(existing.as_ref(), &body.payload)
+    {
+        return Err((StatusCode::FORBIDDEN, Json(json!({ "error": "This role can only update tables, orders, and kitchen workflow" }))));
+    }
     let existing_updated_at = state_updated_at(&connection, "snapshot").map_err(|error| {
         (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": error })))
     })?;
@@ -1364,7 +1421,7 @@ async fn lan_put_state(
             return Err((StatusCode::CONFLICT, Json(json!({
               "error": "Restaurant data changed on another device. Refresh and retry.",
               "updatedAt": actual,
-              "payload": existing,
+              "payload": existing.as_ref().map(sanitize_snapshot_for_lan),
             }))));
         }
     }
@@ -1379,26 +1436,34 @@ async fn lan_put_state(
           "updatedAt": existing_updated_at.unwrap_or_else(|| chrono::Utc::now().to_rfc3339()),
           "skipped": true,
           "reason": "Ignored a snapshot that would erase existing restaurant setup data",
-          "payload": existing,
+          "payload": existing.as_ref().map(sanitize_snapshot_for_lan),
         })));
     }
 
-    write_json(&connection, "snapshot", &body.payload).map_err(|error| {
+    let mut stored_payload = preserve_cloud_secret(existing.as_ref(), &body.payload);
+    if ["captain", "kitchen"].contains(&account.role.as_str()) {
+        if let Some(existing_cloud) = existing.as_ref().and_then(|value| value.get("cloudSync")) {
+            if let Some(root) = stored_payload.as_object_mut() {
+                root.insert("cloudSync".to_string(), existing_cloud.clone());
+            }
+        }
+    }
+    write_json(&connection, "snapshot", &stored_payload).map_err(|error| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({ "error": error })),
         )
     })?;
     let updated_at = chrono::Utc::now().to_rfc3339();
-    let event = json!({
+    let public_event = json!({
       "type": "STATE_UPDATED",
       "outletId": outlet_id,
-      "payload": body.payload,
+      "payload": sanitize_snapshot_for_lan(&stored_payload),
       "timestamp": updated_at,
       "clientId": body.client_id,
     });
-    let _ = state.broadcaster.send(event.to_string());
-    let _ = state.app.emit("lan_state_updated", &event["payload"]);
+    let _ = state.broadcaster.send(public_event.to_string());
+    let _ = state.app.emit("lan_state_updated", &stored_payload);
 
     Ok(Json(json!({
       "ok": true,
