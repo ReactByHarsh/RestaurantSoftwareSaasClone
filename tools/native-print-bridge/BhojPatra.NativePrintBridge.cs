@@ -24,7 +24,7 @@ namespace BhojPatra.NativePrintBridge
 {
     internal static class Program
     {
-        internal const string Version = "3.0.1-all-in-one-stable";
+        internal const string Version = "3.1.0-all-in-one-resilient";
         private static readonly string[] SupportedFeatures = new[] { "qr", "cashdrawer", "logo", "network-print", "printer-status", "lan-host", "lan-discovery", "lan-realtime", "offline-state", "log-rotation", "graceful-shutdown" };
         private static readonly JavaScriptSerializer Json = new JavaScriptSerializer { MaxJsonLength = 20 * 1024 * 1024 };
         private static readonly object LastErrorLock = new object();
@@ -289,8 +289,11 @@ namespace BhojPatra.NativePrintBridge
                 { "version", Version },
                 { "features", SupportedFeatures },
                 { "port", _server != null ? ReadPort(new string[0]) : 8181 },
-                { "spoolerStatus", PrinterService.GetSpoolerStatus() },
-                { "printerCount", PrinterService.ListPrinters().Count },
+                // Health must remain a lightweight liveness probe. Printer/WMI discovery can
+                // occasionally take several seconds while Windows refreshes USB queues. Doing
+                // that work here caused the browser probe to time out and falsely report offline.
+                { "spoolerStatus", "probe-on-demand" },
+                { "printerCount", -1 },
                 { "uptime", (DateTime.UtcNow - _startedAt).ToString(@"d\.hh\:mm\:ss") },
                 { "lastPrintAt", lastPrintAt },
                 { "totalPrints", totalPrints },
@@ -465,18 +468,18 @@ namespace BhojPatra.NativePrintBridge
             {
                 try
                 {
-                    var asyncResult = _listener.BeginAcceptTcpClient(null, null);
-                    // Wait for either a new connection or shutdown signal
-                    var waitHandles = new WaitHandle[] { asyncResult.AsyncWaitHandle, _shutdownEvent };
-                    var index = WaitHandle.WaitAny(waitHandles);
-                    if (index == 1) // shutdown
+                    // Polling avoids leaking one AsyncWaitHandle for every browser heartbeat.
+                    if (!_listener.Pending())
                     {
-                        _listener.Stop();
-                        Program.Log("Server stopped gracefully.");
-                        break;
+                        _shutdownEvent.WaitOne(100);
+                        continue;
                     }
-                    var client = _listener.EndAcceptTcpClient(asyncResult);
-                    ThreadPool.QueueUserWorkItem(_ => HandleClient(client));
+                    var client = _listener.AcceptTcpClient();
+                    ThreadPool.QueueUserWorkItem(_ =>
+                    {
+                        try { HandleClient(client); }
+                        catch (Exception ex) { Program.Log("Unhandled client error contained: " + ex.Message); }
+                    });
                 }
                 catch (ObjectDisposedException)
                 {
@@ -513,9 +516,23 @@ namespace BhojPatra.NativePrintBridge
                 }
                 catch (Exception ex)
                 {
-                    var body = "{\"error\":\"" + JsonEscape(ex.Message) + "\"}";
-                    var response = new BridgeResponse(500, body, new Dictionary<string, string>(), "application/json; charset=utf-8");
-                    response.Write(client.GetStream());
+                    Program.Log("Client request failed: " + ex.Message);
+                    // The original failure is often a browser timeout/client disconnect. Never
+                    // let a second write to that closed socket escape a ThreadPool callback: on
+                    // .NET Framework an unhandled callback exception terminates the whole bridge.
+                    try
+                    {
+                        if (client.Connected)
+                        {
+                            var body = "{\"error\":\"" + JsonEscape(ex.Message) + "\"}";
+                            var response = new BridgeResponse(500, body, new Dictionary<string, string>(), "application/json; charset=utf-8");
+                            response.Write(client.GetStream());
+                        }
+                    }
+                    catch (Exception writeError)
+                    {
+                        Program.Log("Client disconnected before error response: " + writeError.Message);
+                    }
                 }
             }
         }

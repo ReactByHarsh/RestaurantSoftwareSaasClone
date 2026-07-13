@@ -6,6 +6,8 @@ $bridgeExe = Join-Path $releaseDir "bhojpatra-native-bridge.exe"
 $setupSource = Join-Path $root "tools\native-print-bridge\BhojPatra.NativePrintBridgeSetup.cs"
 $setupManifest = Join-Path $root "tools\native-print-bridge\setup.manifest"
 $setupExe = Join-Path $releaseDir "BhojPatra-Native-Print-Bridge-Setup.exe"
+$downloadDir = Join-Path $root "apps\web\public\downloads"
+$downloadExe = Join-Path $downloadDir "BhojPatra-Printer-Bridge-Setup.exe"
 
 & (Join-Path $root "tools\build-native-print-bridge.ps1")
 
@@ -35,4 +37,8 @@ if ($LASTEXITCODE -ne 0 -or !(Test-Path $setupExe)) {
   throw "Native setup compilation failed with exit code $LASTEXITCODE."
 }
 
+New-Item -ItemType Directory -Path $downloadDir -Force | Out-Null
+Copy-Item -LiteralPath $setupExe -Destination $downloadExe -Force
+
 Write-Host "Built $setupExe"
+Write-Host "Published installer asset $downloadExe"

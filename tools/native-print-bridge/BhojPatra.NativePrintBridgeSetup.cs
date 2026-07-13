@@ -41,11 +41,12 @@ namespace BhojPatra.NativePrintBridgeSetup
                 CopyRepairSetup(installDir);
                 WriteReadme(installDir);
                 WriteUninstaller(installDir);
-                RegisterRunFallback(bridgePath);
-                CreateStartupFallback(bridgePath);
+                var scheduledTaskInstalled = false;
                 try
                 {
                     CreateResilientScheduledTask(bridgePath);
+                    scheduledTaskInstalled = true;
+                    DeleteRunFallback();
                 }
                 catch (Exception taskError)
                 {
@@ -53,11 +54,14 @@ namespace BhojPatra.NativePrintBridgeSetup
                         Path.Combine(installDir, "native-print-bridge-setup.log"),
                         DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss") + " Scheduled task fallback: " + taskError.Message + Environment.NewLine,
                         Encoding.UTF8);
+                    // Use one fallback only. Starting from Task Scheduler, Registry Run and the
+                    // Startup folder at the same time caused duplicate processes and restart loops.
+                    RegisterRunFallback(bridgePath);
                 }
                 CreateStartMenuShortcuts(installDir, bridgePath);
                 EnsureLanFirewallRules();
 
-                StartBridge(bridgePath);
+                StartBridge(bridgePath, scheduledTaskInstalled);
                 var health = WaitForHealth();
 
                 if (!quiet)
@@ -206,6 +210,20 @@ namespace BhojPatra.NativePrintBridgeSetup
             }
         }
 
+        private static void DeleteRunFallback()
+        {
+            using (var key = Registry.CurrentUser.OpenSubKey(@"Software\Microsoft\Windows\CurrentVersion\Run", true))
+            {
+                if (key != null)
+                {
+                    key.DeleteValue("BhojPatra", false);
+                    key.DeleteValue("BhojPatra Print Bridge", false);
+                    key.DeleteValue("BhojPatra Native Print Bridge", false);
+                    key.DeleteValue(RunValueName, false);
+                }
+            }
+        }
+
         private static void DeleteOldStartupFiles()
         {
             var startup = Environment.GetFolderPath(Environment.SpecialFolder.Startup);
@@ -294,8 +312,14 @@ namespace BhojPatra.NativePrintBridgeSetup
                 Encoding.ASCII);
         }
 
-        private static void StartBridge(string bridgePath)
+        private static void StartBridge(string bridgePath, bool scheduledTaskInstalled)
         {
+            if (scheduledTaskInstalled)
+            {
+                var taskStart = RunHidden("schtasks.exe", "/Run /TN \"" + TaskName + "\"", true);
+                if (taskStart == 0) return;
+            }
+
             Process.Start(new ProcessStartInfo
             {
                 FileName = bridgePath,

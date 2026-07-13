@@ -131,15 +131,22 @@ export default function PrinterSettingsScreen() {
     }
 
     let cancelled = false
+    let consecutiveFailures = 0
+    let hasConnected = false
     const refreshHealth = async () => {
       setBridgeStatus((current) => current === 'online' ? current : 'checking')
       try {
         const health = await checkBridgeHealth(draftSettings.bridgeUrl)
         if (cancelled) return
         setBridgeVersion(health.version ?? '')
+        consecutiveFailures = 0
+        hasConnected = true
         setBridgeStatus('online')
       } catch {
-        if (!cancelled) setBridgeStatus('offline')
+        consecutiveFailures += 1
+        // A sleeping laptop, browser resume, or Windows spooler refresh can miss one
+        // heartbeat. Keep a known-good bridge green unless three probes fail in a row.
+        if (!cancelled && (!hasConnected || consecutiveFailures >= 3)) setBridgeStatus('offline')
       }
     }
 
@@ -568,9 +575,9 @@ export default function PrinterSettingsScreen() {
                       <input value={draftSettings.printerName} onChange={(event) => setDraftValue('printerName', event.target.value)} placeholder="Printer queue or LAN target, e.g. POS80 Printer or tcp://192.168.1.50:9100" className="w-full px-3 py-2 rounded-xl border-2 border-slate-200 text-sm font-bold outline-none focus:border-primary/50" />
                     )}
                     <div className="flex flex-col gap-2 rounded-lg bg-slate-50 p-2.5 sm:flex-row sm:items-center sm:justify-between">
-                      <p className="text-[10px] font-bold text-slate-500">If this computer shows offline after restart, run Repair once. Your selected printer and paper settings stay saved on this computer.</p>
-                      <a href="/downloads/BhojPatra-Printer-Bridge-Setup.exe?v=3.0.1" download className="inline-flex min-h-8 shrink-0 items-center justify-center gap-1.5 rounded-lg bg-primary px-3 py-2 text-[10px] font-black text-white">
-                        <Download size={13} /> INSTALL / REPAIR BRIDGE
+                      <p className="text-[10px] font-bold text-slate-500">All-in-one Windows bridge with automatic startup and crash recovery. Your printer and paper settings stay saved on this computer.</p>
+                      <a href="/downloads/BhojPatra-Printer-Bridge-Setup.exe?v=3.1.0" download className="inline-flex min-h-8 shrink-0 items-center justify-center gap-1.5 rounded-lg bg-primary px-3 py-2 text-[10px] font-black text-white">
+                        <Download size={13} /> DOWNLOAD ALL-IN-ONE BRIDGE
                       </a>
                     </div>
                   </div>

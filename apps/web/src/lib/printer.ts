@@ -298,7 +298,7 @@ async function waitForBridge(bridgeUrl?: string) {
     }
   }
   const detail = lastError instanceof Error && lastError.name !== 'AbortError' ? ` ${lastError.message}` : ''
-  throw new Error(`BhojPatra Printer Bridge is offline.${detail} Run the BhojPatra Printer Bridge repair installer once, then retry.`)
+  throw new Error(`BhojPatra Printer Bridge is temporarily unavailable after automatic retries.${detail} Windows will restart it automatically; wait a moment and retry.`)
 }
 
 function isPrivateLanHost(hostname: string) {
@@ -338,7 +338,21 @@ export function normalizeNetworkPrinterAddress(value?: string) {
 }
 
 export async function discoverBridgePrinters(bridgeUrl?: string): Promise<BridgePrinter[]> {
-  const response = await fetch(`${resolveBridgeUrlInput(bridgeUrl)}/printers`, { headers: { Accept: 'application/json' } })
+  // Printer enumeration may legitimately take longer while Windows refreshes a USB queue.
+  // First prove the lightweight bridge heartbeat, then allow discovery its own timeout.
+  await checkBridgeHealth(bridgeUrl, 4000)
+  const controller = new AbortController()
+  const timer = window.setTimeout(() => controller.abort(), 20_000)
+  let response: Response
+  try {
+    response = await fetch(`${resolveBridgeUrlInput(bridgeUrl)}/printers`, {
+      headers: { Accept: 'application/json' },
+      cache: 'no-store',
+      signal: controller.signal,
+    })
+  } finally {
+    window.clearTimeout(timer)
+  }
   if (!response.ok) {
     if ([404, 405].includes(response.status) && !isLocalBridgeUrl(bridgeUrl)) {
       throw new Error('That looks like a printer IP/link, not the local print bridge. Use the local bridge URL and put the LAN printer IP as the printer target.')
