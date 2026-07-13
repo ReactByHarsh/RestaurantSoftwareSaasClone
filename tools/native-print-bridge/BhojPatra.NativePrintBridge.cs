@@ -729,6 +729,16 @@ namespace BhojPatra.NativePrintBridge
             NetworkTarget target;
             if (TryParseNetworkTarget(printer, out target))
             {
+                // Prefer an installed Windows queue when its port points at the same
+                // target. This keeps working even when a customer saved a hostname
+                // that Windows can no longer resolve, while preserving raw TCP for
+                // printers that are not installed in the spooler.
+                var installedQueue = ResolveNetworkQueue(target, ListPrinters());
+                if (!String.IsNullOrWhiteSpace(installedQueue))
+                {
+                    RawPrinter.Send(installedQueue, EscPosBytes(content, options), jobName);
+                    return;
+                }
                 PrintRawTcp(target, content, options);
                 return;
             }
@@ -800,6 +810,25 @@ namespace BhojPatra.NativePrintBridge
         private static string NormalizePrinterName(string value)
         {
             return Regex.Replace((value ?? "").Trim(), "\\s+", " ").Trim().ToLowerInvariant();
+        }
+
+        private static string ResolveNetworkQueue(NetworkTarget target, List<Dictionary<string, object>> rows)
+        {
+            if (target == null || rows == null) return null;
+            var host = (target.Host ?? "").Trim().ToLowerInvariant();
+            if (String.IsNullOrWhiteSpace(host)) return null;
+            var hostWithUnderscores = host.Replace('.', '_');
+            foreach (var row in rows)
+            {
+                var port = Convert.ToString(row["portName"]) ?? "";
+                var normalizedPort = port.Trim().ToLowerInvariant();
+                if (normalizedPort.Contains(host) || normalizedPort.Contains(hostWithUnderscores) ||
+                    normalizedPort.Contains("ip_" + hostWithUnderscores))
+                {
+                    return Convert.ToString(row["name"]);
+                }
+            }
+            return null;
         }
 
         public static string GetSpoolerStatus()
@@ -1148,12 +1177,20 @@ namespace BhojPatra.NativePrintBridge
             var bytes = EscPosBytes(content, options);
             using (var client = new TcpClient())
             {
-                var result = client.BeginConnect(target.Host, target.Port, null, null);
-                if (!result.AsyncWaitHandle.WaitOne(TimeSpan.FromSeconds(10)))
+                IAsyncResult result;
+                try
                 {
-                    throw new System.TimeoutException("LAN printer timed out at " + target.Host + ":" + target.Port);
+                    result = client.BeginConnect(target.Host, target.Port, null, null);
+                    if (!result.AsyncWaitHandle.WaitOne(TimeSpan.FromSeconds(10)))
+                    {
+                        throw new System.TimeoutException("LAN printer timed out at " + target.Host + ":" + target.Port);
+                    }
+                    client.EndConnect(result);
                 }
-                client.EndConnect(result);
+                catch (SocketException ex)
+                {
+                    throw new InvalidOperationException("Could not resolve LAN printer host '" + target.Host + "'. Enter the printer IP address or select its installed Windows queue.", ex);
+                }
                 using (var stream = client.GetStream())
                 {
                     stream.Write(bytes, 0, bytes.Length);

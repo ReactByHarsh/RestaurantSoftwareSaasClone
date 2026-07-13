@@ -305,6 +305,10 @@ function isPrivateLanHost(hostname: string) {
   const host = hostname.replace(/^\[|\]$/g, '').toLowerCase()
   if (host === 'localhost' || host.endsWith('.pages.dev') || host.endsWith('.workers.dev')) return false
   if (host.endsWith('.local')) return true
+  // Local printer DNS names are commonly single-label names such as `POS80` or
+  // `receipt-printer`. They are not public DNS names, so allow them as explicit
+  // LAN targets instead of sending the unnormalised value to the bridge.
+  if (/^[a-z0-9][a-z0-9-]*$/i.test(host)) return true
   const parts = host.split('.').map(part => Number(part))
   if (parts.length !== 4 || parts.some(part => !Number.isInteger(part) || part < 0 || part > 255)) return false
   return parts[0] === 10 ||
@@ -320,6 +324,7 @@ export function normalizeNetworkPrinterAddress(value?: string) {
   try {
     const parsed = new URL(raw)
     if (['tcp:', 'socket:', 'raw:'].includes(parsed.protocol)) {
+      if (!parsed.hostname) return ''
       return `tcp://${parsed.hostname}:${parsed.port || '9100'}`
     }
     if (['http:', 'https:'].includes(parsed.protocol) && isPrivateLanHost(parsed.hostname)) {
@@ -487,4 +492,12 @@ export async function sendPrintJob(settings: PrinterTransportSettings, job: Prin
   if (job.browserUrl) printUrlWithoutPopup(job.browserUrl)
   else printTextWithDialog(job)
   return 'dialog'
+}
+
+export function describePrinterError(error: unknown) {
+  const message = error instanceof Error ? error.message : String(error || 'Direct print failed')
+  if (/no such host|enotfound|name or service not known|could not resolve/i.test(message)) {
+    return 'The bridge is online, but the saved LAN printer hostname cannot be resolved. Open Printer Settings, click Detect Printers, select the Windows printer queue, or enter the printer IP address (for example 192.168.1.50:9100).'
+  }
+  return message
 }

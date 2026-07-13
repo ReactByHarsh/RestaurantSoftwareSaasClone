@@ -25,7 +25,7 @@ import type { BillingSnapshot, CloudSyncSettings } from '../lib/cloudSync'
 import { createCloudOrder, updateCloudOrder, addCloudKOT, updateCloudKOT, addCloudPayment } from '../lib/cloudSync'
 import { calculateTax } from '../lib/money'
 import { realtimeClient } from '../lib/realtime'
-import { DEFAULT_BRIDGE_URL, normalizePrinterConnectionMode, sendPrintJob, type PrinterConnectionMode } from '../lib/printer'
+import { DEFAULT_BRIDGE_URL, describePrinterError, normalizePrinterConnectionMode, sendPrintJob, type PrinterConnectionMode } from '../lib/printer'
 import { buildKotPrintText, buildReceiptPrintParts } from '../lib/printTemplates'
 import { isSaleableMenuItem } from '../lib/productTypes'
 import { DEFAULT_STATIONS } from '../lib/seedData'
@@ -2364,9 +2364,9 @@ export const useBillingStore = create<BillingStore>()(
               const result = await sendPrintJob(state.printSettings, job)
               useUIStore.getState().addToast('success', result === 'direct' ? `${part.title} sent to printer` : `${part.title} opened in print dialog`, type === 'proforma' ? 'Proforma Print' : 'Bill Print')
             } catch (error) {
-              const message = error instanceof Error ? error.message : 'Direct print failed'
+              const message = describePrinterError(error)
               if (state.printSettings.connectionMode === 'bridge') {
-                useUIStore.getState().addToast('error', `${message} Local Bridge remains selected. Run the Bridge Repair installer and retry.`, 'Bill Print')
+                useUIStore.getState().addToast('error', message, 'Bill Print')
               } else {
                 useUIStore.getState().addToast('error', `${message} Opening the system print dialog instead.`)
                 await sendPrintJob({ ...state.printSettings, connectionMode: 'browser' }, job)
@@ -2466,9 +2466,9 @@ export const useBillingStore = create<BillingStore>()(
               const result = await sendPrintJob(state.printSettings, job)
               useUIStore.getState().addToast('success', result === 'direct' ? `${part.title} sent to printer` : `${part.title} opened in print dialog`, 'Proforma Print')
             } catch (error) {
-              const message = error instanceof Error ? error.message : 'Direct proforma print failed'
+              const message = describePrinterError(error)
               if (state.printSettings.connectionMode === 'bridge') {
-                useUIStore.getState().addToast('error', `${message} Local Bridge remains selected. Run the Bridge Repair installer and retry.`, 'Proforma Print')
+                useUIStore.getState().addToast('error', message, 'Proforma Print')
               } else {
                 useUIStore.getState().addToast('error', `${message} Opening the system print dialog instead.`)
                 await sendPrintJob({ ...state.printSettings, connectionMode: 'browser' }, job)
@@ -2498,9 +2498,9 @@ export const useBillingStore = create<BillingStore>()(
             useUIStore.getState().addToast('success', result === 'direct' ? `${kot.kotNo} sent to printer` : `${kot.kotNo} opened in print dialog`, 'KOT Print')
           })
           .catch(async (error) => {
-            const message = error instanceof Error ? error.message : 'Direct KOT print failed'
+            const message = describePrinterError(error)
             if (printSettings.connectionMode === 'bridge') {
-              useUIStore.getState().addToast('error', `${message} Local Bridge remains selected. Run the Bridge Repair installer and retry.`, 'KOT Print')
+              useUIStore.getState().addToast('error', message, 'KOT Print')
             } else {
               useUIStore.getState().addToast('error', `${message} Opening the system print dialog instead.`)
               await sendPrintJob({ ...state.printSettings, connectionMode: 'browser', openCashDrawer: false }, job)
