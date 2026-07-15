@@ -65,6 +65,7 @@ export interface OutletSettings {
 export interface PrintSettings {
   receiptWidth: '58mm' | '72mm' | '80mm'
   billMode: 'single' | 'separate'
+  kotPrintMode: 'single' | 'separate'
   businessName: string
   headingSize: 'compact' | 'standard' | 'large'
   fontSize: 'compact' | 'standard' | 'large'
@@ -224,7 +225,7 @@ interface BillingStore {
 
   printReceipt: (orderId: string, type?: 'invoice' | 'proforma') => void
   printCartProforma: () => void
-  printKOT: (kotId: string) => void
+  printKOT: (kotId: string, kotIds?: string[]) => void
   getCartTotal: () => { subtotal: number; tax: number; discount: number; total: number }
   getActiveKOTs: () => KOT[]
   getCustomerAccountDetails: (phone: string) => { balancePaise: number, unpaidItems: string[] }
@@ -282,6 +283,7 @@ const DEFAULT_OUTLET: OutletSettings = {
 const DEFAULT_PRINT_SETTINGS: PrintSettings = {
   receiptWidth: '80mm',
   billMode: 'separate',
+  kotPrintMode: 'separate',
   businessName: 'BhojPatra Bistro',
   headingSize: 'standard',
   fontSize: 'standard',
@@ -307,6 +309,17 @@ const DEFAULT_PRINT_SETTINGS: PrintSettings = {
   directKotPrint: false,
   directReceiptPrint: false,
   directProformaPrint: false,
+}
+
+function combineKotsForPrint(kots: KOT[]): KOT {
+  const first = kots[0]
+  if (!first) throw new Error('At least one KOT is required')
+  return {
+    ...first,
+    stationId: undefined,
+    kotNo: kots.map((kot) => kot.kotNo).join(' + '),
+    items: kots.flatMap((kot) => kot.items),
+  }
 }
 
 type DevicePrintSettings = Pick<PrintSettings,
@@ -1734,7 +1747,12 @@ export const useBillingStore = create<BillingStore>()(
 
         realtimeClient.broadcast('KOT_CREATED', { kot: kotsToCreate[0], kots: kotsToCreate, order: updatedOrder })
         if (state.printSettings.autoPrintKot || state.printSettings.directKotPrint || ['webusb', 'bridge'].includes(state.printSettings.connectionMode)) {
-          kotsToCreate.forEach(kot => setTimeout(() => get().printKOT(kot.id), 0))
+          if (state.printSettings.kotPrintMode === 'single' && kotsToCreate.length > 1) {
+            const kotIds = kotsToCreate.map((kot) => kot.id)
+            setTimeout(() => get().printKOT(kotIds[0], kotIds), 0)
+          } else {
+            kotsToCreate.forEach(kot => setTimeout(() => get().printKOT(kot.id), 0))
+          }
         }
         return kotsToCreate[0] ?? null
       },
@@ -2478,24 +2496,33 @@ export const useBillingStore = create<BillingStore>()(
         })()
       },
 
-      printKOT: (kotId) => {
+      printKOT: (kotId, kotIds) => {
         const url = `/print/kot/${kotId}`
         const state = get()
         const kot = state.kots.find((candidate) => candidate.id === kotId)
         if (!kot) return
+        const selectedKots = kotIds?.length
+          ? kotIds.map((id) => state.kots.find((candidate) => candidate.id === id)).filter((candidate): candidate is KOT => Boolean(candidate))
+          : [kot]
+        const printableKot = state.printSettings.kotPrintMode === 'single' && selectedKots.length > 1
+          ? combineKotsForPrint(selectedKots)
+          : kot
         const station = kot.stationId ? state.stations.find(candidate => candidate.id === kot.stationId) : undefined
         const stationPrinter = station?.printerTarget?.trim()
         const job = {
-          jobName: `KOT ${kot.kotNo}${station ? ` ${station.name}` : ''}`,
-          text: buildKotPrintText(kot, state.outlet, state.printSettings),
+          jobName: `KOT ${printableKot.kotNo}${station ? ` ${station.name}` : ''}`,
+          text: buildKotPrintText(printableKot, state.outlet, state.printSettings),
           browserUrl: url,
         }
-        const printSettings = stationPrinter
-          ? { ...state.printSettings, connectionMode: state.printSettings.connectionMode === 'bridge' ? 'bridge' as const : 'native' as const, bridgeUrl: state.printSettings.bridgeUrl || DEFAULT_BRIDGE_URL, printerName: stationPrinter, openCashDrawer: false }
+        const printTarget = state.printSettings.kotPrintMode === 'single' && selectedKots.length > 1
+          ? (state.printSettings.printerName.trim() || stationPrinter)
+          : stationPrinter
+        const printSettings = printTarget
+          ? { ...state.printSettings, connectionMode: state.printSettings.connectionMode === 'bridge' ? 'bridge' as const : 'native' as const, bridgeUrl: state.printSettings.bridgeUrl || DEFAULT_BRIDGE_URL, printerName: printTarget, openCashDrawer: false }
           : { ...state.printSettings, openCashDrawer: false }
         void sendPrintJob(printSettings, job)
           .then((result) => {
-            useUIStore.getState().addToast('success', result === 'direct' ? `${kot.kotNo} sent to printer` : `${kot.kotNo} opened in print dialog`, 'KOT Print')
+            useUIStore.getState().addToast('success', result === 'direct' ? `${printableKot.kotNo} sent to printer` : `${printableKot.kotNo} opened in print dialog`, 'KOT Print')
           })
           .catch(async (error) => {
             const message = describePrinterError(error)
