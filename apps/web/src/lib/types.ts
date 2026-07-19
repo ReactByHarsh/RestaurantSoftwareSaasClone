@@ -201,6 +201,9 @@ export interface Order {
   closedAt?: string
   cancellationReason?: string
   cancelledAt?: string
+  recipeConsumptionStatus?: 'none' | 'consumed' | 'reversed'
+  recipeConsumedAt?: string
+  recipeReversedAt?: string
 }
 
 export interface OrderItem {

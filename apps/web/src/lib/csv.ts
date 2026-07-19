@@ -1,4 +1,4 @@
-import { MenuItem, MenuCategory, Station } from './types'
+import { MenuItem, MenuCategory, Station, RecipeItem, StockUnit } from './types'
 
 export const PRODUCT_CSV_HEADERS = [
   'ShortCode',
@@ -35,7 +35,66 @@ export const PRODUCT_CSV_HEADERS = [
   'IsFavorite',
   'Description',
   'Toppings',
+  'Recipe',
 ]
+
+const RECIPE_UNITS: StockUnit[] = ['kg', 'g', 'l', 'ml', 'pcs', 'nos', 'plate', 'portion']
+
+/** Resolve the friendly unit spellings accepted by menu CSVs. */
+export function normalizeRecipeUnit(value: string): StockUnit | null {
+  const unit = value.trim().toLowerCase()
+  const aliases: Record<string, StockUnit> = {
+    kilogram: 'kg', kilograms: 'kg', kilo: 'kg', kilos: 'kg',
+    gram: 'g', grams: 'g',
+    litre: 'l', liters: 'l', liter: 'l', litres: 'l',
+    millilitre: 'ml', millilitres: 'ml', milliliter: 'ml', milliliters: 'ml',
+    piece: 'pcs', pieces: 'pcs', pc: 'pcs',
+    number: 'nos', numbers: 'nos', no: 'nos',
+  }
+  return aliases[unit] ?? (RECIPE_UNITS.includes(unit as StockUnit) ? unit as StockUnit : null)
+}
+
+/** Convert compatible recipe quantities; null means the units cannot be mixed. */
+export function convertRecipeQuantity(quantity: number, from: StockUnit, to: StockUnit): number | null {
+  if (from === to) return quantity
+  if ((from === 'kg' || from === 'g') && (to === 'kg' || to === 'g')) {
+    const grams = from === 'kg' ? quantity * 1000 : quantity
+    return to === 'kg' ? grams / 1000 : grams
+  }
+  if ((from === 'l' || from === 'ml') && (to === 'l' || to === 'ml')) {
+    const millilitres = from === 'l' ? quantity * 1000 : quantity
+    return to === 'l' ? millilitres / 1000 : millilitres
+  }
+  return null
+}
+
+export interface ParsedRecipeLine { name: string; quantity: number; unit: StockUnit }
+export interface ParsedRecipe { items: ParsedRecipeLine[]; errors: string[] }
+
+/** Parse Ingredient|Quantity|Unit;... recipe cells and aggregate duplicates. */
+export function parseRecipeField(value: string): ParsedRecipe {
+  const items: ParsedRecipeLine[] = []
+  const errors: string[] = []
+  const aggregate = new Map<string, ParsedRecipeLine>()
+  if (!value.trim()) return { items, errors }
+  value.split(';').forEach((part, index) => {
+    const bits = part.split('|').map(bit => bit.trim())
+    if (bits.length !== 3 || !bits[0]) { errors.push(`Recipe entry ${index + 1} must be Ingredient|Quantity|Unit`); return }
+    const quantity = Number(bits[1])
+    const unit = normalizeRecipeUnit(bits[2])
+    if (!Number.isFinite(quantity) || quantity <= 0) { errors.push(`Recipe entry ${index + 1} has an invalid quantity`); return }
+    if (!unit) { errors.push(`Recipe entry ${index + 1} has an invalid unit '${bits[2]}'`); return }
+    const key = `${bits[0].toLocaleLowerCase()}|${unit}`
+    const existing = aggregate.get(key)
+    if (existing) existing.quantity += quantity
+    else aggregate.set(key, { name: bits[0], quantity, unit })
+  })
+  return { items: Array.from(aggregate.values()), errors }
+}
+
+export function serializeRecipe(recipeItems?: RecipeItem[]): string {
+  return (recipeItems ?? []).map(item => `${item.name}|${item.quantity}|${item.unit}`).join(';')
+}
 
 export function exportCsv(filename: string, rows: string[][]) {
   const csvContent = rows.map(e => e.map(val => `"${String(val).replace(/"/g, '""')}"`).join(",")).join("\n")
@@ -114,6 +173,8 @@ export function parseCsvRows(text: string): string[][] {
 export function generateTemplate() {
   exportCsv('products_template.csv', [
     PRODUCT_CSV_HEADERS,
+    ['#EXAMPLE-FOOD', '', 'Paneer Tikka (example)', 'Food', '', 'Food', 'No', '', 'sale_only', 'sale', '0', '320', '320', '320', '320', '320', '320', 'plate', '0', '15', 'GST', '5', '', '', '', '', '', 'Yes', 'No', 'Yes', 'No', 'No', 'Example row - skipped during import', '', 'Paneer|0.18|kg;Oil|0.02|l'],
+    ['#EXAMPLE-DRINK', '', 'Masala Tea (example)', 'Beverage', '', 'Food', 'No', '', 'sale_only', 'sale', '0', '80', '80', '80', '80', '80', '80', 'portion', '0', '5', 'GST', '5', '', '', '', '', '', 'Yes', 'No', 'Yes', 'No', 'No', 'Example row - skipped during import', '', 'Tea Leaves|8|g;Milk|120|ml'],
   ])
 }
 
@@ -159,6 +220,7 @@ export function exportProducts(items: MenuItem[], categories: MenuCategory[], st
     item.isFavorite ? 'Yes' : 'No',
     item.description || '',
     item.modifierGroups?.flatMap(group => group.modifiers).map(modifier => `${modifier.name}|${(modifier.pricePaise / 100).toFixed(2)}`).join(';') || '',
+    serializeRecipe(item.recipeItems),
   ]})
   
   exportCsv('products_export.csv', [PRODUCT_CSV_HEADERS, ...rows])

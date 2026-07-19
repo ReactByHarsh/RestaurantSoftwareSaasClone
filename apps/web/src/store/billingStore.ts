@@ -486,9 +486,10 @@ function addAudit(state: BillingStore, action: string, entityType: string, detai
   }, ...state.auditLogs].slice(0, 200)
 }
 
-function deductRecipeStock(state: BillingStore, soldItems: OrderItem[]): InventoryItem[] {
+function applyRecipeStockDelta(state: BillingStore, soldItems: OrderItem[], direction: 'consume' | 'restore'): InventoryItem[] {
   const deductions = new Map<string, number>()
   soldItems.forEach((soldItem) => {
+    if (soldItem.status === 'cancelled') return
     const menuItem = state.menuItems.find((item) => item.id === soldItem.menuItemId)
     menuItem?.recipeItems?.forEach((recipeLine) => {
       deductions.set(recipeLine.inventoryItemId, (deductions.get(recipeLine.inventoryItemId) ?? 0) + (recipeLine.quantity * soldItem.quantity))
@@ -499,8 +500,20 @@ function deductRecipeStock(state: BillingStore, soldItems: OrderItem[]): Invento
   const changedAt = now()
   return state.inventoryItems.map((item) => {
     const used = deductions.get(item.id)
-    return used ? { ...item, currentStock: Math.max(0, item.currentStock - used), lastUpdatedAt: changedAt } : item
+    return used ? {
+      ...item,
+      currentStock: direction === 'consume' ? Math.max(0, item.currentStock - used) : item.currentStock + used,
+      lastUpdatedAt: changedAt,
+    } : item
   })
+}
+
+function hasRecipeConsumptionAudit(state: BillingStore, orderId: string) {
+  return state.auditLogs.some(log => log.entityId === orderId && log.action === 'recipe.stock.consumed')
+}
+
+function hasRecipeReversalAudit(state: BillingStore, orderId: string) {
+  return state.auditLogs.some(log => log.entityId === orderId && log.action === 'recipe.stock.restored')
 }
 
 function categoryChain(categories: MenuCategory[], categoryId?: string) {
@@ -1728,7 +1741,8 @@ export const useBillingStore = create<BillingStore>()(
             currentOrder: updatedOrder,
             cart: [],
             savedCarts: newSavedCarts,
-            inventoryItems: deductRecipeStock(current, createdItems),
+            // Recipe stock is consumed once, when the order is fully paid.
+            inventoryItems: current.inventoryItems,
             tables: updatedOrder.tableId ? current.tables.map((candidate) => candidate.id === updatedOrder.tableId ? { ...candidate, status: 'kot_sent', activeOrderId: updatedOrder.id } : candidate) : current.tables,
             auditLogs: addAudit(current, 'kot.sent', 'kot', `${kotsToCreate.length} KOT${kotsToCreate.length === 1 ? '' : 's'} sent to kitchen`, kotsToCreate[0]?.id),
           }
@@ -1790,11 +1804,21 @@ export const useBillingStore = create<BillingStore>()(
             updatedAt: now()
           }
 
+          const shouldConsumeRecipes = newPaymentStatus === 'paid' && targetOrder.recipeConsumptionStatus !== 'consumed' && !hasRecipeConsumptionAudit(state, orderId)
+          const orderItems = state.orderItems.filter(item => item.orderId === orderId)
+          const consumedOrder = shouldConsumeRecipes ? {
+            ...updatedOrder,
+            recipeConsumptionStatus: 'consumed' as const,
+            recipeConsumedAt: now(),
+            recipeReversedAt: undefined,
+          } : updatedOrder
+
           return {
             payments: paymentsAfterAdd,
-            orders: state.orders.map(o => o.id === orderId ? updatedOrder : o),
-            currentOrder: state.currentOrder?.id === orderId ? updatedOrder : state.currentOrder,
-            auditLogs: addAudit(state, 'payment.added', 'payment', `Collected ${paymentInput.amountPaise / 100}`, orderId),
+            orders: state.orders.map(o => o.id === orderId ? consumedOrder : o),
+            currentOrder: state.currentOrder?.id === orderId ? consumedOrder : state.currentOrder,
+            inventoryItems: shouldConsumeRecipes ? applyRecipeStockDelta(state, orderItems, 'consume') : state.inventoryItems,
+            auditLogs: addAudit(state, shouldConsumeRecipes ? 'recipe.stock.consumed' : 'payment.added', shouldConsumeRecipes ? 'inventory' : 'payment', shouldConsumeRecipes ? `Consumed recipes for paid order` : `Collected ${paymentInput.amountPaise / 100}`, orderId),
           }
         })
 
@@ -1927,13 +1951,19 @@ export const useBillingStore = create<BillingStore>()(
             updatedAt: now(),
           }
 
+          const activeOrderItems = newOrderItems.filter(item => item.orderId === actualOrderId && item.status !== 'cancelled')
+          const shouldConsumeRecipes = paymentStatus === 'paid' && targetOrder!.recipeConsumptionStatus !== 'consumed' && !hasRecipeConsumptionAudit(state, actualOrderId)
+          const settledOrder: Order = shouldConsumeRecipes
+            ? { ...updatedOrder, recipeConsumptionStatus: 'consumed', recipeConsumedAt: now(), recipeReversedAt: undefined }
+            : updatedOrder
+
           const newSavedCarts = { ...state.savedCarts }
           if (targetOrder?.tableId) {
             delete newSavedCarts[targetOrder.tableId]
           }
 
           return {
-            orders: isDirectCheckout ? [updatedOrder, ...state.orders] : state.orders.map((candidate) => candidate.id === actualOrderId ? updatedOrder : candidate),
+            orders: isDirectCheckout ? [settledOrder, ...state.orders] : state.orders.map((candidate) => candidate.id === actualOrderId ? settledOrder : candidate),
             payments: [...payments, ...state.payments],
             kots: state.kots.map((kot) => kot.orderId === actualOrderId ? {
               ...kot,
@@ -1952,8 +1982,8 @@ export const useBillingStore = create<BillingStore>()(
             cart: [],
             savedCarts: newSavedCarts,
             selectedTableId: null,
-            inventoryItems: createdCheckoutItems.length ? deductRecipeStock(state, createdCheckoutItems) : state.inventoryItems,
-            auditLogs: addAudit(state, 'payment.settled', 'payment', `Collected ${totalPaid / 100}`, actualOrderId),
+            inventoryItems: shouldConsumeRecipes ? applyRecipeStockDelta(state, activeOrderItems, 'consume') : state.inventoryItems,
+            auditLogs: addAudit(state, shouldConsumeRecipes ? 'recipe.stock.consumed' : 'payment.settled', shouldConsumeRecipes ? 'inventory' : 'payment', shouldConsumeRecipes ? `Consumed recipes for paid order` : `Collected ${totalPaid / 100}`, actualOrderId),
           }
         })
 
@@ -2008,20 +2038,25 @@ export const useBillingStore = create<BillingStore>()(
         
         const newSavedCarts = { ...state.savedCarts }
         const targetOrder = state.orders.find(o => o.id === orderId)
+        const shouldRestoreRecipes = targetOrder?.recipeConsumptionStatus === 'consumed' || (Boolean(targetOrder) && hasRecipeConsumptionAudit(state, orderId) && !hasRecipeReversalAudit(state, orderId))
+        const orderItemsBeforeCancellation = state.orderItems.filter(item => item.orderId === orderId && item.status !== 'cancelled')
+        const restoredOrder = targetOrder ? {
+          ...targetOrder,
+          status: 'cancelled' as const,
+          paymentStatus: targetOrder.paymentStatus === 'paid' ? 'unpaid' as const : targetOrder.paymentStatus,
+          paidPaise: targetOrder.paymentStatus === 'paid' ? 0 : targetOrder.paidPaise,
+          cancellationReason: reason,
+          cancelledAt,
+          updatedAt: cancelledAt,
+          recipeConsumptionStatus: shouldRestoreRecipes ? 'reversed' as const : targetOrder.recipeConsumptionStatus,
+          recipeReversedAt: shouldRestoreRecipes ? cancelledAt : targetOrder.recipeReversedAt,
+        } : undefined
         if (targetOrder?.tableId) {
           delete newSavedCarts[targetOrder.tableId]
         }
 
         return {
-          orders: state.orders.map((order) => order.id === orderId ? {
-            ...order,
-            status: 'cancelled' as const,
-            paymentStatus: order.paymentStatus === 'paid' ? 'unpaid' : order.paymentStatus,
-            paidPaise: order.paymentStatus === 'paid' ? 0 : order.paidPaise,
-            cancellationReason: reason,
-            cancelledAt,
-            updatedAt: cancelledAt,
-          } : order),
+          orders: state.orders.map((order) => order.id === orderId && restoredOrder ? restoredOrder : order),
           payments: state.payments.map((payment) => payment.orderId === orderId && payment.status === 'success'
             ? { ...payment, status: 'refunded' as const, statusReason: `Order cancelled: ${reason}` }
             : payment),
@@ -2034,7 +2069,8 @@ export const useBillingStore = create<BillingStore>()(
           cart: state.currentOrder?.id === orderId ? [] : state.cart,
           savedCarts: newSavedCarts,
           selectedTableId: state.currentOrder?.id === orderId ? null : state.selectedTableId,
-          auditLogs: addAudit(state, 'order.cancelled', 'order', reason, orderId),
+          inventoryItems: shouldRestoreRecipes ? applyRecipeStockDelta(state, orderItemsBeforeCancellation, 'restore') : state.inventoryItems,
+          auditLogs: addAudit(state, shouldRestoreRecipes ? 'recipe.stock.restored' : 'order.cancelled', shouldRestoreRecipes ? 'inventory' : 'order', shouldRestoreRecipes ? `Restored recipes after order cancellation: ${reason}` : reason, orderId),
         }
       })
 
