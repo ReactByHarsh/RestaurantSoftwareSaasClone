@@ -1464,6 +1464,34 @@ async function sha256Hex(value: string) {
   return Array.from(new Uint8Array(digest)).map((item) => item.toString(16).padStart(2, '0')).join('')
 }
 
+function hexToBytes(value: string) {
+  if (!/^[0-9a-f]+$/i.test(value) || value.length % 2 !== 0) return null
+  const bytes = new Uint8Array(value.length / 2)
+  for (let index = 0; index < bytes.length; index += 1) bytes[index] = Number.parseInt(value.slice(index * 2, index * 2 + 2), 16)
+  return bytes
+}
+
+async function verifyPbkdf2Secret(stored: string, candidate: string) {
+  const parts = stored.split('$')
+  if (parts.length !== 4 || parts[0] !== 'pbkdf2') return false
+  const iterations = Number(parts[1])
+  // Current production hashes use the printable salt text as PBKDF2 salt.
+  // Keep the hex-byte fallback for hashes created by older installers.
+  const saltText = new TextEncoder().encode(parts[2])
+  const saltBytes = hexToBytes(parts[2])
+  const expected = parts[3]
+  if (!Number.isSafeInteger(iterations) || iterations < 1 || !/^[0-9a-f]+$/i.test(expected) || expected.length % 2 !== 0) return false
+  try {
+    const key = await crypto.subtle.importKey('raw', new TextEncoder().encode(candidate), 'PBKDF2', false, ['deriveBits'])
+    const derive = async (salt: Uint8Array) => crypto.subtle.deriveBits({ name: 'PBKDF2', hash: 'SHA-256', salt: salt as unknown as BufferSource, iterations }, key, expected.length * 4)
+    const matches = (derived: ArrayBuffer) => Array.from(new Uint8Array(derived)).map((item) => item.toString(16).padStart(2, '0')).join('').toLowerCase() === expected.toLowerCase()
+    if (matches(await derive(saltText))) return true
+    return saltBytes ? matches(await derive(saltBytes)) : false
+  } catch {
+    return false
+  }
+}
+
 async function createSessionToken(userId: string, secret: string) {
   const payload = `${userId}:${Date.now()}:${crypto.randomUUID()}`
   const signature = await sha256Hex(`${payload}:${secret}`)
@@ -1490,6 +1518,7 @@ async function normalizeSecretForStorage(value: string) {
 async function verifySecret(storedValue: string | undefined, candidate: string) {
   const stored = storedValue?.trim() ?? ''
   if (!stored) return false
+  if (stored.startsWith('pbkdf2$')) return verifyPbkdf2Secret(stored, candidate)
   if (stored.startsWith(HASH_PREFIX)) {
     return stored === `${HASH_PREFIX}${await sha256Hex(candidate)}`
   }

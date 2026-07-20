@@ -153,6 +153,9 @@ button, a, [role="button"] { min-height: 32px; }
   box-shadow: 0 8px 24px rgba(15, 23, 42, 0.12);
   page-break-after: always;
   break-after: page;
+  page-break-inside: avoid;
+  break-inside: avoid;
+  overflow: visible;
 }
 
 .thermal-slip:last-child {
@@ -422,9 +425,12 @@ button, a, [role="button"] { min-height: 32px; }
     max-width: var(--receipt-width, 80mm);
     box-shadow: none;
     margin: 0;
-    padding: 1mm 1.5mm 1mm 1mm;
+    padding: 1mm 1.5mm 6mm 1mm;
     font-size: calc(var(--thermal-font-base) + var(--thermal-font-adjust));
     line-height: var(--thermal-line-height);
+    page-break-inside: avoid;
+    break-inside: avoid;
+    overflow: visible;
   }
 
   .thermal-slip h1 { font-size: calc(var(--thermal-heading-base) + var(--thermal-heading-adjust)); }

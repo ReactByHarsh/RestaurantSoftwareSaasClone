@@ -4,7 +4,7 @@ import {
   Search, Plus, ShoppingCart, ChevronLeft, ChevronRight,
   ScanBarcode, X, ReceiptText, ArrowLeft, LayoutGrid, Clock,
   PlayCircle, HandPlatter, Printer, CheckCircle, ArrowRightLeft,
-  GitMerge, Users,
+  GitMerge, Users, PanelRightClose, PanelRightOpen, Table2,
 } from 'lucide-react'
 import { useBillingStore } from '../../store/billingStore'
 import { useAuthStore } from '../../store/authStore'
@@ -15,6 +15,7 @@ import CategoryRail from './CategoryRail'
 import MenuItemCard from './MenuItemCard'
 import OrderCart from './OrderCart'
 import PaymentDrawer from './PaymentDrawer'
+import CustomerModal from './CustomerModal'
 import OrdersScreen from '../orders/OrdersScreen'
 import { clsx } from 'clsx'
 import { isSaleableMenuItem } from '../../lib/productTypes'
@@ -242,10 +243,10 @@ export default function BillingScreen({ isModal = false, modalTableId, onCloseMo
     selectedTableId, selectTable,
     cart, currentOrder, orderItems,
     startNewOrder, sendKOT, clearCart,
-    tables, floors, menuCategories, menuItems,
+    tables, floors, menuCategories, menuItems, outlet,
     addToCart, orders,
     transferTable, mergeTable,
-    updateTableStatus, printReceipt, getCustomerAccountDetails
+    updateTableStatus, printReceipt, getCustomerAccountDetails, setOrderCustomer
   } = useBillingStore()
 
   const canTransfer = user ? hasPermission(user.role, 'tables:transfer') : false
@@ -253,6 +254,10 @@ export default function BillingScreen({ isModal = false, modalTableId, onCloseMo
 
   // ── view state ───────────────────────────────────────────────────────────
   const [view, setView] = useState<'menu' | 'orders'>('menu')
+  const [menuPanelCollapsed, setMenuPanelCollapsed] = useState(false)
+  const [tablesDrawerOpen, setTablesDrawerOpen] = useState(false)
+  const [accountPromptOpen, setAccountPromptOpen] = useState(false)
+  const [customerModalOpen, setCustomerModalOpen] = useState(false)
 
   // Which table has the radial menu open
   const [radialTableState, setRadialTableState] = useState<{ table: RestaurantTable, rect: DOMRect } | null>(null)
@@ -273,6 +278,16 @@ export default function BillingScreen({ isModal = false, modalTableId, onCloseMo
   const [itemInstruction, setItemInstruction] = useState('')
   const searchRef = useRef<HTMLInputElement>(null)
   const [searchParams, setSearchParams] = useSearchParams()
+
+  const openOrders = () => {
+    if (outlet.enableCreditAccounts) setAccountPromptOpen(true)
+    else setView('orders')
+  }
+
+  const openAccountCustomer = () => {
+    setAccountPromptOpen(false)
+    setCustomerModalOpen(true)
+  }
 
   // Sync view to order type
   useEffect(() => {
@@ -630,7 +645,18 @@ export default function BillingScreen({ isModal = false, modalTableId, onCloseMo
             {currentOrder.orderNo}
           </span>
         )}
-        <button onClick={() => setView('orders')}
+        {outlet.enableOrderTablesDrawer && (
+          <button onClick={() => setTablesDrawerOpen(value => !value)} className={clsx('hidden lg:flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border text-xs font-bold transition-all', tablesDrawerOpen ? 'bg-primary text-white border-primary' : 'border-slate-200 text-slate-600 hover:bg-slate-50')} title="Show tables drawer">
+            <Table2 size={14} strokeWidth={2.5} /><span className="hidden xl:inline">Tables</span>
+          </button>
+        )}
+        {outlet.enableOrderMenuPanelToggle && (
+          <button onClick={() => setMenuPanelCollapsed(value => !value)} className="hidden lg:flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border border-slate-200 text-xs font-bold text-slate-600 hover:bg-slate-50" title={menuPanelCollapsed ? 'Expand menu panel' : 'Hide menu panel'}>
+            {menuPanelCollapsed ? <PanelRightOpen size={14} strokeWidth={2.5} /> : <PanelRightClose size={14} strokeWidth={2.5} />}
+            <span className="hidden xl:inline">{menuPanelCollapsed ? 'Menu' : 'Hide menu'}</span>
+          </button>
+        )}
+        <button onClick={openOrders}
           className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border border-slate-200 text-xs font-bold text-slate-600 hover:bg-slate-50 transition-all active:scale-95 flex-shrink-0">
           <ReceiptText size={14} strokeWidth={3} /><span className="hidden sm:inline">Orders</span>
         </button>
@@ -682,6 +708,7 @@ export default function BillingScreen({ isModal = false, modalTableId, onCloseMo
         <div className={clsx(
           'flex flex-col min-w-0 overflow-hidden transition-all lg:order-2',
           'lg:flex lg:flex-1',
+          outlet.enableOrderMenuPanelToggle && menuPanelCollapsed ? 'lg:hidden' : '',
           // Mobile: show/hide based on tab
           mobileTab === 'menu' ? 'flex flex-1' : 'hidden'
         )}>
@@ -784,6 +811,53 @@ export default function BillingScreen({ isModal = false, modalTableId, onCloseMo
           <OrderCart onSendKOT={handleSendKOT} onSettleBill={handleSettleBill} onBackToMenu={() => setMobileTab('menu')} />
         </div>
       </div>
+
+      {outlet.enableOrderTablesDrawer && tablesDrawerOpen && (
+        <>
+          <div className="fixed inset-0 z-40 bg-slate-950/20 lg:hidden" onClick={() => setTablesDrawerOpen(false)} />
+          <aside className="fixed right-0 top-0 bottom-0 z-50 w-[min(320px,92vw)] bg-white border-l border-slate-200 shadow-2xl flex flex-col animate-slide-in-right">
+            <div className="flex items-center justify-between gap-2 px-4 py-3 border-b border-slate-200 bg-slate-50">
+              <div><p className="text-sm font-black text-slate-800">Tables</p><p className="text-[10px] font-bold text-slate-500">Select a table to open its order</p></div>
+              <button onClick={() => setTablesDrawerOpen(false)} className="p-2 rounded-lg hover:bg-slate-200 text-slate-500"><X size={16} /></button>
+            </div>
+            <div className="flex-1 overflow-y-auto p-3 space-y-2">
+              {tables.map(table => {
+                const cfg = STATUS_CFG[table.status] ?? STATUS_CFG.available
+                return <button key={table.id} onClick={() => { selectTable(table.id); setTablesDrawerOpen(false) }} className={clsx('w-full text-left rounded-xl border-2 p-3 transition-colors', cfg.bg, cfg.border, 'hover:shadow-md')}>
+                  <div className="flex items-center justify-between"><span className={clsx('font-black', cfg.text)}>{table.name}</span><span className={clsx('rounded-full border px-2 py-0.5 text-[10px] font-black uppercase', cfg.badge)}>{table.status.replace('_', ' ')}</span></div>
+                  <p className="mt-1 text-[10px] font-bold text-slate-500">{table.seats} seats{table.activeOrderId ? ' • active order' : ''}</p>
+                </button>
+              })}
+              {tables.length === 0 && <p className="py-8 text-center text-xs font-bold text-slate-400">No tables configured.</p>}
+            </div>
+          </aside>
+        </>
+      )}
+
+      {accountPromptOpen && (
+        <div className="fixed inset-0 z-[90] flex items-center justify-center bg-slate-950/45 p-4 backdrop-blur-sm">
+          <div className="w-full max-w-md rounded-2xl bg-white shadow-2xl border border-slate-200 overflow-hidden">
+            <div className="flex items-center justify-between px-5 py-4 border-b border-slate-100"><div><h3 className="text-lg font-black text-slate-800">Open Sales Orders</h3><p className="text-xs font-bold text-slate-500 mt-0.5">Choose how you want to continue.</p></div><button onClick={() => setAccountPromptOpen(false)} className="p-2 rounded-lg hover:bg-slate-100 text-slate-500"><X size={18} /></button></div>
+            <div className="p-5 grid gap-3">
+              <button onClick={openAccountCustomer} className="rounded-xl border-2 border-amber-200 bg-amber-50 p-4 text-left hover:bg-amber-100"><p className="font-black text-amber-900">Account / Credit customer</p><p className="mt-1 text-xs font-bold text-amber-800">Select an existing customer or add a new customer who will pay later.</p></button>
+              <button onClick={() => { setAccountPromptOpen(false); setView('orders') }} className="rounded-xl border-2 border-slate-200 bg-slate-50 p-4 text-left hover:bg-slate-100"><p className="font-black text-slate-800">Continue without account</p><p className="mt-1 text-xs font-bold text-slate-500">Open the normal Sales Orders list.</p></button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      <CustomerModal
+        isOpen={customerModalOpen}
+        onClose={() => setCustomerModalOpen(false)}
+        currentCustomerName={currentOrder?.customerName}
+        currentCustomerPhone={currentOrder?.customerPhone}
+        onSetCustomer={(name, phone) => {
+          if (!currentOrder && user) startNewOrder(user.id, user.name)
+          setTimeout(() => setOrderCustomer(name, phone), 0)
+          addToast('success', `${name || 'Customer'} set for account billing`)
+          setView('orders')
+        }}
+      />
 
       {showPayment && <PaymentDrawer onClose={() => setShowPayment(false)} />}
 

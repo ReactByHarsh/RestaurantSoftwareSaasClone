@@ -60,6 +60,9 @@ export interface OutletSettings {
   gstin?: string
   status: 'active' | 'inactive'
   enableDirtyTableStatus: boolean
+  enableCreditAccounts: boolean
+  enableOrderMenuPanelToggle: boolean
+  enableOrderTablesDrawer: boolean
 }
 
 export interface PrintSettings {
@@ -278,6 +281,9 @@ const DEFAULT_OUTLET: OutletSettings = {
   logoDataUrl: '',
   status: 'active',
   enableDirtyTableStatus: true,
+  enableCreditAccounts: false,
+  enableOrderMenuPanelToggle: false,
+  enableOrderTablesDrawer: false,
 }
 
 const DEFAULT_PRINT_SETTINGS: PrintSettings = {

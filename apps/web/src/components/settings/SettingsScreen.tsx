@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { Settings as SettingsIcon, Save, Store, Printer, Bell, Wifi, Sparkles, Download, Upload, Cloud, ShieldCheck, ArrowUpCircle, Image as ImageIcon, Trash2 } from 'lucide-react'
+import { Settings as SettingsIcon, Save, Store, Printer, Bell, Wifi, Sparkles, Download, Upload, Cloud, ShieldCheck, ArrowUpCircle, Image as ImageIcon, Trash2, PanelRight } from 'lucide-react'
 import QRCode from 'qrcode'
 import { useUIStore } from '../../store/uiStore'
 import { useBillingStore } from '../../store/billingStore'
@@ -457,6 +457,26 @@ export default function SettingsScreen() {
                 </button>
               </div>
             </form>
+          </section>
+
+          <section className="bg-white rounded-2xl border-2 border-slate-100 shadow-[0_2px_10px_rgba(0,0,0,0.02)] overflow-hidden">
+            <div className="px-5 py-3 border-b-2 border-slate-100 bg-slate-50/50 flex items-center gap-2">
+              <PanelRight size={18} className="text-primary" strokeWidth={2.5} />
+              <div><h2 className="text-sm font-black text-slate-800 tracking-tight">Order Workspace</h2><p className="text-[10px] font-bold text-slate-500">Optional order-page tools are off until enabled here.</p></div>
+            </div>
+            <div className="p-5 grid grid-cols-1 md:grid-cols-3 gap-3">
+              {[
+                { key: 'enableCreditAccounts' as const, title: 'Credit / Account payments', text: 'Ask for an existing or new customer before opening Sales Orders and allow pay-later accounts.', value: outlet.enableCreditAccounts },
+                { key: 'enableOrderMenuPanelToggle' as const, title: 'Collapsible menu panel', text: 'Show a hide/expand control for the right-side product menu on the billing order workspace.', value: outlet.enableOrderMenuPanelToggle },
+                { key: 'enableOrderTablesDrawer' as const, title: 'Tables drawer', text: 'Show a scrollable slide-out table list beside the order workspace.', value: outlet.enableOrderTablesDrawer },
+              ].map(option => (
+                <label key={option.key} className="flex items-start gap-3 cursor-pointer rounded-xl border-2 border-slate-100 bg-slate-50 p-3 hover:border-emerald-200 transition-colors">
+                  <input type="checkbox" checked={option.value} onChange={event => updateOutlet({ [option.key]: event.target.checked })} className="peer sr-only" />
+                  <span className={`mt-0.5 flex h-6 w-11 shrink-0 items-center rounded-full p-1 transition-colors ${option.value ? 'bg-emerald-500 justify-end' : 'bg-slate-300 justify-start'}`}><span className="h-4 w-4 rounded-full bg-white shadow-sm" /></span>
+                  <span><p className="text-sm font-black text-slate-800">{option.title}</p><p className="mt-0.5 text-[10px] font-bold leading-4 text-slate-500">{option.text}</p></span>
+                </label>
+              ))}
+            </div>
           </section>
 
           <section className="bg-white rounded-2xl border-2 border-slate-100 shadow-[0_2px_10px_rgba(0,0,0,0.02)] overflow-hidden">

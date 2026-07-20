@@ -5,6 +5,7 @@ import { formatPaise } from '../../lib/money'
 import { useBillingStore } from '../../store/billingStore'
 import { useUIStore } from '../../store/uiStore'
 import type { PurchaseEntry, StockUnit } from '../../lib/types'
+import { normalizeProductType } from '../../lib/productTypes'
 
 type InventoryTab = 'stock' | 'purchase' | 'purchaseReport' | 'stockReport' | 'profitReport'
 type PurchasePaymentMode = 'cash' | 'card' | 'upi'
@@ -76,6 +77,14 @@ function monthKey(value?: string) {
   return dateKey(value).slice(0, 7)
 }
 
+function inventoryProductTypeLabel(value?: string) {
+  const type = normalizeProductType(value)
+  if (type === 'sale_purchase') return 'Sales + Purchase'
+  if (type === 'purchase_only') return 'Purchase only'
+  if (type === 'kitchen_processed') return 'Kitchen processed'
+  return 'Stock item'
+}
+
 export default function InventoryScreen() {
   const { addToast } = useUIStore()
   const {
@@ -104,7 +113,7 @@ export default function InventoryScreen() {
 
   const purchaseProducts = useMemo(() => {
     return menuItems
-      .filter(item => ['sale_purchase', 'purchase_only', 'kitchen_processed'].includes(item.productType ?? 'sale_only'))
+      .filter(item => ['sale_purchase', 'purchase_only', 'kitchen_processed'].includes(normalizeProductType(item.productType) ?? 'sale_only'))
       .sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }))
   }, [menuItems])
 
@@ -359,19 +368,20 @@ export default function InventoryScreen() {
             <div className="flex-1 overflow-auto">
               <table className="w-full text-left text-xs">
                 <thead className="bg-blue-100/70 border-b border-blue-200 sticky top-0 z-10">
-                  <tr><Th>Product Name</Th><Th>System Stock</Th><Th>Actual Stock</Th><Th>Alert Level</Th><Th>Edit Reason</Th></tr>
+                  <tr><Th>Product Name</Th><Th>Product Type</Th><Th>System Stock</Th><Th>Actual Stock</Th><Th>Alert Level</Th><Th>Edit Reason</Th></tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100">
                   {filteredItems.map(item => (
                     <tr key={item.id} className="odd:bg-slate-50/60 hover:bg-primary-50/30">
                       <td className="px-3 py-2 font-bold text-slate-800">{item.name}</td>
+                      <td className="px-3 py-2"><span className="rounded-full border border-slate-200 bg-slate-50 px-2 py-1 text-[10px] font-black text-slate-600">{inventoryProductTypeLabel(menuItems.find(product => product.name.trim().toLowerCase() === item.name.trim().toLowerCase())?.productType)}</span></td>
                       <td className="px-3 py-2 font-black text-slate-700">{item.currentStock} <span className="text-slate-400 font-bold">{item.unit}</span></td>
                       <td className="px-3 py-1.5"><input value={actualStock[item.id] ?? ''} onChange={event => setActualStock(value => ({ ...value, [item.id]: event.target.value }))} type="number" step="0.01" min="0" placeholder="Enter" className="w-24 bg-transparent border-b border-slate-300 px-1 py-1 outline-none focus:border-primary font-bold" /></td>
                       <td className="px-3 py-1.5"><input value={alertLevels[item.id] ?? ''} onChange={event => setAlertLevels(value => ({ ...value, [item.id]: event.target.value }))} type="number" step="0.01" min="0" placeholder={String(item.minimumStock)} className="w-24 bg-transparent border-b border-slate-300 px-1 py-1 outline-none focus:border-primary font-bold" /></td>
                       <td className="px-3 py-1.5"><input value={reasons[item.id] ?? ''} onChange={event => setReasons(value => ({ ...value, [item.id]: event.target.value }))} placeholder="Enter reason" className="w-full max-w-md bg-transparent border-b border-slate-300 px-1 py-1 outline-none focus:border-primary font-bold" /></td>
                     </tr>
                   ))}
-                  {filteredItems.length === 0 && <EmptyRow colSpan={5} />}
+                  {filteredItems.length === 0 && <EmptyRow colSpan={6} />}
                 </tbody>
               </table>
             </div>

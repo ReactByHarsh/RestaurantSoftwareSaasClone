@@ -34,7 +34,7 @@ const FAST_PAYMENT_MODES = [
 export default function PaymentDrawer({ onClose }: Props) {
   const { user } = useAuthStore()
   const { addToast } = useUIStore()
-  const { currentOrder, orderItems, cart, getCartTotal, settlePayment } = useBillingStore()
+  const { currentOrder, orderItems, cart, outlet, getCartTotal, settlePayment } = useBillingStore()
 
   const totals = getCartTotal()
   const savedItemCount = currentOrder
@@ -175,7 +175,7 @@ export default function PaymentDrawer({ onClose }: Props) {
               ))}
             </div>
             <div className="mt-4 grid grid-cols-2 sm:grid-cols-4 gap-2">
-              {FAST_PAYMENT_MODES.map(mode => (
+              {FAST_PAYMENT_MODES.filter(mode => mode.id !== 'account' || outlet.enableCreditAccounts).map(mode => (
                 <button
                   key={mode.id}
                   type="button"
