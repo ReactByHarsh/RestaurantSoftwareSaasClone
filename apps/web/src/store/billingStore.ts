@@ -27,7 +27,7 @@ import { calculateTax } from '../lib/money'
 import { realtimeClient } from '../lib/realtime'
 import { DEFAULT_BRIDGE_URL, describePrinterError, normalizePrinterConnectionMode, sendPrintJob, type PrinterConnectionMode } from '../lib/printer'
 import { buildKotPrintText, buildReceiptPrintParts } from '../lib/printTemplates'
-import { isSaleableMenuItem } from '../lib/productTypes'
+import { isInventoryMenuItem, isSaleableMenuItem } from '../lib/productTypes'
 import { DEFAULT_STATIONS } from '../lib/seedData'
 import { useUIStore } from './uiStore'
 
@@ -514,6 +514,45 @@ function applyRecipeStockDelta(state: BillingStore, soldItems: OrderItem[], dire
   })
 }
 
+function ensureMenuInventoryItems(inventoryItems: InventoryItem[], menuItems: MenuItem[], outletId: string): InventoryItem[] {
+  const next = [...inventoryItems]
+  const changedAt = now()
+
+  menuItems.filter(isInventoryMenuItem).forEach((menuItem) => {
+    const normalizedName = menuItem.name.trim().toLowerCase()
+    const existingIndex = next.findIndex((item) =>
+      item.menuItemId === menuItem.id || (!item.menuItemId && item.name.trim().toLowerCase() === normalizedName)
+    )
+
+    if (existingIndex >= 0) {
+      const existing = next[existingIndex]
+      next[existingIndex] = {
+        ...existing,
+        menuItemId: menuItem.id,
+        name: menuItem.name,
+        unit: existing.currentStock === 0 ? (menuItem.primaryUnit ?? existing.unit) : existing.unit,
+        minimumStock: existing.minimumStock || menuItem.minimumStock || 0,
+        costPerUnit: existing.costPerUnit || menuItem.costPricePaise || 0,
+      }
+      return
+    }
+
+    next.unshift({
+      id: `inv_menu_${menuItem.id}`,
+      outletId,
+      menuItemId: menuItem.id,
+      name: menuItem.name,
+      unit: menuItem.primaryUnit ?? 'pcs',
+      currentStock: 0,
+      minimumStock: menuItem.minimumStock ?? 0,
+      costPerUnit: menuItem.costPricePaise ?? 0,
+      lastUpdatedAt: changedAt,
+    })
+  })
+
+  return next
+}
+
 function hasRecipeConsumptionAudit(state: BillingStore, orderId: string) {
   return state.auditLogs.some(log => log.entityId === orderId && log.action === 'recipe.stock.consumed')
 }
@@ -716,7 +755,11 @@ export const useBillingStore = create<BillingStore>()(
         const incomingSnapshot = preserveSession
           ? { ...snapshot, savedCarts: mergeSavedCarts(snapshot.savedCarts, localSavedCarts) }
           : snapshot
-        const normalized = stripLegacyDemoData(reconcileSnapshot(incomingSnapshot))
+        const normalizedBase = stripLegacyDemoData(reconcileSnapshot(incomingSnapshot))
+        const normalized = {
+          ...normalizedBase,
+          inventoryItems: ensureMenuInventoryItems(normalizedBase.inventoryItems, normalizedBase.menuItems, normalizedBase.outlet.id),
+        }
         const remoteCurrentOrder = state.currentOrder
           ? normalized.orders.find((order) => order.id === state.currentOrder?.id) ?? null
           : null
@@ -902,20 +945,44 @@ export const useBillingStore = create<BillingStore>()(
         return true
       },
 
-      addMenuItem: (item) => set((state) => ({
-        menuItems: [{
+      addMenuItem: (item) => set((state) => {
+        const menuItem = {
           ...item,
           id: newId('itm'),
           outletId: state.outlet.id,
           sortOrder: state.menuItems.length,
-        }, ...state.menuItems],
-        auditLogs: addAudit(state, 'menu.item.created', 'menu_item', `Created item ${item.name}`),
-      })),
+        }
+        const menuItems = [menuItem, ...state.menuItems]
+        return {
+          menuItems,
+          inventoryItems: ensureMenuInventoryItems(state.inventoryItems, menuItems, state.outlet.id),
+          auditLogs: addAudit(state, 'menu.item.created', 'menu_item', `Created item ${item.name}`),
+        }
+      }),
 
-      updateMenuItem: (id, updates) => set((state) => ({
-        menuItems: state.menuItems.map((item) => item.id === id ? { ...item, ...updates } : item),
-        auditLogs: addAudit(state, 'menu.item.updated', 'menu_item', 'Updated menu item', id),
-      })),
+      updateMenuItem: (id, updates) => set((state) => {
+        const previous = state.menuItems.find((item) => item.id === id)
+        const menuItems = state.menuItems.map((item) => item.id === id ? { ...item, ...updates } : item)
+        const inventoryItems = state.inventoryItems.map((item) => {
+          const belongsToMenuItem = item.menuItemId === id || (previous && !item.menuItemId && item.name.trim().toLowerCase() === previous.name.trim().toLowerCase())
+          if (!belongsToMenuItem) return item
+          const nextMenuItem = menuItems.find((menuItem) => menuItem.id === id)
+          if (!nextMenuItem) return item
+          return {
+            ...item,
+            menuItemId: id,
+            name: nextMenuItem.name,
+            unit: item.currentStock === 0 ? (nextMenuItem.primaryUnit ?? item.unit) : item.unit,
+            minimumStock: item.minimumStock || nextMenuItem.minimumStock || 0,
+            costPerUnit: item.costPerUnit || nextMenuItem.costPricePaise || 0,
+          }
+        })
+        return {
+          menuItems,
+          inventoryItems: ensureMenuInventoryItems(inventoryItems, menuItems, state.outlet.id),
+          auditLogs: addAudit(state, 'menu.item.updated', 'menu_item', 'Updated menu item', id),
+        }
+      }),
 
       deleteMenuItem: (id) => set((state) => ({
         menuItems: state.menuItems.filter((item) => item.id !== id),
@@ -2709,7 +2776,7 @@ export const useBillingStore = create<BillingStore>()(
         floors: state.floors,
         tables: state.tables,
         stations: state.stations,
-        inventoryItems: state.inventoryItems,
+          inventoryItems: ensureMenuInventoryItems(state.inventoryItems, state.menuItems, state.outlet.id),
         purchaseEntries: state.purchaseEntries,
         orders: state.orders,
         orderItems: state.orderItems,
@@ -2725,7 +2792,7 @@ export const useBillingStore = create<BillingStore>()(
       merge: (persistedState, currentState) => {
         const persisted = persistedState as Partial<BillingStore> | undefined
         if (!persisted) return currentState
-        const normalized = stripLegacyDemoData(reconcileSnapshot({
+        const normalizedBase = stripLegacyDemoData(reconcileSnapshot({
           outlet: persisted.outlet ?? DEFAULT_OUTLET,
           printSettings: persisted.printSettings ?? DEFAULT_PRINT_SETTINGS,
           menuCategories: persisted.menuCategories ?? [],
@@ -2742,6 +2809,10 @@ export const useBillingStore = create<BillingStore>()(
           auditLogs: persisted.auditLogs ?? [],
           savedCarts: persisted.savedCarts ?? {},
         }))
+        const normalized = {
+          ...normalizedBase,
+          inventoryItems: ensureMenuInventoryItems(normalizedBase.inventoryItems, normalizedBase.menuItems, normalizedBase.outlet.id),
+        }
         const currentOrder = persisted.currentOrder && normalized.orders.some((order) => order.id === persisted.currentOrder?.id)
           ? normalized.orders.find((order) => order.id === persisted.currentOrder?.id) ?? null
           : null

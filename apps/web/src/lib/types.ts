@@ -277,6 +277,7 @@ export interface Payment {
 export interface InventoryItem {
   id: string
   outletId: string
+  menuItemId?: string
   name: string
   unit: StockUnit
   currentStock: number
