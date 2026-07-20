@@ -1,6 +1,6 @@
 import { useMemo, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { Printer, RefreshCw, Undo } from 'lucide-react'
+import { Edit3, Printer, RefreshCw, Undo } from 'lucide-react'
 import { clsx } from 'clsx'
 import { useBillingStore } from '../../store/billingStore'
 import { formatPaise } from '../../lib/money'
@@ -11,6 +11,7 @@ import ReturnItemsModal from './ReturnItemsModal'
 import DiscountModal from '../billing/DiscountModal'
 import AddPaymentModal from './AddPaymentModal'
 import CancelOrderModal from './CancelOrderModal'
+import EditOrderModal from './EditOrderModal'
 
 interface Props {
   onBack?: () => void
@@ -40,6 +41,7 @@ export default function OrdersScreen({ onBack }: Props = {}) {
   const [discountOrderId, setDiscountOrderId] = useState<string | null>(null)
   const [addPaymentOrderId, setAddPaymentOrderId] = useState<string | null>(null)
   const [cancelPaymentsOrderId, setCancelPaymentsOrderId] = useState<string | null>(null)
+  const [editOrderId, setEditOrderId] = useState<string | null>(null)
 
   const activeItemCountByOrder = useMemo(() => {
     const index = new Map<string, number>()
@@ -273,6 +275,13 @@ export default function OrdersScreen({ onBack }: Props = {}) {
         >
           Return items
         </button>
+        <button
+          disabled={!selectedOrderId}
+          onClick={() => setEditOrderId(selectedOrderId)}
+          className="px-4 py-1.5 bg-[#3b82f6] text-white text-sm font-bold rounded hover:bg-[#2563eb] disabled:opacity-50 transition-colors shadow-sm flex items-center gap-2"
+        >
+          <Edit3 size={16} /> Edit order
+        </button>
         <button 
           disabled={!selectedOrderId}
           onClick={() => handlePrint(selectedOrderId!)}
@@ -300,6 +309,22 @@ export default function OrdersScreen({ onBack }: Props = {}) {
         <ReturnItemsModal 
           order={orders.find(o => o.id === returnOrderId)!}
           onClose={() => setReturnOrderId(null)}
+        />
+      )}
+
+      {editOrderId && (
+        <EditOrderModal
+          order={orders.find((order) => order.id === editOrderId)!}
+          onClose={() => setEditOrderId(null)}
+          onSaved={(orderId, shouldPrint) => {
+            setEditOrderId(null)
+            if (shouldPrint) {
+              printReceipt(orderId)
+              addToast('success', 'Order updated and the revised bill was queued for printing')
+            } else {
+              addToast('success', 'Order changes saved successfully')
+            }
+          }}
         />
       )}
 

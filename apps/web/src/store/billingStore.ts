@@ -12,6 +12,7 @@ import type {
   Modifier,
   Order,
   OrderItem,
+  OrderItemEditInput,
   OrderType,
   Payment,
   PaymentMethod,
@@ -216,6 +217,7 @@ interface BillingStore {
   cancelOrderItemQty: (orderItemId: string, qtyToCancel: number, reason: string) => boolean
   cancelOrderItems: (orderId: string, reason: string) => boolean
   updateOrderGlobalDiscount: (orderId: string, type: 'percentage' | 'amount', value: number) => void
+  updateOrderItems: (orderId: string, items: OrderItemEditInput[]) => boolean
   revisePayment: (orderId: string, method: PaymentMethod, referenceNo: string, reason: string, userId: string) => boolean
   updateKOTItemStatus: (kotId: string, itemId: string, status: KOTStatus) => void
   updateKOTStatus: (kotId: string, status: KOTStatus) => void
@@ -2197,6 +2199,89 @@ export const useBillingStore = create<BillingStore>()(
           currentOrder: state.currentOrder?.id === orderId ? updatedOrder : state.currentOrder
         }
       }),
+
+      updateOrderItems: (orderId, inputs) => {
+        const state = get()
+        const order = state.orders.find((candidate) => candidate.id === orderId)
+        if (!order || order.status === 'cancelled' || order.status === 'void' || inputs.length === 0) return false
+        if (inputs.some((input) => !input.menuItemId || !Number.isFinite(input.quantity) || input.quantity <= 0)) return false
+
+        const changedAt = now()
+        const previousItems = state.orderItems.filter((item) => item.orderId === orderId && item.status !== 'cancelled')
+        const defaultStatus: OrderItem['status'] = ['paid', 'billed', 'ready'].includes(order.status) ? 'served' : 'draft'
+        const updatedItems: OrderItem[] = inputs.map((input) => {
+          const quantity = Math.max(1, Math.round(input.quantity))
+          const subtotalPaise = Math.max(0, Math.round(input.unitPricePaise) * quantity)
+          const discountPaise = Math.min(subtotalPaise, Math.max(0, Math.round(input.discountPaise ?? 0)))
+          const taxPaise = calculateTax(Math.max(0, subtotalPaise - discountPaise), taxablePercent(input))
+          return {
+            id: input.id ?? newId('oi'),
+            orderId,
+            menuItemId: input.menuItemId,
+            nameSnapshot: input.nameSnapshot,
+            itemType: input.itemType,
+            isSeparateBill: input.isSeparateBill,
+            quantity,
+            unitPricePaise: Math.max(0, Math.round(input.unitPricePaise)),
+            taxPercent: input.taxPercent,
+            taxType: input.taxType,
+            taxPaise,
+            discountPaise,
+            totalPaise: Math.max(0, subtotalPaise - discountPaise + taxPaise),
+            stationId: input.stationId,
+            status: input.status ?? defaultStatus,
+            note: input.note,
+            modifiers: input.modifiers,
+            createdAt: input.createdAt ?? changedAt,
+          }
+        })
+
+        const subtotalPaise = updatedItems.reduce((sum, item) => sum + item.unitPricePaise * item.quantity, 0)
+        const discountPaise = updatedItems.reduce((sum, item) => sum + item.discountPaise, 0)
+        const taxPaise = updatedItems.reduce((sum, item) => sum + item.taxPaise, 0)
+        const totalPaise = Math.max(0, subtotalPaise + taxPaise + order.chargePaise - discountPaise)
+        const collectedPaise = getCollectedPaidPaise(state.payments, orderId)
+        const paidPaise = Math.min(collectedPaise, totalPaise)
+        const paymentStatus = getPaymentStatus(totalPaise, paidPaise)
+        const nextStatus: Order['status'] = paymentStatus === 'paid'
+          ? 'paid'
+          : order.status === 'paid' || order.status === 'billed' ? 'billed' : order.status
+        const updatedOrder: Order = {
+          ...order,
+          status: nextStatus,
+          subtotalPaise,
+          discountPaise,
+          taxPaise,
+          totalPaise,
+          paidPaise,
+          paymentStatus,
+          closedAt: paymentStatus === 'paid' ? (order.closedAt ?? changedAt) : order.closedAt,
+          recipeConsumedAt: order.recipeConsumptionStatus === 'consumed' ? changedAt : order.recipeConsumedAt,
+          updatedAt: changedAt,
+        }
+
+        let inventoryItems = state.inventoryItems
+        if (order.recipeConsumptionStatus === 'consumed') {
+          const restoredInventory = applyRecipeStockDelta(state, previousItems, 'restore')
+          inventoryItems = applyRecipeStockDelta({ ...state, inventoryItems: restoredInventory }, updatedItems, 'consume')
+        }
+
+        set((current) => ({
+          orders: current.orders.map((candidate) => candidate.id === orderId ? updatedOrder : candidate),
+          orderItems: [
+            ...current.orderItems.filter((item) => item.orderId !== orderId || item.status === 'cancelled'),
+            ...updatedItems,
+          ],
+          inventoryItems,
+          currentOrder: current.currentOrder?.id === orderId ? updatedOrder : current.currentOrder,
+          auditLogs: addAudit(current, 'order.items.updated', 'order', `Updated products on ${order.orderNo}`, orderId),
+        }))
+
+        const afterState = get()
+        updateCloudOrder(updatedOrder, afterState.orderItems.filter((item) => item.orderId === orderId)).catch(console.error)
+        realtimeClient.broadcast('ORDER_UPDATED', { order: updatedOrder, items: updatedItems })
+        return true
+      },
 
       cancelKOT: (kotId, reason) => {
         const state = get()

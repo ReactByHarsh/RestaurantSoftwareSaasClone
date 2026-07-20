@@ -227,6 +227,24 @@ export interface OrderItem {
   createdAt: string
 }
 
+export interface OrderItemEditInput {
+  id?: string
+  menuItemId: string
+  nameSnapshot: string
+  itemType: ItemType
+  isSeparateBill?: boolean
+  quantity: number
+  unitPricePaise: number
+  taxPercent?: number
+  taxType?: 'GST' | 'VAT' | 'None'
+  discountPaise?: number
+  stationId?: string
+  note?: string
+  modifiers?: string[]
+  status?: OrderItem['status']
+  createdAt?: string
+}
+
 // ─── KOT ──────────────────────────────────────────────────────────────────────
 
 export interface KOT {
