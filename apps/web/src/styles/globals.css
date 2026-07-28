@@ -453,6 +453,16 @@ button, a, [role="button"] { min-height: 32px; }
   overflow-x: hidden;
 }
 
+/* Table cards must size from the available panel width. Fixed responsive column
+   counts overflow when the active-KOT panel or a narrow desktop window is open. */
+.tables-grid {
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 150px), 1fr));
+}
+
+.tables-grid-compact {
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 108px), 1fr));
+}
+
 /* Scrollbar hide utility */
 .scrollbar-hide {
   -ms-overflow-style: none;

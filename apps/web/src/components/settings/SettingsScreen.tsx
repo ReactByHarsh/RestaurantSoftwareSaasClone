@@ -228,7 +228,6 @@ export default function SettingsScreen() {
   const handleCloudSyncNow = async () => {
     if (cloudSyncFormRef.current) saveCloudSyncForm(cloudSyncFormRef.current)
     const formSettings = cloudSyncFormRef.current ? readCloudSettingsForm(cloudSyncFormRef.current) : cloudSync
-    const snapshot = exportSnapshot()
     const serverUrl = formSettings.serverUrl.trim()
     let tenantId = formSettings.tenantId.trim()
     let outletId = formSettings.outletId.trim()
@@ -247,10 +246,15 @@ export default function SettingsScreen() {
       tenantId = tenantId || outlet.tenantId
       outletId = outletId || outlet.id
       const cloudAuth = { accountLogin: formSettings.accountLogin, accountSecret: formSettings.accountSecret }
-      const syncedAt = new Date().toISOString()
       const effectiveCloud = { ...formSettings, enabled: true, tenantId, outletId, cloudMode: 'daily_snapshot' as const }
-      await saveCloudSnapshot(outletId, tenantId, { ...snapshot, cloudSync: effectiveCloud }, 'desktop-manual', serverUrl, cloudAuth)
+      const snapshot = exportSnapshot()
+      let result = await saveCloudSnapshot(outletId, tenantId, { ...snapshot, cloudSync: effectiveCloud }, 'desktop-manual', serverUrl, cloudAuth)
+      const latestSnapshot = exportSnapshot()
+      if (JSON.stringify(latestSnapshot) !== JSON.stringify(snapshot)) {
+        result = await saveCloudSnapshot(outletId, tenantId, { ...latestSnapshot, cloudSync: effectiveCloud }, 'desktop-manual', serverUrl, cloudAuth)
+      }
       await syncCloudStaff(staff, serverUrl, cloudAuth)
+      const syncedAt = result.updatedAt || new Date().toISOString()
       updateCloudSyncSettings({ ...effectiveCloud, lastSyncedAt: syncedAt, lastCloudUploadedAt: syncedAt })
       addToast('success', 'Daily snapshot uploaded to cloud', 'Cloud Sync')
     } catch (error) {

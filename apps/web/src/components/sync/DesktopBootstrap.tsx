@@ -32,6 +32,7 @@ export default function DesktopBootstrap({ children }: { children: ReactNode }) 
     let hydrationComplete = false
     let cloudTimer: number | undefined
     let staffTimer: number | undefined
+    let cloudSyncInFlight = false
     let unsubscribeBilling: (() => void) | undefined
     let unsubscribeStaff: (() => void) | undefined
     let unlistenLanState: (() => void) | undefined
@@ -68,10 +69,18 @@ export default function DesktopBootstrap({ children }: { children: ReactNode }) 
       }
     }
 
+    const hasUploadedToday = (cloud: ReturnType<typeof useBillingStore.getState>['cloudSync'], date = new Date()) => {
+      if (!cloud.lastCloudUploadedAt) return false
+      const lastUpload = new Date(cloud.lastCloudUploadedAt)
+      return !Number.isNaN(lastUpload.getTime()) && lastUpload.toDateString() === date.toDateString()
+    }
+
     const syncCloudSnapshotNow = async (reason: 'startup' | 'daily') => {
+      if (cloudSyncInFlight) return
       const billing = useBillingStore.getState()
       const cloud = billing.cloudSync
       if (!cloud.enabled || !cloud.serverUrl) return
+      cloudSyncInFlight = true
       try {
         let tenantId = cloud.tenantId.trim()
         let outletId = cloud.outletId.trim()
@@ -85,10 +94,18 @@ export default function DesktopBootstrap({ children }: { children: ReactNode }) 
         const effectiveCloud = { ...cloud, tenantId, outletId }
         const cloudAuth = { accountLogin: cloud.accountLogin, accountSecret: cloud.accountSecret }
         const localSnapshot = billing.exportSnapshot()
-        await saveCloudSnapshot(outletId, tenantId, { ...localSnapshot, cloudSync: effectiveCloud }, `desktop-${reason}`, cloud.serverUrl, cloudAuth)
+        let result = await saveCloudSnapshot(outletId, tenantId, { ...localSnapshot, cloudSync: effectiveCloud }, `desktop-${reason}`, cloud.serverUrl, cloudAuth)
+
+        // A checkout can finish while the network request is in flight. Upload
+        // the newer local snapshot as well so a daily sync can never put a
+        // completed table/order back into the cloud snapshot.
+        const latestSnapshot = useBillingStore.getState().exportSnapshot()
+        if (JSON.stringify(latestSnapshot) !== JSON.stringify(localSnapshot)) {
+          result = await saveCloudSnapshot(outletId, tenantId, { ...latestSnapshot, cloudSync: effectiveCloud }, `desktop-${reason}`, cloud.serverUrl, cloudAuth)
+        }
         const cloudStaff = await syncCloudStaff(useStaffStore.getState().staff, cloud.serverUrl, cloudAuth)
         useStaffStore.getState().replaceStaff([...cloudStaff.staff, ...useStaffStore.getState().staff])
-        const syncedAt = new Date().toISOString()
+        const syncedAt = result.updatedAt || new Date().toISOString()
         useBillingStore.getState().updateCloudSyncSettings({
           tenantId,
           outletId,
@@ -99,6 +116,9 @@ export default function DesktopBootstrap({ children }: { children: ReactNode }) 
         if (reason === 'daily') useUIStore.getState().addToast('success', 'Daily cloud sync completed', 'Cloud Sync')
       } catch (error) {
         console.error('Cloud sync failed', error)
+      } finally {
+        cloudSyncInFlight = false
+        scheduleCloudSync()
       }
     }
 
@@ -119,17 +139,28 @@ export default function DesktopBootstrap({ children }: { children: ReactNode }) 
     }
 
     const scheduleCloudSync = () => {
-      window.clearInterval(cloudTimer)
-      cloudTimer = window.setInterval(() => {
-        const cloud = useBillingStore.getState().cloudSync
-        if (!cloud.enabled || !cloud.autoSyncDaily) return
-        const now = new Date()
-        const last = cloud.lastSyncedAt ? new Date(cloud.lastSyncedAt) : null
-        const alreadyToday = last && last.toDateString() === now.toDateString()
-        if (!alreadyToday && now.getHours() >= cloud.syncHour24) {
-          void syncCloudSnapshotNow('daily')
-        }
-      }, 15 * 60 * 1000)
+      window.clearTimeout(cloudTimer)
+      const cloud = useBillingStore.getState().cloudSync
+      if (!cloud.enabled || !cloud.autoSyncDaily) return
+
+      const now = new Date()
+      const syncHour = Math.min(23, Math.max(0, Math.floor(cloud.syncHour24)))
+      const nextRun = new Date(now)
+      nextRun.setHours(syncHour, 0, 0, 0)
+
+      if (hasUploadedToday(cloud, now)) {
+        nextRun.setDate(nextRun.getDate() + 1)
+      } else if (nextRun.getTime() <= now.getTime()) {
+        // If the desktop was closed at the configured hour, catch up once on
+        // startup/focus instead of waiting for the next day.
+        cloudTimer = window.setTimeout(() => void syncCloudSnapshotNow('daily'), 0)
+        return
+      }
+
+      cloudTimer = window.setTimeout(
+        () => void syncCloudSnapshotNow('daily'),
+        Math.max(1000, nextRun.getTime() - now.getTime())
+      )
       window.clearInterval(staffTimer)
       staffTimer = window.setInterval(() => void refreshCloudStaff(), 60 * 1000)
     }
@@ -159,13 +190,9 @@ export default function DesktopBootstrap({ children }: { children: ReactNode }) 
         scheduleCloudSync()
         void refreshCloudStaff()
         if (isTauriDesktop()) void runAutoUpdate()
-        const cloud = useBillingStore.getState().cloudSync
-        const last = cloud.lastSyncedAt ? new Date(cloud.lastSyncedAt) : null
-        const now = new Date()
-        const dueToday = !last || last.toDateString() !== now.toDateString()
-        if (cloud.enabled && cloud.autoSyncDaily && dueToday && now.getHours() >= cloud.syncHour24) {
-          void syncCloudSnapshotNow('startup')
-        }
+        // scheduleCloudSync catches up immediately when the configured time
+        // has passed, and schedules the next exact local time otherwise.
+        scheduleCloudSync()
       }
     }
 
@@ -182,6 +209,7 @@ export default function DesktopBootstrap({ children }: { children: ReactNode }) 
           await hydrateRestaurantState()
           const onStateChanged = () => {
             queueSave()
+            scheduleCloudSync()
           }
           unsubscribeBilling = useBillingStore.subscribe(onStateChanged)
           unsubscribeStaff = useStaffStore.subscribe(onStateChanged)

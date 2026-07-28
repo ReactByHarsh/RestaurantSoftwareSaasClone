@@ -685,7 +685,20 @@ function isClosedOrder(order?: Order | null) {
 }
 
 function reconcileSnapshot(snapshot: BillingSnapshot): BillingSnapshot {
-  const savedCarts = cleanSavedCarts(snapshot.savedCarts)
+  const cleanedSavedCarts = cleanSavedCarts(snapshot.savedCarts)
+  const closedOrderIds = new Set(
+    snapshot.orders.filter((order) => isClosedOrder(order)).map((order) => order.id)
+  )
+  const closedLinkedTableIds = new Set(
+    snapshot.tables
+      .filter((table) => table.activeOrderId && closedOrderIds.has(table.activeOrderId))
+      .map((table) => table.id)
+  )
+  // A completed/cancelled order must not leave a parked cart behind when an
+  // imported snapshot still points the table at that closed order.
+  const savedCarts = Object.fromEntries(
+    Object.entries(cleanedSavedCarts).filter(([tableId]) => !closedLinkedTableIds.has(tableId))
+  ) as Record<string, CartItem[]>
   const itemCountByOrder = getActiveItemCountByOrder(snapshot.orderItems)
 
   const tableByOrderId = new Map<string, RestaurantTable>()
@@ -2048,7 +2061,11 @@ export const useBillingStore = create<BillingStore>()(
             orderItems: newOrderItems.map((item) => item.orderId === actualOrderId && item.status !== 'cancelled'
               ? { ...item, status: 'served' as const }
               : item),
-            tables: state.tables.map((table) => table.activeOrderId === actualOrderId ? {
+            // Clear the table by both links. The activeOrderId is normally enough,
+            // but older/imported snapshots can retain the table link without the
+            // matching activeOrderId. A paid order must never reopen from either
+            // stale reference.
+            tables: state.tables.map((table) => table.activeOrderId === actualOrderId || table.id === targetOrder!.tableId ? {
               ...table,
               status: state.outlet.enableDirtyTableStatus === false ? 'available' as TableStatus : 'dirty' as TableStatus,
               activeOrderId: undefined,

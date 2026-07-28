@@ -152,7 +152,7 @@ export default function TableCard({ table, activeOrder, compact = false, canMana
       role="button"
       tabIndex={0}
       className={clsx(
-        'group relative flex flex-col border-2 text-left transition-all hover:-translate-y-0.5 hover:shadow-lg cursor-pointer',
+        'group relative min-w-0 flex flex-col overflow-visible border-2 text-left transition-all hover:-translate-y-0.5 hover:shadow-lg cursor-pointer',
         showPopover ? 'z-50' : 'z-0 hover:z-40',
         compact ? 'rounded-md min-h-[68px]' : 'rounded-xl min-h-[124px]',
         floorColor || config.border, config.bg
@@ -225,13 +225,13 @@ export default function TableCard({ table, activeOrder, compact = false, canMana
 
       {/* Card Body */}
       <div className={clsx('flex-1 flex flex-col', compact ? 'px-1.5 py-1' : 'p-2.5 pt-1.5')}>
-        <div className={clsx('flex flex-wrap z-0 mb-auto', compact ? 'gap-1' : 'gap-1.5')}>
+        <div className={clsx('flex min-w-0 flex-wrap z-0 mb-auto', compact ? 'gap-1' : 'gap-1.5')}>
           {floorName && floorBadge && (
-            <span className={clsx('inline-flex items-center rounded border font-black uppercase', compact ? 'px-1 py-0 text-[7px]' : 'px-1.5 py-0.5 text-[9px] tracking-wider', floorBadge)}>
+            <span title={floorName} className={clsx('inline-flex max-w-full items-center truncate rounded border font-black uppercase', compact ? 'px-1 py-0 text-[7px]' : 'px-1.5 py-0.5 text-[9px] tracking-wider', floorBadge)}>
               {floorName}
             </span>
           )}
-          <span className={clsx('inline-flex items-center rounded border font-black uppercase', compact ? 'px-1 py-0 text-[7px]' : 'px-1.5 py-0.5 text-[9px] tracking-wider', config.pill)}>
+          <span title={table.status.replace(/_/g, ' ')} className={clsx('inline-flex max-w-full items-center truncate rounded border font-black uppercase', compact ? 'px-1 py-0 text-[7px]' : 'px-1.5 py-0.5 text-[9px] tracking-wider', config.pill)}>
             {table.status.replace(/_/g, ' ')}
           </span>
           {activeOrder && (

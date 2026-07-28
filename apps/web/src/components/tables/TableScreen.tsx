@@ -375,12 +375,12 @@ export default function TableScreen() {
       />
 
       {/* Tables Grid */}
-      <div className="flex-1 overflow-y-auto p-2 bg-slate-50/50">
+      <div className="flex-1 min-w-0 overflow-x-hidden overflow-y-auto p-2 bg-slate-50/50">
         <div className={clsx(
-          'grid',
+          'tables-grid grid min-w-0 items-start',
           compactView
-            ? 'grid-cols-3 sm:grid-cols-4 md:grid-cols-6 lg:grid-cols-7 xl:grid-cols-8 2xl:grid-cols-10 gap-1.5'
-            : 'grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 2xl:grid-cols-7 gap-2'
+            ? 'tables-grid-compact gap-1.5'
+            : 'gap-2'
         )}>
           {filteredTables.map(table => {
             const activeOrder = table.activeOrderId ? ordersById.get(table.activeOrderId) ?? null : null
