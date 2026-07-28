@@ -1,6 +1,6 @@
 import { useEffect, useState, useRef } from 'react'
 import {
-  Users, Clock, PlayCircle, ReceiptText, Printer, CheckCircle,
+  Users, PlayCircle, ReceiptText, Printer, CheckCircle,
   HandPlatter, Pencil, ArrowRightLeft, GitMerge, MoreVertical, LayoutGrid, X
 } from 'lucide-react'
 import type { RestaurantTable, Order } from '../../lib/types'
@@ -154,7 +154,7 @@ export default function TableCard({ table, activeOrder, compact = false, canMana
       className={clsx(
         'group relative min-w-0 flex flex-col overflow-visible border-2 text-left transition-all hover:-translate-y-0.5 hover:shadow-lg cursor-pointer',
         showPopover ? 'z-50' : 'z-0 hover:z-40',
-        compact ? 'rounded-md min-h-[68px]' : 'rounded-xl min-h-[124px]',
+        compact ? 'h-[88px] rounded-md' : 'h-[160px] rounded-xl',
         floorColor || config.border, config.bg
       )}
     >
@@ -242,15 +242,13 @@ export default function TableCard({ table, activeOrder, compact = false, canMana
         </div>
 
         {activeOrder && !compact && (
-          <div className="mt-2 grid grid-cols-2 gap-1.5 z-0">
-            <div className="rounded-lg bg-white/70 border border-white/70 px-2 py-1.5">
-              <p className="text-[8px] font-black uppercase tracking-widest text-slate-400">Order Time</p>
-              <p className={clsx('text-xs font-black mt-0.5', config.text)}>{orderTimeLabel}</p>
-            </div>
-            <div className="rounded-lg bg-white/70 border border-white/70 px-2 py-1.5">
-              <p className="text-[8px] font-black uppercase tracking-widest text-slate-400">Waiting</p>
-              <p className={clsx('text-xs font-black mt-0.5', config.text)}>{elapsedLabel}</p>
-            </div>
+          <div className="mt-1.5 flex items-center justify-between gap-1 rounded-lg border border-white/70 bg-white/70 px-2 py-1.5">
+            <span className={clsx('min-w-0 truncate text-[10px] font-black', config.text)} title={`Order time ${orderTimeLabel}`}>
+              Time {orderTimeLabel}
+            </span>
+            <span className={clsx('min-w-0 truncate text-[10px] font-black', config.text)} title={`Waiting ${elapsedLabel}`}>
+              Wait {elapsedLabel}
+            </span>
           </div>
         )}
 
@@ -258,11 +256,6 @@ export default function TableCard({ table, activeOrder, compact = false, canMana
           <div className="space-y-0.5 min-w-0">
             {activeOrder && (
               <div className="flex flex-col gap-0.5">
-                <div className={clsx('flex items-center gap-0.5 font-semibold opacity-80', compact ? 'text-[8px]' : 'text-[11px]', config.text)}>
-                  <Clock size={compact ? 8 : 11} />
-                  <span>{compact ? elapsedLabel : 'Active'}</span>
-                  {!compact && <span className="ml-1 px-1.5 py-0.5 bg-white/50 rounded-md text-[10px] border border-white/40">{activeOrder.orderNo}</span>}
-                </div>
                 {(activeOrder.captainName || activeOrder.cashierName) && (
                   <div className={clsx('font-black uppercase opacity-90 truncate', compact ? 'text-[7px] max-w-[58px]' : 'text-[9px] max-w-[90px]', config.text)}>
                     By {activeOrder.captainName || activeOrder.cashierName}
