@@ -154,7 +154,7 @@ export default function TableCard({ table, activeOrder, compact = false, canMana
       className={clsx(
         'group relative min-w-0 flex flex-col overflow-visible border-2 text-left transition-all hover:-translate-y-0.5 hover:shadow-lg cursor-pointer',
         showPopover ? 'z-50' : 'z-0 hover:z-40',
-        compact ? 'h-[88px] rounded-md' : 'h-[160px] rounded-xl',
+        compact ? 'h-[96px] rounded-md' : 'h-[160px] rounded-xl',
         floorColor || config.border, config.bg
       )}
     >
@@ -163,7 +163,7 @@ export default function TableCard({ table, activeOrder, compact = false, canMana
         onClick={handleHeaderClick}
         className={clsx(
           'flex items-center justify-between w-full z-10 border-b hover:opacity-90 transition-opacity',
-          compact ? 'rounded-t-md px-1.5 py-1' : 'rounded-t-xl px-2.5 py-1.5',
+          compact ? 'rounded-t-md px-1.5 py-0.5' : 'rounded-t-xl px-2.5 py-1.5',
           table.status === 'available' ? "bg-slate-50 border-slate-200" : "bg-white border-black/10"
         )}
       >
@@ -224,8 +224,8 @@ export default function TableCard({ table, activeOrder, compact = false, canMana
       )}
 
       {/* Card Body */}
-      <div className={clsx('flex-1 flex flex-col', compact ? 'px-1.5 py-1' : 'p-2.5 pt-1.5')}>
-        <div className={clsx('min-w-0 z-0', compact ? 'space-y-0.5' : 'space-y-1')}>
+      <div className={clsx('flex-1 flex flex-col', compact ? 'px-1.5 py-0.5' : 'p-2.5 pt-1.5')}>
+        <div className={clsx('min-w-0 z-0', compact ? 'space-y-0' : 'space-y-1')}>
           {floorName && floorBadge && (
             <div>
               <span title={floorName} className={clsx('inline-flex max-w-full items-center truncate rounded border font-black uppercase', compact ? 'px-1 py-0 text-[7px]' : 'px-1.5 py-0.5 text-[8px] tracking-wide', floorBadge)}>
@@ -246,7 +246,7 @@ export default function TableCard({ table, activeOrder, compact = false, canMana
         </div>
 
         {activeOrder && (
-          <div className={clsx('mt-1.5 min-w-0 space-y-0.5', compact ? 'text-[7px]' : 'text-[10px]')}>
+          <div className={clsx('mt-0.5 min-w-0 space-y-0 leading-[9px]', compact ? 'text-[7px]' : 'text-[10px] leading-normal')}>
             <p className={clsx('whitespace-nowrap font-black', config.text)} title={`Order time ${orderTimeLabel}`}>
               Time: {orderTimeLabel}
             </p>
