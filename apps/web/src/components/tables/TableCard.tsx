@@ -225,47 +225,42 @@ export default function TableCard({ table, activeOrder, compact = false, canMana
 
       {/* Card Body */}
       <div className={clsx('flex-1 flex flex-col', compact ? 'px-1.5 py-1' : 'p-2.5 pt-1.5')}>
-        <div className={clsx('flex min-w-0 flex-wrap z-0 mb-auto', compact ? 'gap-1' : 'gap-1.5')}>
+        <div className={clsx('min-w-0 z-0', compact ? 'space-y-0.5' : 'space-y-1')}>
           {floorName && floorBadge && (
-            <span title={floorName} className={clsx('inline-flex max-w-full items-center truncate rounded border font-black uppercase', compact ? 'px-1 py-0 text-[7px]' : 'px-1.5 py-0.5 text-[9px] tracking-wider', floorBadge)}>
-              {floorName}
-            </span>
+            <div>
+              <span title={floorName} className={clsx('inline-flex max-w-full items-center truncate rounded border font-black uppercase', compact ? 'px-1 py-0 text-[7px]' : 'px-1.5 py-0.5 text-[8px] tracking-wide', floorBadge)}>
+                {floorName}
+              </span>
+            </div>
           )}
-          <span title={table.status.replace(/_/g, ' ')} className={clsx('inline-flex max-w-full items-center truncate rounded border font-black uppercase', compact ? 'px-1 py-0 text-[7px]' : 'px-1.5 py-0.5 text-[9px] tracking-wider', config.pill)}>
-            {table.status.replace(/_/g, ' ')}
-          </span>
-          {activeOrder && (
-            <span className={clsx('inline-flex items-center rounded border border-white/70 bg-white/70 font-black text-slate-600', compact ? 'px-1 py-0 text-[7px]' : 'px-1.5 py-0.5 text-[9px]')}>
-              {activeOrder.orderNo}
+          <div className="flex min-w-0 items-center gap-1">
+            <span title={table.status.replace(/_/g, ' ')} className={clsx('inline-flex min-w-0 shrink-0 items-center truncate rounded border font-black uppercase', compact ? 'px-1 py-0 text-[7px]' : 'px-1 py-0.5 text-[8px] tracking-wide', config.pill)}>
+              {table.status.replace(/_/g, ' ')}
             </span>
-          )}
+            {activeOrder && (
+              <span title={activeOrder.orderNo} className={clsx('inline-flex min-w-0 items-center truncate rounded border border-white/70 bg-white/70 font-black text-slate-600', compact ? 'px-1 py-0 text-[7px]' : 'px-1 py-0.5 text-[8px]')}>
+                {activeOrder.orderNo}
+              </span>
+            )}
+          </div>
         </div>
 
-        {activeOrder && !compact && (
-          <div className="mt-1.5 flex items-center justify-between gap-1 rounded-lg border border-white/70 bg-white/70 px-2 py-1.5">
-            <span className={clsx('min-w-0 truncate text-[10px] font-black', config.text)} title={`Order time ${orderTimeLabel}`}>
-              Time {orderTimeLabel}
-            </span>
-            <span className={clsx('min-w-0 truncate text-[10px] font-black', config.text)} title={`Waiting ${elapsedLabel}`}>
-              Wait {elapsedLabel}
-            </span>
+        {activeOrder && (
+          <div className={clsx('mt-1.5 min-w-0 space-y-0.5', compact ? 'text-[7px]' : 'text-[10px]')}>
+            <p className={clsx('whitespace-nowrap font-black', config.text)} title={`Order time ${orderTimeLabel}`}>
+              Time: {orderTimeLabel}
+            </p>
+            <p className={clsx('whitespace-nowrap font-black', config.text)} title={`Waiting ${elapsedLabel}`}>
+              Waiting: {elapsedLabel}
+            </p>
           </div>
         )}
 
-        <div className={clsx('flex items-end justify-between w-full z-0', compact ? 'mt-1' : 'mt-2')}>
-          <div className="space-y-0.5 min-w-0">
-            {activeOrder && (
-              <div className="flex flex-col gap-0.5">
-                {(activeOrder.captainName || activeOrder.cashierName) && (
-                  <div className={clsx('font-black uppercase opacity-90 truncate', compact ? 'text-[7px] max-w-[58px]' : 'text-[9px] max-w-[90px]', config.text)}>
-                    By {activeOrder.captainName || activeOrder.cashierName}
-                  </div>
-                )}
-              </div>
-            )}
+        {!activeOrder && (
+          <div className={clsx('flex items-end justify-end w-full z-0 mt-auto', compact ? 'text-[8px]' : 'text-[9px]')}>
+            <span className={clsx('font-black shrink-0', config.text)}>{config.action}</span>
           </div>
-          <span className={clsx('font-black shrink-0', compact ? 'text-[8px]' : 'text-[9px]', config.text)}>{config.action}</span>
-        </div>
+        )}
       </div>
     </div>
   )
