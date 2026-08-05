@@ -124,9 +124,10 @@ export default function App() {
 
     const auth = { accountLogin: cloud.accountLogin, accountSecret: cloud.accountSecret }
     let cancelled = false
-    let hydrated = false
-    let applyingRemote = false
-    let saveTimer: number | undefined
+    let cloudTimer: number | undefined
+    let cloudSyncInFlight = false
+    let retryAttempt = 0
+    let scheduleConfigKey = ''
 
     const withActiveCloudCredentials = (payload: any) => ({
       ...payload,
@@ -151,22 +152,95 @@ export default function App() {
           const remoteIsNewer = Number.isFinite(remoteUpdatedAt)
             && (!Number.isFinite(localUploadedAt) || remoteUpdatedAt > localUploadedAt)
           if (!belongsToCurrentTenant || getSnapshotDataScore(localSnapshot) === 0 || remoteIsNewer) {
-            applyingRemote = true
             billing.importSnapshot(withActiveCloudCredentials(remote.payload), belongsToCurrentTenant)
-            applyingRemote = false
           }
-          applyingRemote = true
           billing.updateCloudSyncSettings({ lastSyncedAt: remote.updatedAt, lastCloudDownloadedAt: remote.updatedAt })
-          applyingRemote = false
         }
       } catch {
         // Network error — keep using local data as fallback.
       } finally {
-        hydrated = true
+        scheduleDailySync()
       }
     }
 
-    refreshCloudData()
+    const hasUploadedToday = (lastUploadedAt?: string, date = new Date()) => {
+      if (!lastUploadedAt) return false
+      const lastUpload = new Date(lastUploadedAt)
+      return !Number.isNaN(lastUpload.getTime()) && lastUpload.toDateString() === date.toDateString()
+    }
+
+    const syncDailySnapshot = async () => {
+      if (cancelled || cloudSyncInFlight) return
+      const current = useBillingStore.getState()
+      const currentCloud = current.cloudSync
+      if (!currentCloud.enabled || !currentCloud.autoSyncDaily || !currentCloud.accountLogin || !currentCloud.accountSecret) return
+      cloudSyncInFlight = true
+      try {
+        const result = await saveCloudSnapshot(
+          currentCloud.outletId,
+          currentCloud.tenantId || current.outlet.tenantId,
+          current.exportSnapshot(),
+          realtimeClient.getClientId(),
+          currentCloud.serverUrl,
+          { accountLogin: currentCloud.accountLogin, accountSecret: currentCloud.accountSecret },
+        )
+        if (cancelled) return
+        if (result.skipped && result.payload) {
+          current.importSnapshot(withActiveCloudCredentials(result.payload), true)
+        }
+        current.updateCloudSyncSettings({ lastSyncedAt: result.updatedAt, lastCloudUploadedAt: result.updatedAt })
+        retryAttempt = 0
+      } catch (error) {
+        console.error('Daily web cloud sync failed', error)
+        const retryDelays = [60_000, 5 * 60_000, 15 * 60_000]
+        if (!cancelled && retryAttempt < retryDelays.length) {
+          const retryDelay = retryDelays[retryAttempt++]
+          window.clearTimeout(cloudTimer)
+          cloudTimer = window.setTimeout(() => void syncDailySnapshot(), retryDelay)
+          return
+        }
+        const nextAttempt = new Date()
+        nextAttempt.setDate(nextAttempt.getDate() + 1)
+        nextAttempt.setHours(Math.min(23, Math.max(0, Math.floor(currentCloud.syncHour24))), 0, 0, 0)
+        retryAttempt = 0
+        window.clearTimeout(cloudTimer)
+        cloudTimer = window.setTimeout(
+          () => void syncDailySnapshot(),
+          Math.max(60_000, nextAttempt.getTime() - Date.now()),
+        )
+        return
+      } finally {
+        cloudSyncInFlight = false
+      }
+      scheduleDailySync()
+    }
+
+    const scheduleDailySync = () => {
+      window.clearTimeout(cloudTimer)
+      if (cancelled) return
+      const currentCloud = useBillingStore.getState().cloudSync
+      scheduleConfigKey = JSON.stringify([
+        currentCloud.enabled,
+        currentCloud.autoSyncDaily,
+        currentCloud.syncHour24,
+        currentCloud.lastCloudUploadedAt,
+      ])
+      if (!currentCloud.enabled || !currentCloud.autoSyncDaily) return
+      const currentTime = new Date()
+      const syncHour = Math.min(23, Math.max(0, Math.floor(currentCloud.syncHour24)))
+      const nextRun = new Date(currentTime)
+      nextRun.setHours(syncHour, 0, 0, 0)
+      if (hasUploadedToday(currentCloud.lastCloudUploadedAt, currentTime)) {
+        nextRun.setDate(nextRun.getDate() + 1)
+      } else if (nextRun.getTime() <= currentTime.getTime()) {
+        cloudTimer = window.setTimeout(() => void syncDailySnapshot(), 0)
+        return
+      }
+      cloudTimer = window.setTimeout(
+        () => void syncDailySnapshot(),
+        Math.max(1000, nextRun.getTime() - currentTime.getTime()),
+      )
+    }
 
     realtimeClient.connect({
       serverUrl: cloud.serverUrl,
@@ -179,49 +253,29 @@ export default function App() {
       if (event.type !== 'STATE_UPDATED') return
       const payload = event.payload as any
       if (!payload || !Array.isArray(payload.orders) || !Array.isArray(payload.tables)) return
-      applyingRemote = true
       useBillingStore.getState().importSnapshot(withActiveCloudCredentials(payload), true)
       useBillingStore.getState().updateCloudSyncSettings({
         lastSyncedAt: event.timestamp,
         lastCloudDownloadedAt: event.timestamp,
       })
-      applyingRemote = false
     })
 
-    const unsubscribeStore = useBillingStore.subscribe(() => {
-      if (!hydrated || applyingRemote || cancelled) return
-      window.clearTimeout(saveTimer)
-      saveTimer = window.setTimeout(async () => {
-        if (cancelled) return
-        const current = useBillingStore.getState()
-        const currentCloud = current.cloudSync
-        if (!currentCloud.enabled || !currentCloud.accountLogin || !currentCloud.accountSecret) return
-        try {
-          const result = await saveCloudSnapshot(
-            currentCloud.outletId,
-            currentCloud.tenantId || current.outlet.tenantId,
-            current.exportSnapshot(),
-            realtimeClient.getClientId(),
-            currentCloud.serverUrl,
-            { accountLogin: currentCloud.accountLogin, accountSecret: currentCloud.accountSecret },
-          )
-          if (cancelled) return
-          applyingRemote = true
-          if (result.skipped && result.payload) {
-            current.importSnapshot(withActiveCloudCredentials(result.payload), true)
-          }
-          current.updateCloudSyncSettings({ lastSyncedAt: result.updatedAt, lastCloudUploadedAt: result.updatedAt })
-          applyingRemote = false
-        } catch (error) {
-          console.error('Web cloud autosave failed', error)
-        }
-      }, 750)
+    const unsubscribeSchedule = useBillingStore.subscribe((state) => {
+      const nextConfigKey = JSON.stringify([
+        state.cloudSync.enabled,
+        state.cloudSync.autoSyncDaily,
+        state.cloudSync.syncHour24,
+        state.cloudSync.lastCloudUploadedAt,
+      ])
+      if (nextConfigKey !== scheduleConfigKey) scheduleDailySync()
     })
+
+    void refreshCloudData()
 
     return () => {
       cancelled = true
-      window.clearTimeout(saveTimer)
-      unsubscribeStore()
+      window.clearTimeout(cloudTimer)
+      unsubscribeSchedule()
       unsubscribeRealtime()
     }
   }, [user?.id])
@@ -233,7 +287,19 @@ export default function App() {
     let hydrated = false
     let applyingLan = false
     let lastBridgeUpdatedAt = ''
+    let lastPushedFingerprint = ''
+    let bridgeAvailable = false
     let syncTimer: number | undefined
+
+    const fingerprint = (value: unknown) => {
+      const serialized = JSON.stringify(value)
+      let hash = 2166136261
+      for (let index = 0; index < serialized.length; index += 1) {
+        hash ^= serialized.charCodeAt(index)
+        hash = Math.imul(hash, 16777619)
+      }
+      return `${serialized.length}:${hash >>> 0}`
+    }
 
     const withActiveCloudCredentials = (payload: any) => {
       const activeCloud = useBillingStore.getState().cloudSync
@@ -255,20 +321,27 @@ export default function App() {
     }
 
     const pushCurrentState = async () => {
-      if (cancelled || applyingLan) return
+      if (cancelled || applyingLan || !bridgeAvailable) return
       try {
+        const snapshot = useBillingStore.getState().exportSnapshot()
+        const staff = useStaffStore.getState().staff
+        const nextFingerprint = fingerprint({ snapshot, staff })
+        if (nextFingerprint === lastPushedFingerprint) return
         const result = await syncLanBridge(
-          useBillingStore.getState().exportSnapshot(),
-          useStaffStore.getState().staff,
+          snapshot,
+          staff,
         )
-        if (!cancelled) lastBridgeUpdatedAt = result.updatedAt
+        if (!cancelled) {
+          lastBridgeUpdatedAt = result.updatedAt
+          lastPushedFingerprint = nextFingerprint
+        }
       } catch {
-        // The web app remains usable when the optional Windows bridge is absent.
+        bridgeAvailable = false
       }
     }
 
     const schedulePush = () => {
-      if (!hydrated || applyingLan || cancelled) return
+      if (!hydrated || applyingLan || cancelled || !bridgeAvailable) return
       window.clearTimeout(syncTimer)
       syncTimer = window.setTimeout(() => void pushCurrentState(), 450)
     }
@@ -285,6 +358,7 @@ export default function App() {
       try {
         const remote = await getLanBridgeState()
         if (cancelled) return
+        bridgeAvailable = true
         const billing = useBillingStore.getState()
         const cloud = billing.cloudSync
         const localReference = Math.max(
@@ -299,7 +373,7 @@ export default function App() {
           lastBridgeUpdatedAt = remote.updatedAt
         }
       } catch {
-        // Bridge may not be installed yet; retry through polling below.
+        bridgeAvailable = false
       } finally {
         hydrated = true
         void pushCurrentState()
@@ -310,17 +384,19 @@ export default function App() {
       if (cancelled || applyingLan) return
       try {
         const remote = await getLanBridgeState()
-        if (cancelled || !remote.updatedAt || remote.updatedAt === lastBridgeUpdatedAt) return
-        applyBridgeState(remote)
+        bridgeAvailable = true
+        if (cancelled) return
+        if (remote.updatedAt && remote.updatedAt !== lastBridgeUpdatedAt) applyBridgeState(remote)
+        void pushCurrentState()
       } catch {
-        // LAN hosting automatically resumes when the bridge starts again.
+        bridgeAvailable = false
       }
     }
 
     void hydrate()
     const unsubscribeBilling = useBillingStore.subscribe(schedulePush)
     const unsubscribeStaff = useStaffStore.subscribe(schedulePush)
-    const pollTimer = window.setInterval(() => void pollBridge(), 1200)
+    const pollTimer = window.setInterval(() => void pollBridge(), 30_000)
     const onFocus = () => void pollBridge()
     window.addEventListener('focus', onFocus)
 

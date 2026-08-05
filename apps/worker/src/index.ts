@@ -21,6 +21,7 @@ type Bindings = {
   ALERT_FROM_EMAIL?: string
   ALERT_TO_EMAIL?: string
   ALERT_REPLY_TO_EMAIL?: string
+  MAINTENANCE_TOKEN?: string
 }
 
 type Role = 'owner' | 'admin' | 'manager' | 'cashier' | 'captain' | 'kitchen' | 'inventory' | 'viewer'
@@ -487,7 +488,42 @@ function jsonString(value: unknown) {
   return value == null ? null : JSON.stringify(value)
 }
 
-async function projectSnapshotToRelational(db: D1Database, outletId: string, snapshot: SnapshotPayload, updatedAt: string) {
+type ProjectionDatabase = {
+  prepare(query: string): {
+    bind(...values: unknown[]): { run(): Promise<unknown> }
+  }
+}
+
+type ProjectionResult = {
+  statements: number
+  floors: number
+  tables: number
+  menuItems: number
+  orders: number
+  orderItems: number
+  kots: number
+  kotItems: number
+  payments: number
+  skippedReferences: number
+}
+
+function createProjectionCollector(db: D1Database, statements: D1PreparedStatement[]): ProjectionDatabase {
+  return {
+    prepare(query) {
+      return {
+        bind(...values) {
+          return {
+            async run() {
+              statements.push(db.prepare(query).bind(...values))
+            },
+          }
+        },
+      }
+    },
+  }
+}
+
+async function projectSnapshotToRelational(db: ProjectionDatabase, outletId: string, snapshot: SnapshotPayload, updatedAt: string): Promise<ProjectionResult> {
   const outlet = asRecord(snapshot.outlet) ?? {}
   const printSettings = asRecord(snapshot.printSettings) ?? {}
   const tenantId = stringValue(outlet.tenantId, outletId.startsWith('out_') ? outletId.slice(4) : outletId)
@@ -499,8 +535,28 @@ async function projectSnapshotToRelational(db: D1Database, outletId: string, sna
   const outletCurrency = stringValue(outlet.currency, 'INR')
   const outletGstin = stringValue(outlet.gstin)
   const outletStatus = stringValue(outlet.status, 'active')
+  const floors = asArray(snapshot.floors)
+  const tables = asArray(snapshot.tables)
+  const categories = asArray(snapshot.menuCategories)
+  const menuItems = asArray(snapshot.menuItems)
+  const orders = asArray(snapshot.orders)
+  const orderItems = asArray(snapshot.orderItems)
+  const kots = asArray(snapshot.kots)
+  const payments = asArray(snapshot.payments)
+  const idsFrom = (values: unknown[]) => new Set(values.map(asRecord).filter(Boolean).map((record) => stringValue(record?.id)).filter(Boolean))
+  const floorIds = idsFrom(floors)
+  const categoryIds = idsFrom(categories)
+  const orderIds = idsFrom(orders)
+  const orderItemIds = idsFrom(orderItems)
+  const kotIds = idsFrom(kots)
+  let skippedReferences = 0
+  let projectedTables = 0
+  let projectedMenuItems = 0
+  let projectedOrderItems = 0
+  let projectedKots = 0
+  let projectedKotItems = 0
+  let projectedPayments = 0
 
-  await ensureTenantAndOutlet(db, tenantId, outletName)
   await db.prepare(`
     UPDATE outlets SET
       name = ?, code = ?, address = ?, phone = ?, timezone = ?, currency = ?, gstin = ?, status = ?, updated_at = ?
@@ -561,7 +617,7 @@ async function projectSnapshotToRelational(db: D1Database, outletId: string, sna
     await db.prepare(`DELETE FROM ${table} WHERE outlet_id = ?`).bind(outletId).run()
   }
 
-  for (const floor of asArray(snapshot.floors)) {
+  for (const floor of floors) {
     const record = asRecord(floor)
     if (!record) continue
     await db.prepare(`
@@ -579,9 +635,14 @@ async function projectSnapshotToRelational(db: D1Database, outletId: string, sna
     ).run()
   }
 
-  for (const table of asArray(snapshot.tables)) {
+  for (const table of tables) {
     const record = asRecord(table)
     if (!record) continue
+    if (!floorIds.has(stringValue(record.floorId))) {
+      skippedReferences += 1
+      continue
+    }
+    projectedTables += 1
     await db.prepare(`
       INSERT INTO restaurant_tables (
         id, tenant_id, outlet_id, floor_id, name, seats, status, active_order_id, assigned_user_id, sort_order, created_at, updated_at
@@ -618,7 +679,7 @@ async function projectSnapshotToRelational(db: D1Database, outletId: string, sna
     ).run()
   }
 
-  for (const category of asArray(snapshot.menuCategories)) {
+  for (const category of categories) {
     const record = asRecord(category)
     if (!record) continue
     await db.prepare(`
@@ -637,9 +698,14 @@ async function projectSnapshotToRelational(db: D1Database, outletId: string, sna
     ).run()
   }
 
-  for (const item of asArray(snapshot.menuItems)) {
+  for (const item of menuItems) {
     const record = asRecord(item)
     if (!record) continue
+    if (!categoryIds.has(stringValue(record.categoryId))) {
+      skippedReferences += 1
+      continue
+    }
+    projectedMenuItems += 1
     await db.prepare(`
       INSERT INTO menu_items (
         id, tenant_id, outlet_id, category_id, name, item_type, price_paise, tax_percent, station_id, is_available, sort_order, created_at, updated_at
@@ -682,7 +748,7 @@ async function projectSnapshotToRelational(db: D1Database, outletId: string, sna
     ).run()
   }
 
-  for (const order of asArray(snapshot.orders)) {
+  for (const order of orders) {
     const record = asRecord(order)
     if (!record) continue
     await db.prepare(`
@@ -725,9 +791,14 @@ async function projectSnapshotToRelational(db: D1Database, outletId: string, sna
     ).run()
   }
 
-  for (const item of asArray(snapshot.orderItems)) {
+  for (const item of orderItems) {
     const record = asRecord(item)
     if (!record) continue
+    if (!orderIds.has(stringValue(record.orderId))) {
+      skippedReferences += 1
+      continue
+    }
+    projectedOrderItems += 1
     await db.prepare(`
       INSERT INTO order_items (
         id, tenant_id, outlet_id, order_id, menu_item_id, name_snapshot, item_type, quantity, unit_price_paise,
@@ -755,9 +826,14 @@ async function projectSnapshotToRelational(db: D1Database, outletId: string, sna
     ).run()
   }
 
-  for (const kot of asArray(snapshot.kots)) {
+  for (const kot of kots) {
     const record = asRecord(kot)
     if (!record) continue
+    if (!orderIds.has(stringValue(record.orderId))) {
+      skippedReferences += 1
+      continue
+    }
+    projectedKots += 1
     await db.prepare(`
       INSERT INTO kots (
         id, tenant_id, outlet_id, order_id, kot_no, station_id, status, created_by_user_id, printed_at, created_at, updated_at, order_no, table_name, order_type, captain_name, cancellation_reason, cancelled_at
@@ -783,12 +859,18 @@ async function projectSnapshotToRelational(db: D1Database, outletId: string, sna
     ).run()
   }
 
-  for (const kot of asArray(snapshot.kots)) {
+  for (const kot of kots) {
     const record = asRecord(kot)
     if (!record) continue
+    if (!kotIds.has(stringValue(record.id)) || !orderIds.has(stringValue(record.orderId))) continue
     for (const item of asArray(record.items)) {
       const kotItem = asRecord(item)
       if (!kotItem) continue
+      if (!orderItemIds.has(stringValue(kotItem.orderItemId))) {
+        skippedReferences += 1
+        continue
+      }
+      projectedKotItems += 1
       await db.prepare(`
         INSERT INTO kot_items (
           id, tenant_id, outlet_id, kot_id, order_item_id, quantity, status, created_at, updated_at, name, note, modifiers, item_type
@@ -811,9 +893,14 @@ async function projectSnapshotToRelational(db: D1Database, outletId: string, sna
     }
   }
 
-  for (const payment of asArray(snapshot.payments)) {
+  for (const payment of payments) {
     const record = asRecord(payment)
     if (!record) continue
+    if (!orderIds.has(stringValue(record.orderId))) {
+      skippedReferences += 1
+      continue
+    }
+    projectedPayments += 1
     await db.prepare(`
       INSERT INTO payments (
         id, tenant_id, outlet_id, order_id, method, amount_paise, reference_no, status, collected_by_user_id, created_at, status_reason
@@ -852,6 +939,50 @@ async function projectSnapshotToRelational(db: D1Database, outletId: string, sna
       stringValue(record.createdAt, updatedAt),
     ).run()
   }
+  return {
+    statements: 0,
+    floors: floorIds.size,
+    tables: projectedTables,
+    menuItems: projectedMenuItems,
+    orders: orderIds.size,
+    orderItems: projectedOrderItems,
+    kots: projectedKots,
+    kotItems: projectedKotItems,
+    payments: projectedPayments,
+    skippedReferences,
+  }
+}
+
+async function reconcileStoredSnapshot(db: D1Database, outletId: string) {
+  const snapshot = await readSnapshotRow(db, outletId)
+  if (!snapshot) return null
+  const outlet = asRecord(snapshot.payload.outlet) ?? {}
+  await ensureTenantAndOutlet(db, snapshot.tenantId, stringValue(outlet.name, 'My Restaurant'))
+  const statements: D1PreparedStatement[] = []
+  const projection = await projectSnapshotToRelational(
+    createProjectionCollector(db, statements),
+    outletId,
+    snapshot.payload,
+    snapshot.updatedAt,
+  )
+  projection.statements = statements.length
+  await db.batch(statements)
+  return { snapshot, projection }
+}
+
+async function constantTimeTokenMatches(expected: string, candidate: string) {
+  const encoder = new TextEncoder()
+  const [expectedHash, candidateHash] = await Promise.all([
+    crypto.subtle.digest('SHA-256', encoder.encode(expected)),
+    crypto.subtle.digest('SHA-256', encoder.encode(candidate)),
+  ])
+  const expectedBytes = new Uint8Array(expectedHash)
+  const candidateBytes = new Uint8Array(candidateHash)
+  let difference = 0
+  for (let index = 0; index < expectedBytes.length; index += 1) {
+    difference |= expectedBytes[index] ^ candidateBytes[index]
+  }
+  return difference === 0
 }
 
 async function getTenantSnapshotCounts(db: D1Database, tenantId: string) {
@@ -1825,6 +1956,35 @@ app.get('/api/v1/outlets/:outletId/realtime', async (c) => {
   return stub.fetch(c.req.raw)
 })
 
+app.post('/api/v1/maintenance/reconcile/:outletId', async (c) => {
+  if (!c.env.DB) return c.json({ error: 'Database binding is not configured' }, 500)
+  if (!c.env.MAINTENANCE_TOKEN) return c.json({ error: 'Maintenance reconciliation is disabled' }, 503)
+  const authorization = c.req.header('Authorization') ?? ''
+  const candidate = authorization.toLowerCase().startsWith('bearer ') ? authorization.slice(7).trim() : ''
+  if (!candidate || !(await constantTimeTokenMatches(c.env.MAINTENANCE_TOKEN, candidate))) {
+    return c.json({ error: 'Unauthenticated' }, 401)
+  }
+  const outletId = c.req.param('outletId')
+  try {
+    const result = await reconcileStoredSnapshot(c.env.DB, outletId)
+    if (!result) return c.json({ error: 'Snapshot not found' }, 404)
+    console.log(JSON.stringify({
+      event: 'snapshot_reconciled',
+      outletId,
+      snapshotUpdatedAt: result.snapshot.updatedAt,
+      ...result.projection,
+    }))
+    return c.json({ ok: true, outletId, updatedAt: result.snapshot.updatedAt, projection: result.projection })
+  } catch (error) {
+    console.error(JSON.stringify({
+      event: 'snapshot_reconciliation_failed',
+      outletId,
+      error: error instanceof Error ? error.message : String(error),
+    }))
+    return c.json({ error: 'Snapshot reconciliation failed', outletId }, 500)
+  }
+})
+
 app.put('/api/v1/outlets/:outletId/state', async (c) => {
   const db = c.env.DB
   if (!db) return c.json({ error: 'Database binding is not configured' }, 500)
@@ -1879,7 +2039,73 @@ app.put('/api/v1/outlets/:outletId/state', async (c) => {
     })
   }
 
+  const incomingPayloadJson = JSON.stringify(body.data.payload)
+  const forceProjection = body.data.clientId?.includes('manual') === true
+  if (!forceProjection && existing && JSON.stringify(existing.payload) === incomingPayloadJson) {
+    return c.json({
+      ok: true,
+      outletId,
+      updatedAt: existing.updatedAt,
+      skipped: true,
+      reason: 'Identical snapshot already saved',
+      payload: existing.payload,
+    })
+  }
+
   const updatedAt = new Date().toISOString()
+  const transaction: D1PreparedStatement[] = []
+  if (existing) {
+    transaction.push(db.prepare(`
+      INSERT INTO app_snapshot_history (outlet_id, tenant_id, payload_json, archived_at)
+      VALUES (?, ?, ?, ?)
+    `).bind(outletId, existing.tenantId, JSON.stringify(existing.payload), updatedAt))
+  }
+
+  transaction.push(db.prepare(`
+    INSERT INTO app_snapshots (outlet_id, tenant_id, payload_json, updated_at)
+    VALUES (?, ?, ?, ?)
+    ON CONFLICT(outlet_id) DO UPDATE SET
+      tenant_id = excluded.tenant_id,
+      payload_json = excluded.payload_json,
+      updated_at = excluded.updated_at
+  `).bind(outletId, body.data.tenantId, incomingPayloadJson, updatedAt))
+  transaction.push(db.prepare(`
+    DELETE FROM app_snapshot_history
+    WHERE outlet_id = ? AND id NOT IN (
+      SELECT id FROM app_snapshot_history WHERE outlet_id = ? ORDER BY id DESC LIMIT 20
+    )
+  `).bind(outletId, outletId))
+
+  const outlet = asRecord(body.data.payload.outlet) ?? {}
+  const outletName = stringValue(outlet.name, 'My Restaurant')
+  await ensureTenantAndOutlet(db, body.data.tenantId, outletName)
+  const projection = await projectSnapshotToRelational(
+    createProjectionCollector(db, transaction),
+    outletId,
+    body.data.payload,
+    updatedAt,
+  )
+  projection.statements = transaction.length
+
+  try {
+    await db.batch(transaction)
+  } catch (error) {
+    console.error(JSON.stringify({
+      event: 'snapshot_projection_failed',
+      outletId,
+      statementCount: transaction.length,
+      skippedReferences: projection.skippedReferences,
+      error: error instanceof Error ? error.message : String(error),
+    }))
+    return c.json({
+      error: 'Restaurant snapshot could not be saved transactionally',
+      outletId,
+      projection,
+    }, 500)
+  }
+
+  console.log(JSON.stringify({ event: 'snapshot_projection_completed', outletId, updatedAt, ...projection }))
+
   if (c.env.REALTIME_HUB) {
     const stub = c.env.REALTIME_HUB.get(c.env.REALTIME_HUB.idFromName(outletId))
     c.executionCtx.waitUntil(stub.fetch('https://realtime.internal/state', {
@@ -1889,33 +2115,7 @@ app.put('/api/v1/outlets/:outletId/state', async (c) => {
     }).catch((error) => console.error('Optional realtime mirror failed:', error)))
   }
 
-  if (existing) {
-    await db.prepare(`
-      INSERT INTO app_snapshot_history (outlet_id, tenant_id, payload_json, archived_at)
-      VALUES (?, ?, ?, ?)
-    `).bind(outletId, existing.tenantId, JSON.stringify(existing.payload), updatedAt).run()
-    await db.prepare(`
-      DELETE FROM app_snapshot_history
-      WHERE outlet_id = ? AND id NOT IN (
-        SELECT id FROM app_snapshot_history WHERE outlet_id = ? ORDER BY id DESC LIMIT 20
-      )
-    `).bind(outletId, outletId).run()
-  }
-
-  await db.prepare(`
-    INSERT INTO app_snapshots (outlet_id, tenant_id, payload_json, updated_at)
-    VALUES (?, ?, ?, ?)
-    ON CONFLICT(outlet_id) DO UPDATE SET
-      tenant_id = excluded.tenant_id,
-      payload_json = excluded.payload_json,
-      updated_at = excluded.updated_at
-  `).bind(outletId, body.data.tenantId, JSON.stringify(body.data.payload), updatedAt).run()
-
-  const projectSnapshot = projectSnapshotToRelational(db, outletId, body.data.payload, updatedAt)
-    .catch((error) => console.error('Snapshot projection failed:', error))
-  c.executionCtx.waitUntil(projectSnapshot)
-
-  return c.json({ ok: true, outletId, updatedAt })
+  return c.json({ ok: true, outletId, updatedAt, projection })
 })
 
 app.get('/api/v1/staff/sync', async (c) => {

@@ -230,6 +230,9 @@ export async function saveCloudSnapshot(
         cloudSync: {
           ...payload.cloudSync,
           accountSecret: '',
+          lastSyncedAt: undefined,
+          lastCloudUploadedAt: undefined,
+          lastCloudDownloadedAt: undefined,
         },
       }
     : payload

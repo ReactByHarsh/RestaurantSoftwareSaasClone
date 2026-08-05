@@ -23,10 +23,8 @@ import type {
   TableStatus,
 } from '../lib/types'
 import type { BillingSnapshot, CloudSyncSettings } from '../lib/cloudSync'
-import { createCloudOrder, updateCloudOrder, addCloudKOT, updateCloudKOT, addCloudPayment, saveCloudSnapshot } from '../lib/cloudSync'
 import { calculateTax } from '../lib/money'
 import { isTauriDesktop, saveDesktopState } from '../lib/localDb'
-import { realtimeClient } from '../lib/realtime'
 import { DEFAULT_BRIDGE_URL, describePrinterError, normalizePrinterConnectionMode, sendPrintJob, type PrinterConnectionMode } from '../lib/printer'
 import { buildKotPrintText, buildReceiptPrintParts } from '../lib/printTemplates'
 import { isInventoryMenuItem, isSaleableMenuItem } from '../lib/productTypes'
@@ -1148,7 +1146,6 @@ export const useBillingStore = create<BillingStore>()(
         set((state) => ({
           tables: state.tables.map((table) => table.id === tableId ? { ...table, ...updates } : table),
         }))
-        realtimeClient.broadcast('TABLE_STATUS_UPDATED', { tableId, updates })
       },
 
       // Transfer order from one table to another (target must be available)
@@ -1170,8 +1167,6 @@ export const useBillingStore = create<BillingStore>()(
           selectedTableId: s.selectedTableId === fromTableId ? toTableId : s.selectedTableId,
           auditLogs: addAudit(s, 'table.transferred', 'restaurant_table', `Transferred order from ${fromTable.name} to ${toTable.name}`, orderId),
         }))
-        realtimeClient.broadcast('TABLE_STATUS_UPDATED', { tableId: fromTableId, updates: { status: 'available' } })
-        realtimeClient.broadcast('TABLE_STATUS_UPDATED', { tableId: toTableId, updates: { status: fromTable.status } })
         return true
       },
 
@@ -1286,7 +1281,6 @@ export const useBillingStore = create<BillingStore>()(
           }
         })
         
-        realtimeClient.broadcast('KOTS_TRANSFERRED', { sourceTableId, targetTableId, kotIds })
         return true
       },
 
@@ -1892,18 +1886,6 @@ export const useBillingStore = create<BillingStore>()(
           }
         })
 
-        // Background granular sync
-        const isNewOrder = !state.orders.some((o) => o.id === updatedOrder.id)
-        if (isNewOrder) {
-          createCloudOrder(updatedOrder, createdItems).catch(console.error)
-        } else {
-          // If updating an order, we send ALL items for that order to simplify the backend PUT logic
-          const allItems = [...createdItems, ...state.orderItems.filter(i => i.orderId === updatedOrder.id)]
-          updateCloudOrder(updatedOrder, allItems).catch(console.error)
-        }
-        kotsToCreate.forEach(kot => addCloudKOT(state.outlet.id, kot).catch(console.error))
-
-        realtimeClient.broadcast('KOT_CREATED', { kot: kotsToCreate[0], kots: kotsToCreate, order: updatedOrder })
         if (state.printSettings.autoPrintKot || state.printSettings.directKotPrint || ['webusb', 'bridge'].includes(state.printSettings.connectionMode)) {
           if (state.printSettings.kotPrintMode === 'single' && kotsToCreate.length > 1) {
             const kotIds = kotsToCreate.map((kot) => kot.id)
@@ -1966,16 +1948,6 @@ export const useBillingStore = create<BillingStore>()(
           }
         })
 
-        const afterState = get()
-        const targetOrder = afterState.orders.find(o => o.id === orderId)
-        const payment = afterState.payments.find(p => p.orderId === orderId && p.amountPaise === paymentInput.amountPaise && p.method === paymentInput.method && p.collectedByUserId === userId)
-        
-        if (targetOrder && payment) {
-          const items = afterState.orderItems.filter(i => i.orderId === orderId)
-          updateCloudOrder(targetOrder, items).catch(console.error)
-          addCloudPayment(afterState.outlet.id, payment).catch(console.error)
-          realtimeClient.broadcast('PAYMENT_ADDED', { payment, order: targetOrder } as unknown as Record<string, unknown>)
-        }
       },
 
       settlePayment: async (orderId, paymentInputs, discountPaise, userId, userName, printAfter) => {
@@ -2017,7 +1989,6 @@ export const useBillingStore = create<BillingStore>()(
         if (!hasBillableItems) return false
 
         const actualOrderId: string = targetOrder.id
-        const existingPaymentIds = new Set(state.payments.map((payment) => payment.id))
         const totalPaid = paymentInputs.reduce((sum, payment) => sum + payment.amountPaise, 0)
         const totalCollected = paymentInputs
           .filter((payment) => isCollectedPayment(payment.method))
@@ -2140,60 +2111,14 @@ export const useBillingStore = create<BillingStore>()(
         const order = afterSettle.orders.find(o => o.id === actualOrderId)
         if (!order || !isClosedOrder(order)) return false
 
-        const cloudWrites: Promise<unknown>[] = []
-        if (order) {
-          const items = afterSettle.orderItems.filter(i => i.orderId === actualOrderId)
-          if (isDirectCheckout) {
-            cloudWrites.push(createCloudOrder(order, items))
-          } else {
-            cloudWrites.push(updateCloudOrder(order, items))
-          }
-          
-          // Sync all the new payments for this settlement
-          const newPayments = afterSettle.payments.filter((payment) => payment.orderId === actualOrderId && !existingPaymentIds.has(payment.id))
-          newPayments.forEach(p => {
-            cloudWrites.push(addCloudPayment(afterSettle.outlet.id, p))
-            realtimeClient.broadcast('PAYMENT_ADDED', { payment: p, order } as unknown as Record<string, unknown>)
-          })
-        }
-
-        realtimeClient.broadcast('PAYMENT_SETTLED', { orderId: actualOrderId, paidPaise: totalCollected })
         const completedSnapshot = afterSettle.exportSnapshot()
-        const durableWrites: Promise<unknown>[] = [...cloudWrites]
         if (isTauriDesktop()) {
-          durableWrites.push(saveDesktopState(completedSnapshot, useStaffStore.getState().staff))
-        }
-
-        const cloud = afterSettle.cloudSync
-        if (cloud.enabled && cloud.serverUrl && cloud.outletId && cloud.accountLogin && cloud.accountSecret) {
-          durableWrites.push(
-            saveCloudSnapshot(
-              cloud.outletId,
-              cloud.tenantId || afterSettle.outlet.tenantId,
-              completedSnapshot,
-              realtimeClient.getClientId(),
-              cloud.serverUrl,
-              { accountLogin: cloud.accountLogin, accountSecret: cloud.accountSecret },
-            ).then((result) => {
-              get().updateCloudSyncSettings({
-                lastSyncedAt: result.updatedAt,
-                lastCloudUploadedAt: result.updatedAt,
-              })
-            }),
-          )
-        }
-
-        const writeResults = await Promise.allSettled(durableWrites)
-        const failedWrites = writeResults.filter((result) => result.status === 'rejected')
-        if (failedWrites.length > 0) {
-          failedWrites.forEach((result) => {
-            if (result.status === 'rejected') console.error('Checkout persistence failed', result.reason)
-          })
-          useUIStore.getState().addToast(
-            'error',
-            'Checkout is saved on this device, but one background sync failed and will retry on the next sync.',
-            'Sync Warning',
-          )
+          try {
+            await saveDesktopState(completedSnapshot, useStaffStore.getState().staff)
+          } catch (error) {
+            console.error('Checkout local save failed', error)
+            useUIStore.getState().addToast('error', 'Checkout is complete in memory, but the desktop database save will be retried.', 'Local Save Warning')
+          }
         }
         if (printAfter ?? (get().printSettings.autoPrintReceipt || get().printSettings.directReceiptPrint)) setTimeout(() => get().printReceipt(actualOrderId), 0)
         return true
@@ -2264,13 +2189,6 @@ export const useBillingStore = create<BillingStore>()(
         }
       })
 
-        const state = get()
-        const updatedOrder = state.orders.find(o => o.id === orderId)
-        if (updatedOrder) {
-          const items = state.orderItems.filter(i => i.orderId === orderId)
-          updateCloudOrder(updatedOrder, items).catch(console.error)
-          realtimeClient.broadcast('ORDER_UPDATED', updatedOrder as unknown as Record<string, unknown>)
-        }
       },
 
       updateOrderGlobalDiscount: (orderId, type, value) => set((state) => {
@@ -2392,9 +2310,6 @@ export const useBillingStore = create<BillingStore>()(
           auditLogs: addAudit(current, 'order.items.updated', 'order', `Updated products on ${order.orderNo}`, orderId),
         }))
 
-        const afterState = get()
-        updateCloudOrder(updatedOrder, afterState.orderItems.filter((item) => item.orderId === orderId)).catch(console.error)
-        realtimeClient.broadcast('ORDER_UPDATED', { order: updatedOrder, items: updatedItems })
         return true
       },
 
@@ -2449,7 +2364,6 @@ export const useBillingStore = create<BillingStore>()(
             auditLogs: addAudit(current, 'kot.cancelled', 'kot', reason, kotId),
           }
         })
-        realtimeClient.broadcast('KOT_STATUS_UPDATED', { kotId, status: 'cancelled', reason })
         return true
       },
 
@@ -2531,7 +2445,6 @@ export const useBillingStore = create<BillingStore>()(
           }
         })
         
-        realtimeClient.broadcast('ORDER_STATUS_UPDATED', { orderId: order.id, status: order.status })
         return true
       },
 
@@ -2577,7 +2490,6 @@ export const useBillingStore = create<BillingStore>()(
           }
         })
 
-        realtimeClient.broadcast('ORDER_STATUS_UPDATED', { orderId, status: 'cancelled' })
         return true
       },
 
@@ -2603,7 +2515,6 @@ export const useBillingStore = create<BillingStore>()(
           orders: current.orders.map((candidate) => candidate.id === orderId ? { ...candidate, paidPaise: order.totalPaise, updatedAt: changedAt } : candidate),
           auditLogs: addAudit(current, 'payment.revised', 'payment', `${reason}; changed to ${method.toUpperCase()}`, orderId),
         }))
-        realtimeClient.broadcast('PAYMENT_SETTLED', { orderId, method, revised: true })
         return true
       },
 
@@ -2626,19 +2537,6 @@ export const useBillingStore = create<BillingStore>()(
           }
         })
 
-        const state = get()
-        const kot = state.kots.find(k => k.id === kotId)
-        if (kot) {
-          updateCloudKOT(state.outlet.id, kot).catch(console.error)
-          if (kot.orderId) {
-            const order = state.orders.find(o => o.id === kot.orderId)
-            if (order) {
-              const items = state.orderItems.filter(i => i.orderId === order.id)
-              updateCloudOrder(order, items).catch(console.error)
-            }
-          }
-        }
-        realtimeClient.broadcast('KOT_STATUS_UPDATED', { kotId, itemId, status })
       },
 
       updateKOTStatus: (kotId, status) => {
@@ -2656,19 +2554,6 @@ export const useBillingStore = create<BillingStore>()(
           }
         })
 
-        const state = get()
-        const kot = state.kots.find(k => k.id === kotId)
-        if (kot) {
-          updateCloudKOT(state.outlet.id, kot).catch(console.error)
-          if (kot.orderId) {
-            const order = state.orders.find(o => o.id === kot.orderId)
-            if (order) {
-              const items = state.orderItems.filter(i => i.orderId === order.id)
-              updateCloudOrder(order, items).catch(console.error)
-            }
-          }
-        }
-        realtimeClient.broadcast('KOT_STATUS_UPDATED', { kotId, status })
       },
 
       printReceipt: (orderId, type = 'invoice') => {
