@@ -555,6 +555,10 @@ async function projectSnapshotToRelational(db: ProjectionDatabase, outletId: str
   const orderIds = idsFrom(orders)
   const orderItemIds = idsFrom(orderItems)
   const kotIds = idsFrom(kots)
+  const projectedStationId = (value: unknown) => {
+    const stationId = stringValue(value)
+    return stationId ? `${outletId}:${stationId}` : null
+  }
   let skippedReferences = 0
   let projectedTables = 0
   let projectedMenuItems = 0
@@ -676,7 +680,7 @@ async function projectSnapshotToRelational(db: ProjectionDatabase, outletId: str
       INSERT INTO stations (id, tenant_id, outlet_id, name, created_at, updated_at)
       VALUES (?, ?, ?, ?, ?, ?)
     `).bind(
-      stringValue(record.id),
+      projectedStationId(record.id),
       tenantId,
       outletId,
       stringValue(record.name, 'Station'),
@@ -725,7 +729,7 @@ async function projectSnapshotToRelational(db: ProjectionDatabase, outletId: str
       stringValue(record.itemType, 'other'),
       numberValue(record.pricePaise),
       numberValue(record.taxPercent),
-      stringValue(record.stationId) || null,
+      projectedStationId(record.stationId),
       booleanNumber(record.isAvailable, true),
       numberValue(record.sortOrder),
       stringValue(record.createdAt, updatedAt),
@@ -823,7 +827,7 @@ async function projectSnapshotToRelational(db: ProjectionDatabase, outletId: str
       numberValue(record.taxPaise),
       numberValue(record.discountPaise),
       numberValue(record.totalPaise),
-      stringValue(record.stationId) || null,
+      projectedStationId(record.stationId),
       stringValue(record.status, 'draft'),
       stringValue(record.note) || null,
       jsonString(record.modifiers),
@@ -850,7 +854,7 @@ async function projectSnapshotToRelational(db: ProjectionDatabase, outletId: str
       outletId,
       stringValue(record.orderId),
       stringValue(record.kotNo),
-      stringValue(record.stationId) || null,
+      projectedStationId(record.stationId),
       stringValue(record.status, 'new'),
       stringValue(record.createdByUserId),
       stringValue(record.printedAt) || null,
