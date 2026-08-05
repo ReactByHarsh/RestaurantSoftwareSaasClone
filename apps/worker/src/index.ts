@@ -488,6 +488,12 @@ function jsonString(value: unknown) {
   return value == null ? null : JSON.stringify(value)
 }
 
+function errorDetails(error: unknown) {
+  return error instanceof Error
+    ? { name: error.name, message: error.message }
+    : { name: 'Error', message: String(error) }
+}
+
 type ProjectionDatabase = {
   prepare(query: string): {
     bind(...values: unknown[]): { run(): Promise<unknown> }
@@ -1976,12 +1982,13 @@ app.post('/api/v1/maintenance/reconcile/:outletId', async (c) => {
     }))
     return c.json({ ok: true, outletId, updatedAt: result.snapshot.updatedAt, projection: result.projection })
   } catch (error) {
+    const details = errorDetails(error)
     console.error(JSON.stringify({
       event: 'snapshot_reconciliation_failed',
       outletId,
-      error: error instanceof Error ? error.message : String(error),
+      ...details,
     }))
-    return c.json({ error: 'Snapshot reconciliation failed', outletId }, 500)
+    return c.json({ error: 'Snapshot reconciliation failed', outletId, details }, 500)
   }
 })
 
@@ -2090,17 +2097,19 @@ app.put('/api/v1/outlets/:outletId/state', async (c) => {
   try {
     await db.batch(transaction)
   } catch (error) {
+    const details = errorDetails(error)
     console.error(JSON.stringify({
       event: 'snapshot_projection_failed',
       outletId,
       statementCount: transaction.length,
       skippedReferences: projection.skippedReferences,
-      error: error instanceof Error ? error.message : String(error),
+      ...details,
     }))
     return c.json({
       error: 'Restaurant snapshot could not be saved transactionally',
       outletId,
       projection,
+      details,
     }, 500)
   }
 
