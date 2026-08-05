@@ -152,7 +152,7 @@ export default function App() {
             && (!Number.isFinite(localUploadedAt) || remoteUpdatedAt > localUploadedAt)
           if (!belongsToCurrentTenant || getSnapshotDataScore(localSnapshot) === 0 || remoteIsNewer) {
             applyingRemote = true
-            billing.importSnapshot(withActiveCloudCredentials(remote.payload))
+            billing.importSnapshot(withActiveCloudCredentials(remote.payload), belongsToCurrentTenant)
             applyingRemote = false
           }
           applyingRemote = true

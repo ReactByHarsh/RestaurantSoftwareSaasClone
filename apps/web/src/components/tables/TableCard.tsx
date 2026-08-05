@@ -7,6 +7,7 @@ import type { RestaurantTable, Order } from '../../lib/types'
 import { clsx } from 'clsx'
 import { useBillingStore } from '../../store/billingStore'
 import { useNavigate } from 'react-router-dom'
+import { calculateTax, formatPaise, formatPaiseShort } from '../../lib/money'
 
 interface Props {
   table: RestaurantTable
@@ -47,7 +48,7 @@ function formatElapsed(ms: number) {
 
 export default function TableCard({ table, activeOrder, compact = false, canManage = false, floorColor, floorBadge, floorName, onEdit, onTransfer, onMerge, onShare, onRemove, onClick }: Props) {
   const navigate = useNavigate()
-  const { selectTable, updateTableStatus } = useBillingStore()
+  const { selectTable, updateTableStatus, savedCarts } = useBillingStore()
   const config = STATUS_CONFIG[table.status] || STATUS_CONFIG.available
   const [now, setNow] = useState(Date.now())
   const [showPopover, setShowPopover] = useState(false)
@@ -72,6 +73,14 @@ export default function TableCard({ table, activeOrder, compact = false, canMana
   const orderStartedAt = activeOrder ? new Date(activeOrder.createdAt) : null
   const elapsedLabel = orderStartedAt ? formatElapsed(now - orderStartedAt.getTime()) : '0m 00s'
   const orderTimeLabel = orderStartedAt?.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' })
+  const pendingTotalPaise = (savedCarts[table.id] ?? []).reduce((sum, item) => {
+    const subtotal = item.unitPricePaise * item.quantity
+    const discount = item.discountPaise ?? 0
+    const taxableAmount = Math.max(0, subtotal - discount)
+    const tax = item.taxType === 'None' ? 0 : calculateTax(taxableAmount, item.taxPercent)
+    return sum + taxableAmount + tax
+  }, 0)
+  const visibleOrderTotalPaise = (activeOrder?.totalPaise ?? 0) + pendingTotalPaise
 
   const handleBodyClick = (e: React.MouseEvent) => {
     e.stopPropagation()
@@ -252,6 +261,9 @@ export default function TableCard({ table, activeOrder, compact = false, canMana
             </p>
             <p className={clsx('whitespace-nowrap font-black', config.text)} title={`Waiting ${elapsedLabel}`}>
               Waiting: {elapsedLabel}
+            </p>
+            <p className={clsx('whitespace-nowrap font-black', config.text)} title={`Order total ${formatPaise(visibleOrderTotalPaise)}`}>
+              Total: {compact ? formatPaiseShort(visibleOrderTotalPaise) : formatPaise(visibleOrderTotalPaise)}
             </p>
           </div>
         )}

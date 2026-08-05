@@ -23,14 +23,16 @@ import type {
   TableStatus,
 } from '../lib/types'
 import type { BillingSnapshot, CloudSyncSettings } from '../lib/cloudSync'
-import { createCloudOrder, updateCloudOrder, addCloudKOT, updateCloudKOT, addCloudPayment } from '../lib/cloudSync'
+import { createCloudOrder, updateCloudOrder, addCloudKOT, updateCloudKOT, addCloudPayment, saveCloudSnapshot } from '../lib/cloudSync'
 import { calculateTax } from '../lib/money'
+import { isTauriDesktop, saveDesktopState } from '../lib/localDb'
 import { realtimeClient } from '../lib/realtime'
 import { DEFAULT_BRIDGE_URL, describePrinterError, normalizePrinterConnectionMode, sendPrintJob, type PrinterConnectionMode } from '../lib/printer'
 import { buildKotPrintText, buildReceiptPrintParts } from '../lib/printTemplates'
 import { isInventoryMenuItem, isSaleableMenuItem } from '../lib/productTypes'
 import { DEFAULT_STATIONS } from '../lib/seedData'
 import { useUIStore } from './uiStore'
+import { useStaffStore } from './staffStore'
 
 export interface CartItem {
   menuItemId: string
@@ -210,7 +212,7 @@ interface BillingStore {
   clearCart: () => void
   sendKOT: (userId: string, userName: string) => KOT | null
   addPayment: (orderId: string, payment: PaymentInput, userId: string) => void
-  settlePayment: (orderId: string | null, payments: PaymentInput[], discountPaise: number, userId: string, userName: string, printAfter?: boolean) => void
+  settlePayment: (orderId: string | null, payments: PaymentInput[], discountPaise: number, userId: string, userName: string, printAfter?: boolean) => Promise<boolean>
   cancelPayments: (orderId: string) => void
   cancelOrder: (orderId: string, reason: string) => void
   cancelKOT: (kotId: string, reason: string) => boolean
@@ -684,6 +686,57 @@ function isClosedOrder(order?: Order | null) {
   return !order || ['paid', 'cancelled', 'void'].includes(order.status)
 }
 
+function preserveNewerCompletedOrders(incoming: BillingSnapshot, local: BillingStore): BillingSnapshot {
+  const incomingOrderById = new Map(incoming.orders.map((order) => [order.id, order]))
+  const protectedOrders = local.orders.filter((localOrder) => {
+    if (!isClosedOrder(localOrder)) return false
+    const incomingOrder = incomingOrderById.get(localOrder.id)
+    if (!incomingOrder) return true
+    if (isClosedOrder(incomingOrder)) return false
+    const localUpdatedAt = Date.parse(localOrder.updatedAt) || 0
+    const incomingUpdatedAt = Date.parse(incomingOrder.updatedAt) || 0
+    return localUpdatedAt >= incomingUpdatedAt
+  })
+  if (protectedOrders.length === 0) return incoming
+
+  const protectedOrderIds = new Set(protectedOrders.map((order) => order.id))
+  const protectedTableIds = new Set(protectedOrders.flatMap((order) => order.tableId ? [order.tableId] : []))
+  const localTableById = new Map(local.tables.map((table) => [table.id, table]))
+  const localOrderItems = local.orderItems.filter((item) => protectedOrderIds.has(item.orderId))
+  const localKots = local.kots.filter((kot) => protectedOrderIds.has(kot.orderId))
+  const localPayments = local.payments.filter((payment) => protectedOrderIds.has(payment.orderId))
+  const savedCarts = { ...(incoming.savedCarts ?? {}) }
+  protectedTableIds.forEach((tableId) => delete savedCarts[tableId])
+
+  return {
+    ...incoming,
+    orders: [
+      ...incoming.orders.filter((order) => !protectedOrderIds.has(order.id)),
+      ...protectedOrders,
+    ],
+    orderItems: [
+      ...incoming.orderItems.filter((item) => !protectedOrderIds.has(item.orderId)),
+      ...localOrderItems,
+    ],
+    kots: [
+      ...incoming.kots.filter((kot) => !protectedOrderIds.has(kot.orderId)),
+      ...localKots,
+    ],
+    payments: [
+      ...incoming.payments.filter((payment) => !protectedOrderIds.has(payment.orderId)),
+      ...localPayments,
+    ],
+    tables: incoming.tables.map((table) => {
+      if (!protectedTableIds.has(table.id)) return table
+      const localTable = localTableById.get(table.id)
+      return localTable
+        ? { ...localTable, activeOrderId: undefined }
+        : { ...table, status: 'available' as TableStatus, activeOrderId: undefined }
+    }),
+    savedCarts,
+  }
+}
+
 function reconcileSnapshot(snapshot: BillingSnapshot): BillingSnapshot {
   const cleanedSavedCarts = cleanSavedCarts(snapshot.savedCarts)
   const closedOrderIds = new Set(
@@ -767,9 +820,12 @@ export const useBillingStore = create<BillingStore>()(
 
       importSnapshot: (snapshot, preserveSession = false) => set((state) => {
         const localSavedCarts = preserveSession ? parkActiveCart(state) : state.savedCarts
-        const incomingSnapshot = preserveSession
-          ? { ...snapshot, savedCarts: mergeSavedCarts(snapshot.savedCarts, localSavedCarts) }
+        const conflictSafeSnapshot = preserveSession
+          ? preserveNewerCompletedOrders(snapshot, state)
           : snapshot
+        const incomingSnapshot = preserveSession
+          ? { ...conflictSafeSnapshot, savedCarts: mergeSavedCarts(conflictSafeSnapshot.savedCarts, localSavedCarts) }
+          : conflictSafeSnapshot
         const normalizedBase = stripLegacyDemoData(reconcileSnapshot(incomingSnapshot))
         const normalized = {
           ...normalizedBase,
@@ -1922,7 +1978,7 @@ export const useBillingStore = create<BillingStore>()(
         }
       },
 
-      settlePayment: (orderId, paymentInputs, discountPaise, userId, userName, printAfter) => {
+      settlePayment: async (orderId, paymentInputs, discountPaise, userId, userName, printAfter) => {
         const state = get()
         let targetOrder = orderId ? state.orders.find((candidate) => candidate.id === orderId) : state.currentOrder
         let isDirectCheckout = false
@@ -1956,11 +2012,12 @@ export const useBillingStore = create<BillingStore>()(
           }
         }
 
-        if (!targetOrder) return
+        if (!targetOrder) return false
         const hasBillableItems = state.cart.length > 0 || state.orderItems.some((item) => item.orderId === targetOrder!.id && item.status !== 'cancelled')
-        if (!hasBillableItems) return
+        if (!hasBillableItems) return false
 
         const actualOrderId: string = targetOrder.id
+        const existingPaymentIds = new Set(state.payments.map((payment) => payment.id))
         const totalPaid = paymentInputs.reduce((sum, payment) => sum + payment.amountPaise, 0)
         const totalCollected = paymentInputs
           .filter((payment) => isCollectedPayment(payment.method))
@@ -2081,24 +2138,65 @@ export const useBillingStore = create<BillingStore>()(
 
         const afterSettle = get()
         const order = afterSettle.orders.find(o => o.id === actualOrderId)
+        if (!order || !isClosedOrder(order)) return false
+
+        const cloudWrites: Promise<unknown>[] = []
         if (order) {
           const items = afterSettle.orderItems.filter(i => i.orderId === actualOrderId)
           if (isDirectCheckout) {
-            createCloudOrder(order, items).catch(console.error)
+            cloudWrites.push(createCloudOrder(order, items))
           } else {
-            updateCloudOrder(order, items).catch(console.error)
+            cloudWrites.push(updateCloudOrder(order, items))
           }
           
           // Sync all the new payments for this settlement
-          const newPayments = afterSettle.payments.filter(p => p.orderId === actualOrderId && paymentInputs.some(pi => pi.amountPaise === p.amountPaise && pi.method === p.method))
+          const newPayments = afterSettle.payments.filter((payment) => payment.orderId === actualOrderId && !existingPaymentIds.has(payment.id))
           newPayments.forEach(p => {
-            addCloudPayment(afterSettle.outlet.id, p).catch(console.error)
+            cloudWrites.push(addCloudPayment(afterSettle.outlet.id, p))
             realtimeClient.broadcast('PAYMENT_ADDED', { payment: p, order } as unknown as Record<string, unknown>)
           })
         }
 
         realtimeClient.broadcast('PAYMENT_SETTLED', { orderId: actualOrderId, paidPaise: totalCollected })
+        const completedSnapshot = afterSettle.exportSnapshot()
+        const durableWrites: Promise<unknown>[] = [...cloudWrites]
+        if (isTauriDesktop()) {
+          durableWrites.push(saveDesktopState(completedSnapshot, useStaffStore.getState().staff))
+        }
+
+        const cloud = afterSettle.cloudSync
+        if (cloud.enabled && cloud.serverUrl && cloud.outletId && cloud.accountLogin && cloud.accountSecret) {
+          durableWrites.push(
+            saveCloudSnapshot(
+              cloud.outletId,
+              cloud.tenantId || afterSettle.outlet.tenantId,
+              completedSnapshot,
+              realtimeClient.getClientId(),
+              cloud.serverUrl,
+              { accountLogin: cloud.accountLogin, accountSecret: cloud.accountSecret },
+            ).then((result) => {
+              get().updateCloudSyncSettings({
+                lastSyncedAt: result.updatedAt,
+                lastCloudUploadedAt: result.updatedAt,
+              })
+            }),
+          )
+        }
+
+        const writeResults = await Promise.allSettled(durableWrites)
+        const failedWrites = writeResults.filter((result) => result.status === 'rejected')
+        if (failedWrites.length > 0) {
+          failedWrites.forEach((result) => {
+            if (result.status === 'rejected') console.error('Checkout persistence failed', result.reason)
+          })
+          useUIStore.getState().addToast(
+            'error',
+            'Checkout is saved on this device, but one background sync failed and will retry on the next sync.',
+            'Sync Warning',
+          )
+        }
         if (printAfter ?? (get().printSettings.autoPrintReceipt || get().printSettings.directReceiptPrint)) setTimeout(() => get().printReceipt(actualOrderId), 0)
+        return true
       },
 
       cancelPayments: (orderId) => set((state) => {

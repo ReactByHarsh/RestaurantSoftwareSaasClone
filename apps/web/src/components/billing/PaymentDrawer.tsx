@@ -47,6 +47,7 @@ export default function PaymentDrawer({ onClose }: Props) {
 
   const [payments, setPayments] = useState<{ method: string; amount: number; tender: number; returnAmt: number; ref: string }[]>([])
   const [tenderInput, setTenderInput] = useState('')
+  const [isSettling, setIsSettling] = useState(false)
 
   const totalPaid = payments.reduce((sum, p) => sum + p.amount, 0)
   const remainingPayable = Math.max(0, finalTotal - totalPaid)
@@ -81,7 +82,7 @@ export default function PaymentDrawer({ onClose }: Props) {
 
   const isPaid = remainingPayable === 0
 
-  const handleSettle = (printAfter: boolean) => {
+  const handleSettle = async (printAfter: boolean) => {
     if (!isPaid) {
       addToast('error', `Payment short by ₹${remainingPayable.toFixed(2)}`)
       return
@@ -91,16 +92,25 @@ export default function PaymentDrawer({ onClose }: Props) {
       return
     }
 
-    settlePayment(
-      currentOrder ? currentOrder.id : null,
-      payments.map(p => ({ method: p.method, amountPaise: Math.round(p.amount * 100), referenceNo: p.ref || undefined })),
-      0,
-      user.id,
-      user.name,
-      printAfter
-    )
-    addToast('success', `Bill settled! ₹${totalPaid.toFixed(2)} collected`)
-    onClose()
+    setIsSettling(true)
+    try {
+      const settled = await settlePayment(
+        currentOrder ? currentOrder.id : null,
+        payments.map(p => ({ method: p.method, amountPaise: Math.round(p.amount * 100), referenceNo: p.ref || undefined })),
+        0,
+        user.id,
+        user.name,
+        printAfter
+      )
+      if (!settled) {
+        addToast('error', 'Checkout could not be completed. Please verify the order and payment total.')
+        return
+      }
+      addToast('success', `Bill settled! ₹${totalPaid.toFixed(2)} collected`)
+      onClose()
+    } finally {
+      setIsSettling(false)
+    }
   }
 
   return (
@@ -300,15 +310,15 @@ export default function PaymentDrawer({ onClose }: Props) {
           <div className="flex gap-3">
             <button 
               onClick={() => handleSettle(false)} 
-              disabled={!hasBillableItems || !isPaid || payments.some(p => !p.method)} 
+              disabled={isSettling || !hasBillableItems || !isPaid || payments.some(p => !p.method)}
               className="px-6 py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-700 font-black rounded-lg disabled:opacity-50 transition-colors flex items-center gap-2"
             >
               <Check size={16} />
-              CHECKOUT
+              {isSettling ? 'SAVING...' : 'CHECKOUT'}
             </button>
             <button 
               onClick={() => handleSettle(true)} 
-              disabled={!hasBillableItems || !isPaid || payments.some(p => !p.method)} 
+              disabled={isSettling || !hasBillableItems || !isPaid || payments.some(p => !p.method)}
               className="px-6 py-2.5 bg-primary hover:bg-primary-dark text-white font-black rounded-lg shadow-sm disabled:opacity-50 transition-colors flex items-center gap-2"
             >
               <Printer size={16} />

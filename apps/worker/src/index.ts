@@ -1464,6 +1464,31 @@ async function sha256Hex(value: string) {
   return Array.from(new Uint8Array(digest)).map((item) => item.toString(16).padStart(2, '0')).join('')
 }
 
+function wouldRegressCompletedOrders(
+  existing: Record<string, unknown> | null | undefined,
+  incoming: Record<string, unknown>,
+) {
+  if (!existing) return false
+  const incomingOrders = new Map(
+    asArray(incoming.orders)
+      .map(asRecord)
+      .filter((order): order is Record<string, unknown> => Boolean(order))
+      .map((order) => [stringValue(order.id), order]),
+  )
+
+  return asArray(existing.orders).some((value) => {
+    const current = asRecord(value)
+    if (!current) return false
+    const currentStatus = stringValue(current.status)
+    if (!['paid', 'cancelled', 'void'].includes(currentStatus)) return false
+    const next = incomingOrders.get(stringValue(current.id))
+    if (!next || ['paid', 'cancelled', 'void'].includes(stringValue(next.status))) return false
+    const currentUpdatedAt = Date.parse(stringValue(current.updatedAt)) || 0
+    const nextUpdatedAt = Date.parse(stringValue(next.updatedAt)) || 0
+    return currentUpdatedAt >= nextUpdatedAt
+  })
+}
+
 function hexToBytes(value: string) {
   if (!/^[0-9a-f]+$/i.test(value) || value.length % 2 !== 0) return null
   const bytes = new Uint8Array(value.length / 2)
@@ -1840,6 +1865,16 @@ app.put('/api/v1/outlets/:outletId/state', async (c) => {
       updatedAt: existing?.updatedAt ?? new Date().toISOString(),
       skipped: true,
       reason: 'Ignored a snapshot that would erase existing restaurant setup data',
+      payload: existing?.payload,
+    })
+  }
+  if (wouldRegressCompletedOrders(existing?.payload, body.data.payload)) {
+    return c.json({
+      ok: true,
+      outletId,
+      updatedAt: existing?.updatedAt ?? new Date().toISOString(),
+      skipped: true,
+      reason: 'Ignored a stale snapshot that would reopen a completed order',
       payload: existing?.payload,
     })
   }
