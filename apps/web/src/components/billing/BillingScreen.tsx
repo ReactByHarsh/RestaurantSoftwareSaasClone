@@ -859,7 +859,16 @@ export default function BillingScreen({ isModal = false, modalTableId, onCloseMo
         }}
       />
 
-      {showPayment && <PaymentDrawer onClose={() => setShowPayment(false)} />}
+      {showPayment && (
+        <PaymentDrawer
+          onClose={() => setShowPayment(false)}
+          onSettled={() => {
+            setShowPayment(false)
+            if (isModal && onCloseModal) onCloseModal()
+            else navigate('/app/tables')
+          }}
+        />
+      )}
 
       {/* Item Customisation Modal */}
       {customizingItem && (() => {

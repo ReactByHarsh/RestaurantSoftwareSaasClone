@@ -7,6 +7,7 @@ import { clsx } from 'clsx'
 
 interface Props {
   onClose: () => void
+  onSettled: () => void
 }
 
 const TENDER_QUICK_CASH = [100, 500, 1000, 2000]
@@ -31,7 +32,7 @@ const FAST_PAYMENT_MODES = [
   { id: 'account', label: 'Account', className: 'bg-amber-500 hover:bg-amber-600 text-white' },
 ]
 
-export default function PaymentDrawer({ onClose }: Props) {
+export default function PaymentDrawer({ onClose, onSettled }: Props) {
   const { user } = useAuthStore()
   const { addToast } = useUIStore()
   const { currentOrder, orderItems, cart, outlet, getCartTotal, settlePayment } = useBillingStore()
@@ -107,7 +108,7 @@ export default function PaymentDrawer({ onClose }: Props) {
         return
       }
       addToast('success', `Bill settled! ₹${totalPaid.toFixed(2)} collected`)
-      onClose()
+      onSettled()
     } finally {
       setIsSettling(false)
     }
