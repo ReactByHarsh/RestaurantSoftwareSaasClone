@@ -10,6 +10,13 @@ using System.Threading;
 using System.Windows.Forms;
 using Microsoft.Win32;
 
+[assembly: AssemblyTitle("BhojPatra Native Print Bridge Setup")]
+[assembly: AssemblyDescription("BhojPatra local printing and restaurant LAN bridge installer")]
+[assembly: AssemblyCompany("BhojPatra")]
+[assembly: AssemblyProduct("BhojPatra Desk")]
+[assembly: AssemblyVersion("0.1.19.0")]
+[assembly: AssemblyFileVersion("0.1.19.0")]
+
 namespace BhojPatra.NativePrintBridgeSetup
 {
     internal static class Program

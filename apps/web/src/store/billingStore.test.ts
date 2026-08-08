@@ -192,10 +192,11 @@ describe('billing store stale-state recovery', () => {
 
   it('uploads the completed snapshot immediately after checkout', async () => {
     const activeOrder = order('running')
-    const fetchMock = vi.fn().mockResolvedValue({
-      ok: true,
-      json: async () => ({ ok: true, outletId: 'outlet-1', updatedAt: '2026-08-08T10:11:00.000Z' }),
+    let finishUpload: ((value: { ok: boolean; json: () => Promise<Record<string, unknown>> }) => void) | undefined
+    const uploadResponse = new Promise<{ ok: boolean; json: () => Promise<Record<string, unknown>> }>((resolve) => {
+      finishUpload = resolve
     })
+    const fetchMock = vi.fn().mockReturnValue(uploadResponse)
     vi.stubGlobal('fetch', fetchMock)
     useBillingStore.setState((state) => ({
       tables: [table(activeOrder.id)],
@@ -232,6 +233,10 @@ describe('billing store stale-state recovery', () => {
     expect(uploaded.orders.find((candidate) => candidate.id === activeOrder.id)?.status).toBe('paid')
     expect(uploaded.tables[0].activeOrderId).toBeUndefined()
     expect(uploaded.savedCarts).not.toHaveProperty('table-1')
+    finishUpload?.({
+      ok: true,
+      json: async () => ({ ok: true, outletId: 'outlet-1', updatedAt: '2026-08-08T10:11:00.000Z' }),
+    })
   })
 
   it('keeps checkout completed locally when the immediate cloud upload fails', async () => {

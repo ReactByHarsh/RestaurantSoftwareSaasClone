@@ -2160,36 +2160,35 @@ export const useBillingStore = create<BillingStore>()(
 
         const completedSnapshot = afterSettle.exportSnapshot()
         if (isTauriDesktop()) {
-          try {
-            await saveDesktopState(completedSnapshot, useStaffStore.getState().staff)
-          } catch (error) {
+          void saveDesktopState(completedSnapshot, useStaffStore.getState().staff).catch((error) => {
             console.error('Checkout local save failed', error)
             useUIStore.getState().addToast('error', 'Checkout is complete in memory, but the desktop database save will be retried.', 'Local Save Warning')
-          }
+          })
         }
         const cloud = afterSettle.cloudSync
         if (cloud.enabled && cloud.serverUrl && cloud.outletId && cloud.accountLogin && cloud.accountSecret) {
-          try {
-            const result = await saveCloudSnapshot(
-              cloud.outletId,
-              cloud.tenantId || afterSettle.outlet.tenantId,
-              completedSnapshot,
-              realtimeClient.getClientId(),
-              cloud.serverUrl,
-              { accountLogin: cloud.accountLogin, accountSecret: cloud.accountSecret },
-            )
-            get().updateCloudSyncSettings({
-              lastSyncedAt: result.updatedAt,
-              lastCloudUploadedAt: result.updatedAt,
+          void saveCloudSnapshot(
+            cloud.outletId,
+            cloud.tenantId || afterSettle.outlet.tenantId,
+            completedSnapshot,
+            realtimeClient.getClientId(),
+            cloud.serverUrl,
+            { accountLogin: cloud.accountLogin, accountSecret: cloud.accountSecret },
+          )
+            .then((result) => {
+              get().updateCloudSyncSettings({
+                lastSyncedAt: result.updatedAt,
+                lastCloudUploadedAt: result.updatedAt,
+              })
             })
-          } catch (error) {
-            console.error('Checkout cloud save failed', error)
-            useUIStore.getState().addToast(
-              'error',
-              'Checkout is complete on this device, but cloud sync failed. It will retry during the next scheduled sync.',
-              'Cloud Sync Warning',
-            )
-          }
+            .catch((error) => {
+              console.error('Checkout cloud save failed', error)
+              useUIStore.getState().addToast(
+                'error',
+                'Checkout is complete on this device, but cloud sync failed. It will retry during the next scheduled sync.',
+                'Cloud Sync Warning',
+              )
+            })
         }
         if (printAfter ?? (get().printSettings.autoPrintReceipt || get().printSettings.directReceiptPrint)) setTimeout(() => get().printReceipt(actualOrderId), 0)
         return true

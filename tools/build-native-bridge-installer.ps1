@@ -1,3 +1,7 @@
+param(
+  [switch]$RequireAuthenticodeSigning
+)
+
 $ErrorActionPreference = "Stop"
 
 $root = Split-Path -Parent $PSScriptRoot
@@ -5,6 +9,7 @@ $releaseDir = Join-Path $root "release"
 $bridgeExe = Join-Path $releaseDir "bhojpatra-native-bridge.exe"
 $setupSource = Join-Path $root "tools\native-print-bridge\BhojPatra.NativePrintBridgeSetup.cs"
 $setupManifest = Join-Path $root "tools\native-print-bridge\setup.manifest"
+$icon = Join-Path $root "release\assets\bhojpatra.ico"
 $setupExe = Join-Path $releaseDir "BhojPatra-Native-Print-Bridge-Setup.exe"
 $downloadDir = Join-Path $root "apps\web\public\downloads"
 $downloadExe = Join-Path $downloadDir "BhojPatra-Printer-Bridge-Setup.exe"
@@ -26,6 +31,7 @@ if (!$csc) {
   /optimize+ `
   /platform:anycpu `
   /win32manifest:$setupManifest `
+  /win32icon:$icon `
   /out:$setupExe `
   /resource:$bridgeExe,BhojPatra.NativePrintBridge.exe `
   /reference:System.dll `
@@ -36,6 +42,8 @@ if (!$csc) {
 if ($LASTEXITCODE -ne 0 -or !(Test-Path $setupExe)) {
   throw "Native setup compilation failed with exit code $LASTEXITCODE."
 }
+
+& (Join-Path $root "tools\sign-windows-artifacts.ps1") -Path $setupExe -RequireAuthenticodeSigning:$RequireAuthenticodeSigning
 
 New-Item -ItemType Directory -Path $downloadDir -Force | Out-Null
 Copy-Item -LiteralPath $setupExe -Destination $downloadExe -Force

@@ -13,12 +13,20 @@ using System.Net;
 using System.Net.NetworkInformation;
 using System.Net.Sockets;
 using System.Runtime.InteropServices;
+using System.Reflection;
 using System.Security.Cryptography;
 using System.ServiceProcess;
 using System.Text;
 using System.Text.RegularExpressions;
 using System.Threading;
 using System.Web.Script.Serialization;
+
+[assembly: AssemblyTitle("BhojPatra Native Print Bridge")]
+[assembly: AssemblyDescription("BhojPatra local printing and restaurant LAN bridge")]
+[assembly: AssemblyCompany("BhojPatra")]
+[assembly: AssemblyProduct("BhojPatra Desk")]
+[assembly: AssemblyVersion("3.1.2.0")]
+[assembly: AssemblyFileVersion("3.1.2.0")]
 
 namespace BhojPatra.NativePrintBridge
 {

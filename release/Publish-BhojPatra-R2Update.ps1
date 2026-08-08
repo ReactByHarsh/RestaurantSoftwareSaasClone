@@ -21,6 +21,7 @@ $x86SourceSignature = "$x86SourceInstaller.sig"
 $releaseDir = Join-Path $repoRoot "release\r2-updates"
 $x64UploadName = "BhojPatra-Desk_$($Version)_x64-setup.exe"
 $x86UploadName = "BhojPatra-Desk_$($Version)_x86-setup.exe"
+$authenticodeScript = Join-Path $repoRoot "tools\sign-windows-artifacts.ps1"
 
 if (!(Test-Path $SigningKeyPath)) {
   throw "Updater signing key not found: $SigningKeyPath"
@@ -58,6 +59,8 @@ if (!(Test-Path $x64SourceInstaller) -or !(Test-Path $x64SourceSignature)) {
 if (!(Test-Path $x86SourceInstaller) -or !(Test-Path $x86SourceSignature)) {
   throw "Signed x86 NSIS installer or updater signature was not produced."
 }
+
+& $authenticodeScript -Path $x64SourceInstaller, $x86SourceInstaller -RequireAuthenticodeSigning
 
 New-Item -ItemType Directory -Force -Path $releaseDir | Out-Null
 Copy-Item -LiteralPath $x64SourceInstaller -Destination (Join-Path $releaseDir $x64UploadName) -Force
