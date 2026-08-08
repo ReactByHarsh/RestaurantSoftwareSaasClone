@@ -14,6 +14,8 @@ $tauriConfigPath = Join-Path $webDir "src-tauri\tauri.conf.json"
 $tauriWindows7ConfigPath = Join-Path $webDir "src-tauri\tauri.windows7.conf.json"
 $x64BundleDir = Join-Path $webDir "src-tauri\target\release\bundle\nsis"
 $x86BundleDir = Join-Path $webDir "src-tauri\target\i686-pc-windows-msvc\release\bundle\nsis"
+$x64App = Join-Path $webDir "src-tauri\target\release\app.exe"
+$x86App = Join-Path $webDir "src-tauri\target\i686-pc-windows-msvc\release\app.exe"
 $x64SourceInstaller = Join-Path $x64BundleDir "BhojPatra Desk_$($Version)_x64-setup.exe"
 $x86SourceInstaller = Join-Path $x86BundleDir "BhojPatra Desk_$($Version)_x86-setup.exe"
 $x64SourceSignature = "$x64SourceInstaller.sig"
@@ -53,14 +55,14 @@ try {
   Pop-Location
 }
 
-if (!(Test-Path $x64SourceInstaller) -or !(Test-Path $x64SourceSignature)) {
+if (!(Test-Path $x64App) -or !(Test-Path $x64SourceInstaller) -or !(Test-Path $x64SourceSignature)) {
   throw "Signed x64 NSIS installer or updater signature was not produced."
 }
-if (!(Test-Path $x86SourceInstaller) -or !(Test-Path $x86SourceSignature)) {
+if (!(Test-Path $x86App) -or !(Test-Path $x86SourceInstaller) -or !(Test-Path $x86SourceSignature)) {
   throw "Signed x86 NSIS installer or updater signature was not produced."
 }
 
-& $authenticodeScript -Path $x64SourceInstaller, $x86SourceInstaller -RequireAuthenticodeSigning
+& $authenticodeScript -Path $x64App, $x86App, $x64SourceInstaller, $x86SourceInstaller -RequireAuthenticodeSigning
 
 New-Item -ItemType Directory -Force -Path $releaseDir | Out-Null
 Copy-Item -LiteralPath $x64SourceInstaller -Destination (Join-Path $releaseDir $x64UploadName) -Force
