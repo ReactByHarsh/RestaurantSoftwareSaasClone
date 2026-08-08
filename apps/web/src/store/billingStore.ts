@@ -22,9 +22,10 @@ import type {
   StockUnit,
   TableStatus,
 } from '../lib/types'
-import type { BillingSnapshot, CloudSyncSettings } from '../lib/cloudSync'
+import { saveCloudSnapshot, type BillingSnapshot, type CloudSyncSettings } from '../lib/cloudSync'
 import { calculateTax } from '../lib/money'
 import { isTauriDesktop, saveDesktopState } from '../lib/localDb'
+import { realtimeClient } from '../lib/realtime'
 import { DEFAULT_BRIDGE_URL, describePrinterError, normalizePrinterConnectionMode, sendPrintJob, type PrinterConnectionMode } from '../lib/printer'
 import { buildKotPrintText, buildReceiptPrintParts } from '../lib/printTemplates'
 import { isInventoryMenuItem, isSaleableMenuItem } from '../lib/productTypes'
@@ -657,6 +658,14 @@ const syncCart = (state: BillingStore, newCart: CartItem[]): Partial<BillingStor
 function parkActiveCart(state: BillingStore) {
   if (state.activeOrderType !== 'dine_in' || !state.selectedTableId) return state.savedCarts
   const savedCarts = { ...state.savedCarts }
+  if (state.currentOrder && (
+    state.currentOrder.type !== 'dine_in' ||
+    state.currentOrder.tableId !== state.selectedTableId ||
+    !isRestorableCurrentOrder(state.currentOrder, state.tables)
+  )) {
+    delete savedCarts[state.selectedTableId]
+    return savedCarts
+  }
   if (state.cart.length > 0) savedCarts[state.selectedTableId] = state.cart
   else delete savedCarts[state.selectedTableId]
   return savedCarts
@@ -682,6 +691,44 @@ function getActiveItemCountByOrder(orderItems: OrderItem[]) {
 
 function isClosedOrder(order?: Order | null) {
   return !order || ['paid', 'cancelled', 'void'].includes(order.status)
+}
+
+export function isRestorableCurrentOrder(order: Order | null | undefined, tables: RestaurantTable[]) {
+  if (!order || isClosedOrder(order)) return false
+  if (order.type !== 'dine_in') return true
+  if (!order.tableId) return false
+  const table = tables.find((candidate) => candidate.id === order.tableId)
+  return table?.activeOrderId === order.id
+}
+
+export function resolveRestoredSession(
+  normalized: Pick<BillingSnapshot, 'orders' | 'tables' | 'savedCarts'>,
+  candidateCurrentOrder: Order | null | undefined,
+  candidateSelectedTableId: string | null | undefined,
+  candidateCart: CartItem[] = [],
+) {
+  const savedCarts = { ...(normalized.savedCarts ?? {}) }
+  const matchedOrder = candidateCurrentOrder
+    ? normalized.orders.find((order) => order.id === candidateCurrentOrder.id) ?? null
+    : null
+  const currentOrder = isRestorableCurrentOrder(matchedOrder, normalized.tables) ? matchedOrder : null
+
+  if (candidateCurrentOrder?.type === 'dine_in' && candidateCurrentOrder.tableId && !currentOrder) {
+    delete savedCarts[candidateCurrentOrder.tableId]
+  }
+
+  let selectedTableId = candidateSelectedTableId && normalized.tables.some((table) => table.id === candidateSelectedTableId)
+    ? candidateSelectedTableId
+    : null
+  if (currentOrder?.type === 'dine_in') selectedTableId = currentOrder.tableId ?? null
+
+  const cart = selectedTableId
+    ? (savedCarts[selectedTableId] ?? [])
+    : currentOrder && currentOrder.type !== 'dine_in'
+      ? candidateCart
+      : []
+
+  return { currentOrder, selectedTableId, cart, savedCarts }
 }
 
 function preserveNewerCompletedOrders(incoming: BillingSnapshot, local: BillingStore): BillingSnapshot {
@@ -829,13 +876,12 @@ export const useBillingStore = create<BillingStore>()(
           ...normalizedBase,
           inventoryItems: ensureMenuInventoryItems(normalizedBase.inventoryItems, normalizedBase.menuItems, normalizedBase.outlet.id),
         }
-        const remoteCurrentOrder = state.currentOrder
-          ? normalized.orders.find((order) => order.id === state.currentOrder?.id) ?? null
-          : null
-
-        const selectedTableStillExists = preserveSession &&
-          state.selectedTableId &&
-          normalized.tables.some((table) => table.id === state.selectedTableId)
+        const restoredSession = resolveRestoredSession(
+          normalized,
+          preserveSession ? state.currentOrder : null,
+          preserveSession ? state.selectedTableId : null,
+          preserveSession ? state.cart : [],
+        )
 
         return {
           ...normalized,
@@ -845,10 +891,10 @@ export const useBillingStore = create<BillingStore>()(
           cloudSync: { ...DEFAULT_CLOUD_SYNC_SETTINGS, ...normalized.cloudSync },
           appUpdate: { ...DEFAULT_APP_UPDATE_SETTINGS, ...normalized.appUpdate },
           purchaseEntries: normalized.purchaseEntries ?? [],
-          savedCarts: normalized.savedCarts ?? {},
-          currentOrder: preserveSession ? remoteCurrentOrder : null,
-          cart: selectedTableStillExists ? (normalized.savedCarts?.[state.selectedTableId!] ?? state.cart) : [],
-          selectedTableId: selectedTableStillExists ? state.selectedTableId : null,
+          savedCarts: restoredSession.savedCarts,
+          currentOrder: restoredSession.currentOrder,
+          cart: restoredSession.cart,
+          selectedTableId: restoredSession.selectedTableId,
         }
       }),
 
@@ -1424,23 +1470,24 @@ export const useBillingStore = create<BillingStore>()(
 
       selectTable: (tableId) => {
         const state = get()
-        if (state.selectedTableId === tableId && !state.tables.find(t => t.id === tableId)?.activeOrderId) {
-          // Already on this table without an active order; preserve the cart
-          return
-        }
         const parkedSavedCarts = parkActiveCart(state)
 
         if (tableId) {
           const table = get().tables.find((candidate) => candidate.id === tableId)
           if (table?.activeOrderId) {
             const order = get().orders.find(o => o.id === table.activeOrderId)
-            const savedCart = parkedSavedCarts[tableId] || []
+            let savedCart = parkedSavedCarts[tableId] || []
             const savedItemCount = order ? get().orderItems.filter(item => item.orderId === order.id && item.status !== 'cancelled').length : 0
             if (!order || isClosedOrder(order) || (savedItemCount === 0 && savedCart.length === 0)) {
               // Orphaned/empty activeOrderId, clear it before opening billing.
+              const cleanedSavedCarts = { ...parkedSavedCarts }
+              if (order && isClosedOrder(order)) {
+                delete cleanedSavedCarts[tableId]
+                savedCart = []
+              }
               set((s) => ({
                 tables: s.tables.map(t => t.id === tableId ? { ...t, status: 'available' as TableStatus, activeOrderId: undefined } : t),
-                savedCarts: parkedSavedCarts,
+                savedCarts: cleanedSavedCarts,
                 selectedTableId: tableId,
                 currentOrder: null,
                 cart: savedCart
@@ -2118,6 +2165,30 @@ export const useBillingStore = create<BillingStore>()(
           } catch (error) {
             console.error('Checkout local save failed', error)
             useUIStore.getState().addToast('error', 'Checkout is complete in memory, but the desktop database save will be retried.', 'Local Save Warning')
+          }
+        }
+        const cloud = afterSettle.cloudSync
+        if (cloud.enabled && cloud.serverUrl && cloud.outletId && cloud.accountLogin && cloud.accountSecret) {
+          try {
+            const result = await saveCloudSnapshot(
+              cloud.outletId,
+              cloud.tenantId || afterSettle.outlet.tenantId,
+              completedSnapshot,
+              realtimeClient.getClientId(),
+              cloud.serverUrl,
+              { accountLogin: cloud.accountLogin, accountSecret: cloud.accountSecret },
+            )
+            get().updateCloudSyncSettings({
+              lastSyncedAt: result.updatedAt,
+              lastCloudUploadedAt: result.updatedAt,
+            })
+          } catch (error) {
+            console.error('Checkout cloud save failed', error)
+            useUIStore.getState().addToast(
+              'error',
+              'Checkout is complete on this device, but cloud sync failed. It will retry during the next scheduled sync.',
+              'Cloud Sync Warning',
+            )
           }
         }
         if (printAfter ?? (get().printSettings.autoPrintReceipt || get().printSettings.directReceiptPrint)) setTimeout(() => get().printReceipt(actualOrderId), 0)
@@ -2898,21 +2969,22 @@ export const useBillingStore = create<BillingStore>()(
           ...normalizedBase,
           inventoryItems: ensureMenuInventoryItems(normalizedBase.inventoryItems, normalizedBase.menuItems, normalizedBase.outlet.id),
         }
-        const currentOrder = persisted.currentOrder && normalized.orders.some((order) => order.id === persisted.currentOrder?.id)
-          ? normalized.orders.find((order) => order.id === persisted.currentOrder?.id) ?? null
-          : null
-        const selectedTableId = persisted.selectedTableId && normalized.tables.some((table) => table.id === persisted.selectedTableId)
-          ? persisted.selectedTableId
-          : null
+        const restoredSession = resolveRestoredSession(
+          normalized,
+          persisted.currentOrder,
+          persisted.selectedTableId,
+          persisted.cart ?? [],
+        )
         return {
           ...currentState,
           ...persisted,
           ...normalized,
           printSettings: mergeDevicePrintSettings(normalized.printSettings, persisted.printSettings),
           purchaseEntries: normalized.purchaseEntries ?? [],
-          currentOrder,
-          selectedTableId,
-          cart: selectedTableId ? (normalized.savedCarts?.[selectedTableId] ?? persisted.cart ?? []) : [],
+          savedCarts: restoredSession.savedCarts,
+          currentOrder: restoredSession.currentOrder,
+          selectedTableId: restoredSession.selectedTableId,
+          cart: restoredSession.cart,
           activeOrderType: persisted.activeOrderType ?? currentState.activeOrderType,
         }
       },
