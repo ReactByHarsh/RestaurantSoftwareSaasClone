@@ -2,9 +2,9 @@ use std::fs;
 use std::io::Write;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpStream};
 use std::path::PathBuf;
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use axum::{
     extract::{
@@ -85,6 +85,9 @@ struct LanServerState {
     license_guard: LicenseGuard,
     broadcaster: broadcast::Sender<String>,
 }
+
+#[derive(Clone, Default)]
+struct DesktopStateWriteLock(Arc<Mutex<()>>);
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -957,7 +960,11 @@ fn network_target(raw: &str) -> Option<(String, u16)> {
 }
 
 fn print_tcp(target: (String, u16), bytes: &[u8]) -> Result<(), String> {
-    let address = format!("{}:{}", target.0, target.1);
+    let address = if target.0.contains(':') {
+        format!("[{}]:{}", target.0, target.1)
+    } else {
+        format!("{}:{}", target.0, target.1)
+    };
     let socket_address = address
         .parse()
         .map_err(|_| format!("Invalid LAN printer address: {address}"))?;
@@ -994,8 +1001,19 @@ fn print_windows_queue(
 ) -> Result<(), String> {
     let directory = app.path().app_cache_dir().map_err(to_error)?;
     fs::create_dir_all(&directory).map_err(to_error)?;
-    let file = directory.join("bhojpatra-print-job.bin");
-    fs::write(&file, bytes).map_err(to_error)?;
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let file = directory.join(format!(
+        "bhojpatra-print-job-{}-{}.bin",
+        std::process::id(),
+        timestamp
+    ));
+    if let Err(error) = fs::write(&file, bytes) {
+        let _ = fs::remove_file(&file);
+        return Err(to_error(error));
+    }
     let script = r#"
 Add-Type -TypeDefinition @"
 using System;
@@ -1040,22 +1058,46 @@ public static class RawPrinterHelper {
 $bytes = [System.IO.File]::ReadAllBytes($env:BP_PRINT_FILE)
 [RawPrinterHelper]::Send($env:BP_PRINTER_NAME, $bytes, $env:BP_JOB_NAME)
 "#;
-    let output = powershell_command(script)
-        .env("BP_PRINT_FILE", file)
+    let mut child = match powershell_command(script)
+        .env("BP_PRINT_FILE", &file)
         .env("BP_PRINTER_NAME", printer)
         .env("BP_JOB_NAME", job_name)
-        .output()
-        .map_err(to_error)?;
-    if output.status.success() {
-        Ok(())
-    } else {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        Err(if stderr.is_empty() {
-            "Windows printer write failed.".to_string()
-        } else {
-            stderr
-        })
-    }
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(error) => {
+            let _ = fs::remove_file(&file);
+            return Err(to_error(error));
+        }
+    };
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let result = loop {
+        match child.try_wait() {
+            Ok(Some(_)) => {
+                let output = child.wait_with_output().map_err(to_error)?;
+                if output.status.success() {
+                    break Ok(());
+                }
+                let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+                break Err(if stderr.is_empty() {
+                    "Windows printer write failed.".to_string()
+                } else {
+                    stderr
+                });
+            }
+            Ok(None) if Instant::now() >= deadline => {
+                let _ = child.kill();
+                let _ = child.wait();
+                break Err("Windows printer did not respond within 30 seconds. Check that the printer is online and try again.".to_string());
+            }
+            Ok(None) => std::thread::sleep(Duration::from_millis(100)),
+            Err(error) => break Err(format!("Windows printer process failed: {error}")),
+        }
+    };
+    let _ = fs::remove_file(&file);
+    result
 }
 
 #[cfg(windows)]
@@ -1160,11 +1202,16 @@ fn load_local_state(
 fn save_local_state(
     app: AppHandle,
     guard: State<'_, LicenseGuard>,
+    write_lock: State<'_, DesktopStateWriteLock>,
     broadcaster: State<'_, broadcast::Sender<String>>,
     snapshot: Value,
     staff: Value,
 ) -> Result<(), String> {
     require_license(&guard)?;
+    let _write_guard = write_lock
+        .0
+        .lock()
+        .map_err(|_| "Desktop state save lock was poisoned".to_string())?;
     let connection = open_database(&app)?;
     let existing = read_snapshot(&connection)?;
     if (snapshot_score(Some(&snapshot)) == 0 && snapshot_score(existing.as_ref()) > 0)
@@ -1649,6 +1696,7 @@ pub fn run() {
                 .plugin(tauri_plugin_updater::Builder::new().build())?;
             app.manage(LicenseManager::new(app.handle()));
             let license_guard = LicenseGuard::new();
+            app.manage(DesktopStateWriteLock::default());
             let lan_status = Arc::new(Mutex::new(lan_status_snapshot(3000, false, None)));
             let (lan_broadcaster, _) = broadcast::channel::<String>(128);
             spawn_lan_server(
@@ -1679,4 +1727,36 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_ipv4_and_ipv6_raw_printer_targets() {
+        assert_eq!(network_target("tcp://192.168.1.50:9100"), Some(("192.168.1.50".to_string(), 9100)));
+        assert_eq!(network_target("[::1]:9100"), Some(("::1".to_string(), 9100)));
+    }
+
+    #[test]
+    fn builds_esc_pos_job_with_qr_and_cut() {
+        let payload = NativePrintPayload {
+            printer: "POS-80".to_string(),
+            job_name: "Test receipt".to_string(),
+            text: "BHOJPATRA\n".to_string(),
+            auto_cut: true,
+            open_cash_drawer: true,
+            qr_codes: vec![NativeQrCode {
+                data: "upi://pay?pa=test".to_string(),
+                label: Some("Scan".to_string()),
+            }],
+            logo_data_url: None,
+        };
+        let bytes = esc_pos_bytes(&payload);
+        assert!(bytes.starts_with(&[0x1b, 0x40, 0x1b, 0x70]));
+        assert!(bytes.windows(b"BHOJPATRA".len()).any(|window| window == b"BHOJPATRA"));
+        assert!(bytes.windows(b"upi://pay?pa=test".len()).any(|window| window == b"upi://pay?pa=test"));
+        assert!(bytes.ends_with(&[0x0a, 0x0a, 0x0a, 0x1d, 0x56, 0x00]));
+    }
 }
