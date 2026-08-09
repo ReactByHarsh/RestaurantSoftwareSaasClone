@@ -4,6 +4,8 @@ import 'package:flutter/material.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
 import '../models/session.dart';
 import '../api/cloud_api.dart';
+import '../api/order_sync.dart';
+import '../storage/mobile_database.dart';
 import '../utils/utils.dart';
 import 'owner/owner_home.dart';
 import 'captain/captain_workspace.dart';
@@ -20,8 +22,9 @@ class MobileHome extends StatefulWidget {
   State<MobileHome> createState() => _MobileHomeState();
 }
 
-class _MobileHomeState extends State<MobileHome> {
+class _MobileHomeState extends State<MobileHome> with WidgetsBindingObserver {
   late final CloudApi _api;
+  late final MobileOrderSync _orderSync;
   WebSocketChannel? _socket;
   Map<String, dynamic> _snapshot = {};
   var _loading = true;
@@ -32,6 +35,9 @@ class _MobileHomeState extends State<MobileHome> {
   int _socketGeneration = 0;
   Timer? _reconnectTimer;
   Timer? _heartbeatTimer;
+  Timer? _cloudSyncTimer;
+  Timer? _syncRetryTimer;
+  int _syncRetryAttempt = 0;
   String? _lastUpdatedAt;
   String? _lastSyncAt;
 
@@ -39,15 +45,22 @@ class _MobileHomeState extends State<MobileHome> {
       {'owner', 'admin', 'manager'}.contains(widget.session.role);
   bool get _isKitchen => widget.session.role == 'kitchen';
   bool get _isCloudMode => widget.session.mode.startsWith('cloud');
-  String get _serverMode => _isCloudMode
-      ? 'CLOUD LIVE'
-      : serverModeLabel(widget.session.serverUrl);
+  String get _serverMode =>
+      _isCloudMode ? 'CLOUD LIVE' : serverModeLabel(widget.session.serverUrl);
 
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _api = CloudApi(widget.session);
+    _orderSync = MobileOrderSync(_api);
     _refresh(connect: true);
+    if (_isCloudMode) {
+      _cloudSyncTimer = Timer.periodic(
+        const Duration(hours: 4),
+        (_) => _refresh(),
+      );
+    }
   }
 
   @override
@@ -55,8 +68,16 @@ class _MobileHomeState extends State<MobileHome> {
     _socketGeneration++;
     _reconnectTimer?.cancel();
     _heartbeatTimer?.cancel();
+    _cloudSyncTimer?.cancel();
+    _syncRetryTimer?.cancel();
     _socket?.sink.close();
+    WidgetsBinding.instance.removeObserver(this);
     super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) _refresh(connect: true);
   }
 
   Future<void> _refresh({bool connect = false}) async {
@@ -65,7 +86,28 @@ class _MobileHomeState extends State<MobileHome> {
       _error = null;
     });
     try {
-      final state = await _api.fetchState();
+      Map<String, dynamic> state;
+      final local = await mobileDatabase.loadSnapshot();
+      final localMatchesOutlet =
+          local != null &&
+          text(snapshotValue(local, 'outlet', 'id')) == widget.session.outletId;
+      if (_snapshot.isEmpty && localMatchesOutlet) {
+        state = local;
+        if (mounted) setState(() => _snapshot = state);
+      } else {
+        state = _snapshot;
+      }
+      if (_isCloudMode) {
+        if (state.isEmpty) {
+          // Full state is used only for first bootstrap/recovery.
+          state = await _api.fetchState();
+          await mobileDatabase.saveSnapshot(state);
+        }
+        state = (await _orderSync.sync(state)).snapshot;
+      } else {
+        state = await _api.fetchState();
+        await mobileDatabase.saveSnapshot(state);
+      }
       if (mounted) {
         setState(() {
           _snapshot = state;
@@ -73,10 +115,22 @@ class _MobileHomeState extends State<MobileHome> {
           _error = null;
         });
       }
+      _syncRetryAttempt = 0;
+      _syncRetryTimer?.cancel();
       if (connect) {
         _connectRealtime();
       }
     } catch (error) {
+      if (_isCloudMode) {
+        const retryMinutes = [1, 5, 15, 60];
+        final delay =
+            retryMinutes[_syncRetryAttempt.clamp(0, retryMinutes.length - 1)];
+        _syncRetryAttempt++;
+        _syncRetryTimer?.cancel();
+        _syncRetryTimer = Timer(Duration(minutes: delay), () {
+          if (mounted) _refresh();
+        });
+      }
       if (mounted) {
         setState(
           () => _error = error.toString().replaceFirst('Exception: ', ''),
@@ -129,7 +183,8 @@ class _MobileHomeState extends State<MobileHome> {
               _lastSyncAt = timestamp;
               _error = null;
             });
-          } else if (eventType == 'STATE_UPDATED') {
+          } else if (eventType == 'STATE_UPDATED' ||
+              eventType == 'SYNC_DELTA_AVAILABLE') {
             _refresh();
           } else if (eventType == 'STAFF_UPDATED') {
             setState(() => _lastUpdatedAt = timestamp);
@@ -167,7 +222,12 @@ class _MobileHomeState extends State<MobileHome> {
   Future<void> _save(Map<String, dynamic> next) async {
     setState(() => _syncing = true);
     try {
-      final accepted = await _api.saveState(next);
+      // Local commit and outbox creation happen before the network request.
+      await mobileDatabase.saveSnapshot(next);
+      if (mounted) setState(() => _snapshot = next);
+      final accepted = _isCloudMode
+          ? (await _orderSync.sync(next)).snapshot
+          : await _api.saveState(next);
       if (mounted) {
         final now = DateTime.now().toIso8601String();
         setState(() {
@@ -236,13 +296,13 @@ class _MobileHomeState extends State<MobileHome> {
               padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
               decoration: BoxDecoration(
                 color: _connected
-                          ? Colors.green.shade50
-                          : Colors.orange.shade50,
+                    ? Colors.green.shade50
+                    : Colors.orange.shade50,
                 borderRadius: BorderRadius.circular(999),
                 border: Border.all(
                   color: _connected
-                            ? Colors.green.shade200
-                            : Colors.orange.shade200,
+                      ? Colors.green.shade200
+                      : Colors.orange.shade200,
                 ),
               ),
               child: Text(
@@ -251,8 +311,8 @@ class _MobileHomeState extends State<MobileHome> {
                   fontSize: 11,
                   fontWeight: FontWeight.w800,
                   color: _connected
-                            ? Colors.green.shade800
-                            : Colors.orange.shade800,
+                      ? Colors.green.shade800
+                      : Colors.orange.shade800,
                 ),
               ),
             ),

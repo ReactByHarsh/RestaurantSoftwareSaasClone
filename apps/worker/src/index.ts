@@ -8,6 +8,7 @@ import ordersRouter from './api/orders'
 import kotsRouter from './api/kots'
 import paymentsRouter from './api/payments'
 import stateRouter from './api/state'
+import { applyLegacyOrderMutation, applySyncPush, pullSyncChanges, syncPushSchema } from './sync'
 
 type Bindings = {
   DB?: D1Database
@@ -1037,7 +1038,9 @@ async function clearRealtimeOutlet(env: Bindings, outletId: string) {
 }
 
 export class RealtimeHub {
-  constructor(private readonly state: DurableObjectState) {
+  private syncTail: Promise<void> = Promise.resolve()
+
+  constructor(private readonly state: DurableObjectState, private readonly env: Bindings) {
     state.blockConcurrencyWhile(async () => {
       state.storage.sql.exec(`
         CREATE TABLE IF NOT EXISTS outlet_state (
@@ -1052,6 +1055,37 @@ export class RealtimeHub {
 
   async fetch(request: Request): Promise<Response> {
     const url = new URL(request.url)
+    if (url.pathname === '/sync' && request.method === 'POST') {
+      if (!this.env.DB) return Response.json({ error: 'Database binding is not configured' }, { status: 500 })
+      const raw = await request.json().catch(() => null)
+      const envelope = z.object({
+        outletId: z.string().min(1),
+        tenantId: z.string().min(1),
+        push: syncPushSchema,
+      }).safeParse(raw)
+      if (!envelope.success) return Response.json({ error: 'Invalid sync payload' }, { status: 400 })
+      const result = await this.serializeSync(() => applySyncPush(
+        this.env.DB!,
+        envelope.data.outletId,
+        envelope.data.tenantId,
+        envelope.data.push,
+      ))
+      const accepted = 'accepted' in result.body && Array.isArray(result.body.accepted)
+        ? result.body.accepted
+        : []
+      if (result.status === 200 && accepted.length > 0) {
+        const message = JSON.stringify({
+          type: 'SYNC_DELTA_AVAILABLE',
+          cursor: result.body.cursor,
+          timestamp: result.body.serverTime,
+          clientId: envelope.data.push.deviceId,
+        })
+        for (const socket of this.state.getWebSockets()) {
+          try { socket.send(message) } catch { /* ignore disconnected socket */ }
+        }
+      }
+      return Response.json(result.body, { status: result.status })
+    }
     if (url.pathname === '/state' && request.method === 'GET') {
       const rows = this.state.storage.sql.exec<{ tenant_id: string; payload_json: string; updated_at: string }>(
         'SELECT tenant_id, payload_json, updated_at FROM outlet_state WHERE id = 1'
@@ -1098,6 +1132,12 @@ export class RealtimeHub {
     this.state.acceptWebSocket(server)
     server.send(JSON.stringify({ type: 'CONNECTED', timestamp: new Date().toISOString() }))
     return new Response(null, { status: 101, webSocket: client })
+  }
+
+  private serializeSync<T>(operation: () => Promise<T>): Promise<T> {
+    const result = this.syncTail.then(operation, operation)
+    this.syncTail = result.then(() => undefined, () => undefined)
+    return result
   }
 
   webSocketMessage(socket: WebSocket, message: string | ArrayBuffer) {
@@ -1966,6 +2006,54 @@ app.get('/api/v1/outlets/:outletId/realtime', async (c) => {
   return stub.fetch(c.req.raw)
 })
 
+app.post('/api/v2/outlets/:outletId/sync/push', async (c) => {
+  const db = c.env.DB
+  if (!db) return c.json({ error: 'Database binding is not configured' }, 500)
+  const outletId = c.req.param('outletId')
+  const auth = await getAuthenticatedUser(c)
+  if ('response' in auth) return auth.response
+  if (!canAccessOutlet(auth.user, outletId)) return c.json({ error: 'Forbidden' }, 403)
+
+  let raw: unknown
+  try { raw = await c.req.json() } catch { return c.json({ error: 'Invalid JSON' }, 400) }
+  const parsed = syncPushSchema.safeParse(raw)
+  if (!parsed.success) return c.json({ error: 'Invalid sync payload', details: parsed.error.flatten() }, 400)
+  const tenantId = auth.user.tenantId === 'platform'
+    ? (outletId.startsWith('out_') ? outletId.slice(4) : outletId)
+    : auth.user.tenantId
+  if (outletId !== `out_${tenantId}`) return c.json({ error: 'Outlet does not belong to tenant' }, 403)
+  if (!c.env.REALTIME_HUB) return c.json({ error: 'Sync coordinator is not configured' }, 503)
+
+  const stub = c.env.REALTIME_HUB.get(c.env.REALTIME_HUB.idFromName(outletId))
+  const response = await stub.fetch('https://realtime.internal/sync', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ outletId, tenantId, push: parsed.data }),
+  })
+  const body = await response.json()
+  console.log(JSON.stringify({
+    event: 'sync_push_completed',
+    outletId,
+    deviceId: parsed.data.deviceId,
+    batchId: parsed.data.batchId,
+    status: response.status,
+    changeCount: parsed.data.changes.length,
+  }))
+  return c.json(body, response.status as 200 | 400 | 409 | 500 | 503)
+})
+
+app.get('/api/v2/outlets/:outletId/sync/pull', async (c) => {
+  const db = c.env.DB
+  if (!db) return c.json({ error: 'Database binding is not configured' }, 500)
+  const outletId = c.req.param('outletId')
+  const auth = await getAuthenticatedUser(c)
+  if ('response' in auth) return auth.response
+  if (!canAccessOutlet(auth.user, outletId)) return c.json({ error: 'Forbidden' }, 403)
+  const cursor = Math.max(0, Number.parseInt(c.req.query('cursor') ?? '0', 10) || 0)
+  const limit = Math.min(200, Math.max(1, Number.parseInt(c.req.query('limit') ?? '100', 10) || 100))
+  return c.json(await pullSyncChanges(db, outletId, cursor, limit))
+})
+
 app.post('/api/v1/maintenance/reconcile/:outletId', async (c) => {
   if (!c.env.DB) return c.json({ error: 'Database binding is not configured' }, 500)
   if (!c.env.MAINTENANCE_TOKEN) return c.json({ error: 'Maintenance reconciliation is disabled' }, 503)
@@ -1995,6 +2083,8 @@ app.post('/api/v1/maintenance/reconcile/:outletId', async (c) => {
     return c.json({ error: 'Snapshot reconciliation failed', outletId, details }, 500)
   }
 })
+
+function routeLegacyStateThroughV2() { return true }
 
 app.put('/api/v1/outlets/:outletId/state', async (c) => {
   const db = c.env.DB
@@ -2048,6 +2138,59 @@ app.put('/api/v1/outlets/:outletId/state', async (c) => {
       reason: 'Ignored a stale snapshot that would reopen a completed order',
       payload: existing?.payload,
     })
+  }
+
+  if (routeLegacyStateThroughV2()) {
+    const orders = asArray(body.data.payload.orders).map(asRecord).filter((order): order is Record<string, unknown> => Boolean(order))
+    const incomingItems = asArray(body.data.payload.orderItems).map(asRecord).filter((item): item is Record<string, unknown> => Boolean(item))
+    const incomingKots = asArray(body.data.payload.kots).map(asRecord).filter((kot): kot is Record<string, unknown> => Boolean(kot))
+    const incomingPayments = asArray(body.data.payload.payments).map(asRecord).filter((payment): payment is Record<string, unknown> => Boolean(payment))
+    const incomingTables = asArray(body.data.payload.tables).map(asRecord).filter((table): table is Record<string, unknown> => Boolean(table))
+    const conflicts: unknown[] = []
+    for (const order of orders) {
+      const orderUuid = stringValue(order.id)
+      if (!orderUuid) continue
+      const tableId = stringValue(order.tableId)
+      const result = await applyLegacyOrderMutation(db, outletId, body.data.tenantId, orderUuid, {
+        order,
+        orderItems: incomingItems.filter((item) => stringValue(item.orderId) === orderUuid),
+        kots: incomingKots.filter((kot) => stringValue(kot.orderId) === orderUuid),
+        payments: incomingPayments.filter((payment) => stringValue(payment.orderId) === orderUuid),
+        table: tableId ? incomingTables.find((table) => stringValue(table.id) === tableId) : undefined,
+        deviceId: `legacy_snapshot_${body.data.clientId || auth.user.id}`,
+      })
+      if (result.status !== 200) return c.json(result.body, result.status as 404 | 409 | 500)
+      if ('conflicts' in result.body) conflicts.push(...result.body.conflicts)
+    }
+
+    const canonical = await readSnapshotRow(db, outletId)
+    const operational = canonical?.payload ?? existing?.payload ?? body.data.payload
+    const mergedPayload: SnapshotPayload = {
+      ...body.data.payload,
+      orders: operational.orders,
+      orderItems: operational.orderItems,
+      kots: operational.kots,
+      payments: operational.payments,
+      tables: operational.tables,
+      savedCarts: operational.savedCarts,
+    }
+    const updatedAt = new Date().toISOString()
+    await db.prepare(`
+      INSERT INTO app_snapshots (outlet_id, tenant_id, payload_json, updated_at)
+      VALUES (?, ?, ?, ?)
+      ON CONFLICT(outlet_id) DO UPDATE SET
+        tenant_id = excluded.tenant_id,
+        payload_json = excluded.payload_json,
+        updated_at = excluded.updated_at
+    `).bind(outletId, body.data.tenantId, JSON.stringify(mergedPayload), updatedAt).run()
+    if (c.env.REALTIME_HUB) {
+      const stub = c.env.REALTIME_HUB.get(c.env.REALTIME_HUB.idFromName(outletId))
+      c.executionCtx.waitUntil(stub.fetch('https://realtime.internal/broadcast', {
+        method: 'POST',
+        body: JSON.stringify({ type: 'SYNC_DELTA_AVAILABLE', payload: { legacy: true } }),
+      }).catch((error) => console.error('Legacy delta notice failed:', error)))
+    }
+    return c.json({ ok: true, outletId, updatedAt, conflicts, compatibilityMode: 'delta_v2', payload: mergedPayload })
   }
 
   const incomingPayloadJson = JSON.stringify(body.data.payload)

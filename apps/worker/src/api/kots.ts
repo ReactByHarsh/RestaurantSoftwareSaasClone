@@ -1,6 +1,7 @@
 import { Hono } from 'hono'
 import { z } from 'zod'
 import { getCookie } from 'hono/cookie'
+import { applyLegacyOrderMutation } from '../sync'
 
 export const kotsRouter = new Hono<{ Bindings: { DB: any; REALTIME_HUB: any; SESSION_SECRET?: string } }>()
 
@@ -149,6 +150,8 @@ function tenantIdFromOutlet(outletId: string) {
   return outletId.startsWith('out_') ? outletId.slice(4) : outletId
 }
 
+function routeLegacyThroughV2() { return true }
+
 kotsRouter.post('/:outletId', async (c) => {
   const db = c.env.DB
   if (!db) return c.json({ error: 'DB not configured' }, 500)
@@ -164,6 +167,18 @@ kotsRouter.post('/:outletId', async (c) => {
   const kot = body.data
   const tenantId = tenantIdFromOutlet(outletId)
   const updatedAt = new Date().toISOString()
+  if (routeLegacyThroughV2()) {
+  const syncResult = await applyLegacyOrderMutation(db, outletId, tenantId, kot.orderId, {
+    kot: { ...kot, updatedAt },
+    deviceId: `legacy_kots_${user?.id || 'unknown'}`,
+  })
+  if (syncResult.status !== 200) return c.json(syncResult.body, syncResult.status as 404 | 409 | 500)
+  if ('conflicts' in syncResult.body && syncResult.body.conflicts.length > 0) {
+    return c.json({ error: 'KOT sync conflict', conflicts: syncResult.body.conflicts }, 409)
+  }
+  c.executionCtx.waitUntil(broadcast(c.env, outletId, 'SYNC_DELTA_AVAILABLE', { orderUuid: kot.orderId }))
+  return c.json({ ok: true, kot })
+  }
   
   try {
     await db.prepare('DELETE FROM kot_items WHERE kot_id = ?').bind(kot.id).run()
@@ -225,6 +240,18 @@ kotsRouter.put('/:outletId/:id', async (c) => {
   const kot = body.data
   const tenantId = tenantIdFromOutlet(outletId)
   const updatedAt = new Date().toISOString()
+  if (routeLegacyThroughV2()) {
+  const syncResult = await applyLegacyOrderMutation(db, outletId, tenantId, kot.orderId, {
+    kot: { ...kot, updatedAt },
+    deviceId: `legacy_kots_${user?.id || 'unknown'}`,
+  })
+  if (syncResult.status !== 200) return c.json(syncResult.body, syncResult.status as 404 | 409 | 500)
+  if ('conflicts' in syncResult.body && syncResult.body.conflicts.length > 0) {
+    return c.json({ error: 'KOT sync conflict', conflicts: syncResult.body.conflicts }, 409)
+  }
+  c.executionCtx.waitUntil(broadcast(c.env, outletId, 'SYNC_DELTA_AVAILABLE', { orderUuid: kot.orderId }))
+  return c.json({ ok: true, kot })
+  }
   
   try {
     await db.prepare(`

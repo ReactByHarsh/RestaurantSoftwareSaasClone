@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:uuid/uuid.dart';
 import '../../models/session.dart';
 import '../../utils/utils.dart';
 import '../../utils/printer.dart';
@@ -214,7 +215,7 @@ class _CaptainWorkspaceState extends State<CaptainWorkspace> {
       int currentSubtotal = 0;
 
       if (currentOrder == null) {
-        orderId = 'ord_${DateTime.now().microsecondsSinceEpoch}';
+        orderId = 'ord_${const Uuid().v4()}';
         orderNo = 'ORD-${(orders.length + 1).toString().padLeft(4, '0')}';
         activeOrderId = orderId;
       } else {
@@ -223,7 +224,7 @@ class _CaptainWorkspaceState extends State<CaptainWorkspace> {
         currentSubtotal = intValue(currentOrder['subtotalPaise']);
       }
 
-      final kotId = 'kot_${DateTime.now().microsecondsSinceEpoch}';
+      final kotId = 'kot_${const Uuid().v4()}';
       final addedSubtotal = cartItems.fold<int>(
         0,
         (sum, entry) => sum + intValue(entry.item!['pricePaise']) * entry.qty,
@@ -233,6 +234,9 @@ class _CaptainWorkspaceState extends State<CaptainWorkspace> {
       if (currentOrder == null) {
         orders.add({
           'id': orderId,
+          'orderUuid': orderId,
+          'version': 1,
+          'isClosed': false,
           'outletId': widget.session.outletId,
           'orderNo': orderNo,
           'businessDate': now.substring(0, 10),
@@ -258,8 +262,7 @@ class _CaptainWorkspaceState extends State<CaptainWorkspace> {
       final kotItems = <Map<String, dynamic>>[];
       for (final entry in cartItems) {
         final item = entry.item!;
-        final itemId =
-            'oit_${DateTime.now().microsecondsSinceEpoch}_${text(item['id'])}';
+        final itemId = 'oit_${const Uuid().v4()}';
         orderItems.add({
           'id': itemId,
           'orderId': orderId,
@@ -275,7 +278,7 @@ class _CaptainWorkspaceState extends State<CaptainWorkspace> {
           'createdAt': now,
         });
         kotItems.add({
-          'id': 'ki_$itemId',
+          'id': 'ki_${const Uuid().v4()}',
           'kotId': kotId,
           'orderItemId': itemId,
           'name': text(item['name']),

@@ -1,3 +1,4 @@
+import 'fake-indexeddb/auto'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { Order, OrderItem, RestaurantTable } from '../lib/types'
 import type { BillingSnapshot } from '../lib/cloudSync'
@@ -6,6 +7,7 @@ import {
   useBillingStore,
   type CartItem,
 } from './billingStore'
+import { localSyncDb } from '../lib/orderSync'
 
 vi.hoisted(() => {
   const values = new Map<string, string>()
@@ -121,6 +123,19 @@ describe('billing session restoration', () => {
     expect(restored.cart).toEqual([cartItem])
   })
 
+  it('treats billed plus closedAt as closed and never restores its cart', () => {
+    const billedClosed = { ...order('billed'), closedAt: '2026-08-08T10:01:00.000Z' }
+    const restored = resolveRestoredSession(
+      sessionSnapshot(billedClosed, table(billedClosed.id), { 'table-1': [cartItem] }),
+      billedClosed,
+      'table-1',
+      [cartItem],
+    )
+    expect(restored.currentOrder).toBeNull()
+    expect(restored.cart).toEqual([])
+    expect(restored.savedCarts).not.toHaveProperty('table-1')
+  })
+
   it('does not use the stale top-level cart for an empty table', () => {
     const activeOrder = order('running')
     const restored = resolveRestoredSession(
@@ -137,8 +152,15 @@ describe('billing session restoration', () => {
 })
 
 describe('billing store stale-state recovery', () => {
-  beforeEach(() => {
+  beforeEach(async () => {
     vi.restoreAllMocks()
+    await Promise.all([
+      localSyncDb.syncRecords.clear(),
+      localSyncDb.syncOutbox.clear(),
+      localSyncDb.syncState.clear(),
+      localSyncDb.syncConflicts.clear(),
+      localSyncDb.snapshots.clear(),
+    ])
     useBillingStore.getState().reset()
   })
 
@@ -196,7 +218,12 @@ describe('billing store stale-state recovery', () => {
     const uploadResponse = new Promise<{ ok: boolean; json: () => Promise<Record<string, unknown>> }>((resolve) => {
       finishUpload = resolve
     })
-    const fetchMock = vi.fn().mockReturnValue(uploadResponse)
+    const fetchMock = vi.fn((_: string, request?: RequestInit) => request?.method === 'POST'
+      ? uploadResponse
+      : Promise.resolve({
+          ok: true,
+          json: async () => ({ changes: [], cursor: 1, hasMore: false }),
+        }))
     vi.stubGlobal('fetch', fetchMock)
     useBillingStore.setState((state) => ({
       tables: [table(activeOrder.id)],
@@ -227,15 +254,31 @@ describe('billing store stale-state recovery', () => {
     )
 
     expect(settled).toBe(true)
-    expect(fetchMock).toHaveBeenCalledOnce()
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalled())
     const [, request] = fetchMock.mock.calls[0] as [string, RequestInit]
-    const uploaded = JSON.parse(String(request.body)).payload as BillingSnapshot
-    expect(uploaded.orders.find((candidate) => candidate.id === activeOrder.id)?.status).toBe('paid')
-    expect(uploaded.tables[0].activeOrderId).toBeUndefined()
-    expect(uploaded.savedCarts).not.toHaveProperty('table-1')
+    const wire = JSON.parse(String(request.body)) as { changes: Array<{ orderUuid: string; version: number; isClosed: boolean; payloadHash: string; payload: any }> }
+    const uploaded = wire.changes[0]
+    expect(uploaded.orderUuid).toBe(activeOrder.id)
+    expect(uploaded.version).toBe(1)
+    expect(uploaded.isClosed).toBe(true)
+    expect(uploaded.payload.order.status).toBe('paid')
+    expect(uploaded.payload.table.activeOrderId).toBeUndefined()
     finishUpload?.({
       ok: true,
-      json: async () => ({ ok: true, outletId: 'outlet-1', updatedAt: '2026-08-08T10:11:00.000Z' }),
+      json: async () => ({
+        accepted: [{
+          entityId: activeOrder.id,
+          orderUuid: activeOrder.id,
+          version: uploaded.version,
+          payloadHash: uploaded.payloadHash,
+          syncedAt: '2026-08-08T10:11:00.000Z',
+          cursor: 1,
+        }],
+        duplicates: [],
+        conflicts: [],
+        cursor: 1,
+        serverTime: '2026-08-08T10:11:00.000Z',
+      }),
     })
   })
 

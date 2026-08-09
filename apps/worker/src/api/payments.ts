@@ -1,6 +1,7 @@
 import { Hono } from 'hono'
 import { z } from 'zod'
 import { getCookie } from 'hono/cookie'
+import { applyLegacyOrderMutation } from '../sync'
 
 export const paymentsRouter = new Hono<{ Bindings: { DB: any; REALTIME_HUB: any; SESSION_SECRET?: string } }>()
 
@@ -132,6 +133,8 @@ function tenantIdFromOutlet(outletId: string) {
   return outletId.startsWith('out_') ? outletId.slice(4) : outletId
 }
 
+function routeLegacyThroughV2() { return true }
+
 paymentsRouter.post('/:outletId', async (c) => {
   const db = c.env.DB
   if (!db) return c.json({ error: 'DB not configured' }, 500)
@@ -146,6 +149,18 @@ paymentsRouter.post('/:outletId', async (c) => {
   
   const payment = body.data
   const tenantId = tenantIdFromOutlet(outletId)
+  if (routeLegacyThroughV2()) {
+  const syncResult = await applyLegacyOrderMutation(db, outletId, tenantId, payment.orderId, {
+    payment,
+    deviceId: `legacy_payments_${user?.id || 'unknown'}`,
+  })
+  if (syncResult.status !== 200) return c.json(syncResult.body, syncResult.status as 404 | 409 | 500)
+  if ('conflicts' in syncResult.body && syncResult.body.conflicts.length > 0) {
+    return c.json({ error: 'Payment sync conflict', conflicts: syncResult.body.conflicts }, 409)
+  }
+  c.executionCtx.waitUntil(broadcast(c.env, outletId, 'SYNC_DELTA_AVAILABLE', { orderUuid: payment.orderId }))
+  return c.json({ ok: true, payment })
+  }
   
   try {
     await db.prepare(`

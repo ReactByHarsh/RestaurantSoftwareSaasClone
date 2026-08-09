@@ -25,9 +25,9 @@ use local_ip_address::{list_afinet_netifas, local_ip};
 use std::os::windows::process::CommandExt;
 
 use rusqlite::{params, Connection, OptionalExtension};
-use sha2::{Digest, Sha256};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::{
     net::{TcpListener, UdpSocket},
@@ -217,6 +217,46 @@ fn open_database(app: &AppHandle) -> Result<Connection, String> {
         );
         CREATE INDEX IF NOT EXISTS idx_app_state_history_key_id
           ON app_state_history(key, id DESC);
+        CREATE TABLE IF NOT EXISTS sync_records (
+          key TEXT PRIMARY KEY,
+          entity_type TEXT NOT NULL,
+          entity_id TEXT NOT NULL,
+          order_uuid TEXT,
+          version INTEGER NOT NULL,
+          base_version INTEGER NOT NULL,
+          payload_hash TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          synced_at TEXT,
+          conflict_state TEXT,
+          row_json TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS sync_outbox (
+          key TEXT PRIMARY KEY,
+          entity_type TEXT NOT NULL,
+          entity_id TEXT NOT NULL,
+          order_uuid TEXT,
+          version INTEGER NOT NULL,
+          base_version INTEGER NOT NULL,
+          payload_hash TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          batch_id TEXT NOT NULL,
+          retry_count INTEGER NOT NULL DEFAULT 0,
+          row_json TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_sync_outbox_pending
+          ON sync_outbox(updated_at, retry_count);
+        CREATE TABLE IF NOT EXISTS sync_state (
+          key TEXT PRIMARY KEY,
+          value TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS sync_conflicts (
+          key TEXT PRIMARY KEY,
+          entity_id TEXT NOT NULL,
+          order_uuid TEXT,
+          code TEXT NOT NULL,
+          created_at TEXT NOT NULL,
+          row_json TEXT NOT NULL
+        );
       ",
         )
         .map_err(to_error)?;
@@ -304,7 +344,9 @@ fn ensure_windows_firewall_rules() {}
 fn read_json(connection: &Connection, key: &str) -> Result<Option<Value>, String> {
     let mut candidates = Vec::new();
     if let Some(stored) = connection
-        .query_row("SELECT value FROM app_state WHERE key = ?1", [key], |row| row.get::<_, String>(0))
+        .query_row("SELECT value FROM app_state WHERE key = ?1", [key], |row| {
+            row.get::<_, String>(0)
+        })
         .optional()
         .map_err(to_error)?
     {
@@ -362,7 +404,11 @@ fn write_json(connection: &Connection, key: &str, value: &Value) -> Result<(), S
 
 fn state_updated_at(connection: &Connection, key: &str) -> Result<Option<String>, String> {
     connection
-        .query_row("SELECT updated_at FROM app_state WHERE key = ?1", [key], |row| row.get(0))
+        .query_row(
+            "SELECT updated_at FROM app_state WHERE key = ?1",
+            [key],
+            |row| row.get(0),
+        )
         .optional()
         .map_err(to_error)
 }
@@ -578,11 +624,7 @@ fn authenticate_credentials(
         }
     };
     let valid_passwords = [Some(account.password.as_str()), account.pin.as_deref()];
-    if !valid_passwords
-        .into_iter()
-        .flatten()
-        .any(matches_secret)
-    {
+    if !valid_passwords.into_iter().flatten().any(matches_secret) {
         return Err((
             StatusCode::UNAUTHORIZED,
             Json(json!({ "error": "Invalid credentials" })),
@@ -635,11 +677,19 @@ fn would_erase_core_restaurant_data(existing: Option<&Value>, incoming: &Value) 
     let Some(incoming) = incoming.as_object() else {
         return true;
     };
-    ["tables", "floors", "menuItems", "menuCategories"].iter().any(|key| {
-        let current_count = existing.get(*key).and_then(Value::as_array).map_or(0, Vec::len);
-        let next_count = incoming.get(*key).and_then(Value::as_array).map_or(0, Vec::len);
-        current_count > 0 && next_count == 0
-    })
+    ["tables", "floors", "menuItems", "menuCategories"]
+        .iter()
+        .any(|key| {
+            let current_count = existing
+                .get(*key)
+                .and_then(Value::as_array)
+                .map_or(0, Vec::len);
+            let next_count = incoming
+                .get(*key)
+                .and_then(Value::as_array)
+                .map_or(0, Vec::len);
+            current_count > 0 && next_count == 0
+        })
 }
 
 fn preserves_role_restricted_collections(existing: Option<&Value>, incoming: &Value) -> bool {
@@ -650,9 +700,16 @@ fn preserves_role_restricted_collections(existing: Option<&Value>, incoming: &Va
         return false;
     };
     [
-        "outlet", "printSettings", "appUpdate",
-        "menuCategories", "menuItems", "floors", "stations",
-        "inventoryItems", "purchaseEntries", "payments",
+        "outlet",
+        "printSettings",
+        "appUpdate",
+        "menuCategories",
+        "menuItems",
+        "floors",
+        "stations",
+        "inventoryItems",
+        "purchaseEntries",
+        "payments",
     ]
     .iter()
     .all(|key| existing.get(*key) == incoming.get(*key))
@@ -660,7 +717,10 @@ fn preserves_role_restricted_collections(existing: Option<&Value>, incoming: &Va
 
 fn sanitize_snapshot_for_lan(snapshot: &Value) -> Value {
     let mut sanitized = snapshot.clone();
-    if let Some(cloud) = sanitized.get_mut("cloudSync").and_then(Value::as_object_mut) {
+    if let Some(cloud) = sanitized
+        .get_mut("cloudSync")
+        .and_then(Value::as_object_mut)
+    {
         cloud.insert("accountSecret".to_string(), Value::String(String::new()));
     }
     sanitized
@@ -675,7 +735,10 @@ fn preserve_cloud_secret(existing: Option<&Value>, incoming: &Value) -> Value {
         .unwrap_or("");
     if !existing_secret.is_empty() {
         if let Some(cloud) = merged.get_mut("cloudSync").and_then(Value::as_object_mut) {
-            cloud.insert("accountSecret".to_string(), Value::String(existing_secret.to_string()));
+            cloud.insert(
+                "accountSecret".to_string(),
+                Value::String(existing_secret.to_string()),
+            );
         }
     }
     merged
@@ -1217,7 +1280,9 @@ fn save_local_state(
     if (snapshot_score(Some(&snapshot)) == 0 && snapshot_score(existing.as_ref()) > 0)
         || would_erase_core_restaurant_data(existing.as_ref(), &snapshot)
     {
-        return Err("Refused to replace existing restaurant setup with an incomplete snapshot".to_string());
+        return Err(
+            "Refused to replace existing restaurant setup with an incomplete snapshot".to_string(),
+        );
     }
     write_json(&connection, "snapshot", &snapshot)?;
     write_json(&connection, "staff", &staff)?;
@@ -1231,6 +1296,102 @@ fn save_local_state(
     });
     let _ = broadcaster.send(event.to_string());
     Ok(())
+}
+
+fn read_sync_rows(connection: &Connection, table: &str) -> Result<Vec<Value>, String> {
+    let statement = format!("SELECT row_json FROM {table} ORDER BY rowid ASC");
+    let mut query = connection.prepare(&statement).map_err(to_error)?;
+    let rows = query
+        .query_map([], |row| row.get::<_, String>(0))
+        .map_err(to_error)?;
+    let mut values = Vec::new();
+    for row in rows {
+        let raw = row.map_err(to_error)?;
+        if let Ok(value) = serde_json::from_str::<Value>(&raw) {
+            values.push(value);
+        }
+    }
+    Ok(values)
+}
+
+#[tauri::command]
+fn load_sync_metadata(app: AppHandle, guard: State<'_, LicenseGuard>) -> Result<Value, String> {
+    require_license(&guard)?;
+    let connection = open_database(&app)?;
+    let mut state_statement = connection
+        .prepare("SELECT key, value FROM sync_state")
+        .map_err(to_error)?;
+    let state_rows = state_statement
+        .query_map([], |row| {
+            Ok(json!({ "key": row.get::<_, String>(0)?, "value": row.get::<_, String>(1)? }))
+        })
+        .map_err(to_error)?;
+    let mut sync_state = Vec::new();
+    for row in state_rows {
+        sync_state.push(row.map_err(to_error)?);
+    }
+    Ok(json!({
+        "records": read_sync_rows(&connection, "sync_records")?,
+        "outbox": read_sync_rows(&connection, "sync_outbox")?,
+        "state": sync_state,
+        "conflicts": read_sync_rows(&connection, "sync_conflicts")?,
+    }))
+}
+
+#[tauri::command]
+fn save_sync_metadata(
+    app: AppHandle,
+    guard: State<'_, LicenseGuard>,
+    records: Vec<Value>,
+    outbox: Vec<Value>,
+    sync_state: Vec<Value>,
+    conflicts: Vec<Value>,
+) -> Result<(), String> {
+    require_license(&guard)?;
+    let mut connection = open_database(&app)?;
+    let transaction = connection.transaction().map_err(to_error)?;
+    transaction
+        .execute("DELETE FROM sync_records", [])
+        .map_err(to_error)?;
+    transaction
+        .execute("DELETE FROM sync_outbox", [])
+        .map_err(to_error)?;
+    transaction
+        .execute("DELETE FROM sync_state", [])
+        .map_err(to_error)?;
+    transaction
+        .execute("DELETE FROM sync_conflicts", [])
+        .map_err(to_error)?;
+
+    for row in records {
+        transaction.execute(
+            "INSERT INTO sync_records (key, entity_type, entity_id, order_uuid, version, base_version, payload_hash, updated_at, synced_at, conflict_state, row_json)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+            params![row["key"].as_str(), row["entityType"].as_str(), row["entityId"].as_str(), row["orderUuid"].as_str(), row["version"].as_i64(), row["baseVersion"].as_i64(), row["payloadHash"].as_str(), row["updatedAt"].as_str(), row["syncedAt"].as_str(), row["conflictState"].as_str(), row.to_string()],
+        ).map_err(to_error)?;
+    }
+    for row in outbox {
+        transaction.execute(
+            "INSERT INTO sync_outbox (key, entity_type, entity_id, order_uuid, version, base_version, payload_hash, updated_at, batch_id, retry_count, row_json)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+            params![row["key"].as_str(), row["entityType"].as_str(), row["entityId"].as_str(), row["orderUuid"].as_str(), row["version"].as_i64(), row["baseVersion"].as_i64(), row["payloadHash"].as_str(), row["updatedAt"].as_str(), row["batchId"].as_str(), row["retryCount"].as_i64().unwrap_or(0), row.to_string()],
+        ).map_err(to_error)?;
+    }
+    for row in sync_state {
+        transaction
+            .execute(
+                "INSERT INTO sync_state (key, value) VALUES (?1, ?2)",
+                params![row["key"].as_str(), row["value"].as_str()],
+            )
+            .map_err(to_error)?;
+    }
+    for row in conflicts {
+        transaction.execute(
+            "INSERT INTO sync_conflicts (key, entity_id, order_uuid, code, created_at, row_json) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![row["key"].as_str(), row["entityId"].as_str(), row["orderUuid"].as_str(), row["code"].as_str(), row["createdAt"].as_str(), row.to_string()],
+        ).map_err(to_error)?;
+    }
+    transaction.commit().map_err(to_error)
 }
 
 #[tauri::command]
@@ -1396,7 +1557,10 @@ async fn lan_get_state(
         )
     })?;
     let stored_updated_at = state_updated_at(&connection, "snapshot").map_err(|error| {
-        (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": error })))
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": error })),
+        )
     })?;
     let mut response_headers = HeaderMap::new();
     response_headers.insert(
@@ -1453,23 +1617,37 @@ async fn lan_put_state(
         )
     })?;
     if !["owner", "admin", "manager", "captain", "kitchen"].contains(&account.role.as_str()) {
-        return Err((StatusCode::FORBIDDEN, Json(json!({ "error": "This role cannot update restaurant state" }))));
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(json!({ "error": "This role cannot update restaurant state" })),
+        ));
     }
     if ["captain", "kitchen"].contains(&account.role.as_str())
         && !preserves_role_restricted_collections(existing.as_ref(), &body.payload)
     {
-        return Err((StatusCode::FORBIDDEN, Json(json!({ "error": "This role can only update tables, orders, and kitchen workflow" }))));
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(
+                json!({ "error": "This role can only update tables, orders, and kitchen workflow" }),
+            ),
+        ));
     }
     let existing_updated_at = state_updated_at(&connection, "snapshot").map_err(|error| {
-        (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": error })))
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": error })),
+        )
     })?;
     if let (Some(expected), Some(actual)) = (&body.expected_updated_at, &existing_updated_at) {
         if expected != actual {
-            return Err((StatusCode::CONFLICT, Json(json!({
-              "error": "Restaurant data changed on another device. Refresh and retry.",
-              "updatedAt": actual,
-              "payload": existing.as_ref().map(sanitize_snapshot_for_lan),
-            }))));
+            return Err((
+                StatusCode::CONFLICT,
+                Json(json!({
+                  "error": "Restaurant data changed on another device. Refresh and retry.",
+                  "updatedAt": actual,
+                  "payload": existing.as_ref().map(sanitize_snapshot_for_lan),
+                })),
+            ));
         }
     }
     let incoming_score = snapshot_score(Some(&body.payload));
@@ -1718,6 +1896,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             load_local_state,
             save_local_state,
+            load_sync_metadata,
+            save_sync_metadata,
             activate_license,
             check_license,
             get_license_status,
@@ -1735,8 +1915,14 @@ mod tests {
 
     #[test]
     fn parses_ipv4_and_ipv6_raw_printer_targets() {
-        assert_eq!(network_target("tcp://192.168.1.50:9100"), Some(("192.168.1.50".to_string(), 9100)));
-        assert_eq!(network_target("[::1]:9100"), Some(("::1".to_string(), 9100)));
+        assert_eq!(
+            network_target("tcp://192.168.1.50:9100"),
+            Some(("192.168.1.50".to_string(), 9100))
+        );
+        assert_eq!(
+            network_target("[::1]:9100"),
+            Some(("::1".to_string(), 9100))
+        );
     }
 
     #[test]
@@ -1755,8 +1941,12 @@ mod tests {
         };
         let bytes = esc_pos_bytes(&payload);
         assert!(bytes.starts_with(&[0x1b, 0x40, 0x1b, 0x70]));
-        assert!(bytes.windows(b"BHOJPATRA".len()).any(|window| window == b"BHOJPATRA"));
-        assert!(bytes.windows(b"upi://pay?pa=test".len()).any(|window| window == b"upi://pay?pa=test"));
+        assert!(bytes
+            .windows(b"BHOJPATRA".len())
+            .any(|window| window == b"BHOJPATRA"));
+        assert!(bytes
+            .windows(b"upi://pay?pa=test".len())
+            .any(|window| window == b"upi://pay?pa=test"));
         assert!(bytes.ends_with(&[0x0a, 0x0a, 0x0a, 0x1d, 0x56, 0x00]));
     }
 }

@@ -1,6 +1,7 @@
 import { Hono } from 'hono'
 import { z } from 'zod'
 import { getCookie } from 'hono/cookie'
+import { applyLegacyOrderMutation } from '../sync'
 
 export const ordersRouter = new Hono<{ Bindings: { DB: any; REALTIME_HUB: any; SESSION_SECRET?: string } }>()
 
@@ -170,6 +171,8 @@ function tenantIdFromOutlet(outletId: string) {
   return outletId.startsWith('out_') ? outletId.slice(4) : outletId
 }
 
+function routeLegacyThroughV2() { return true }
+
 ordersRouter.post('/', async (c) => {
   const db = c.env.DB
   if (!db) return c.json({ error: 'DB not configured' }, 500)
@@ -183,6 +186,20 @@ ordersRouter.post('/', async (c) => {
     return c.json({ error: 'Forbidden' }, 403)
   }
   const tenantId = tenantIdFromOutlet(order.outletId)
+
+  if (routeLegacyThroughV2()) {
+  const syncResult = await applyLegacyOrderMutation(db, order.outletId, tenantId, order.id, {
+    order,
+    orderItems: order.items,
+    deviceId: `legacy_orders_${user?.id || 'unknown'}`,
+  })
+  if (syncResult.status !== 200) return c.json(syncResult.body, syncResult.status as 404 | 409 | 500)
+  if ('conflicts' in syncResult.body && syncResult.body.conflicts.length > 0) {
+    return c.json({ error: 'Order sync conflict', conflicts: syncResult.body.conflicts }, 409)
+  }
+  c.executionCtx.waitUntil(broadcast(c.env, order.outletId, 'SYNC_DELTA_AVAILABLE', { orderUuid: order.id }))
+  return c.json({ ok: true, order })
+  }
   
   try {
     await db.prepare('DELETE FROM order_items WHERE order_id = ?').bind(order.id).run()
@@ -258,6 +275,20 @@ ordersRouter.put('/:id', async (c) => {
     return c.json({ error: 'Forbidden' }, 403)
   }
   const tenantId = tenantIdFromOutlet(order.outletId)
+
+  if (routeLegacyThroughV2()) {
+  const syncResult = await applyLegacyOrderMutation(db, order.outletId, tenantId, order.id, {
+    order,
+    orderItems: order.items,
+    deviceId: `legacy_orders_${user?.id || 'unknown'}`,
+  })
+  if (syncResult.status !== 200) return c.json(syncResult.body, syncResult.status as 404 | 409 | 500)
+  if ('conflicts' in syncResult.body && syncResult.body.conflicts.length > 0) {
+    return c.json({ error: 'Order sync conflict', conflicts: syncResult.body.conflicts }, 409)
+  }
+  c.executionCtx.waitUntil(broadcast(c.env, order.outletId, 'SYNC_DELTA_AVAILABLE', { orderUuid: order.id }))
+  return c.json({ ok: true, order })
+  }
   
   try {
     await db.prepare(`

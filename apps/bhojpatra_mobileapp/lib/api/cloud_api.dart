@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'package:http/http.dart' as http;
 import 'package:web_socket_channel/web_socket_channel.dart';
+import 'package:uuid/uuid.dart';
 import 'lan_discovery.dart';
 import '../models/session.dart';
 import '../utils/utils.dart';
@@ -148,8 +149,7 @@ class CloudApi {
       body: jsonEncode({
         'tenantId': tenantId,
         'payload': snapshot,
-        'clientId':
-            'flutter-${session.role}-${DateTime.now().millisecondsSinceEpoch}',
+        'clientId': 'flutter-${session.role}-${const Uuid().v4()}',
         if (_lastStateUpdatedAt != null)
           'expectedUpdatedAt': _lastStateUpdatedAt,
       }),
@@ -175,6 +175,43 @@ class CloudApi {
       return Map<String, dynamic>.from(payload['payload'] as Map);
     }
     return snapshot;
+  }
+
+  Future<Map<String, dynamic>> pushOrderDeltas(
+    Map<String, dynamic> request,
+  ) async {
+    final response = await http.post(
+      Uri.parse(
+        '$_base/api/v2/outlets/${Uri.encodeComponent(session.outletId)}/sync/push',
+      ),
+      headers: {..._headers, 'Content-Type': 'application/json'},
+      body: jsonEncode(request),
+    );
+    final payload = _jsonMap(response.body);
+    if (response.statusCode < 200 || response.statusCode >= 300) {
+      throw Exception(
+        text(
+          payload['error'],
+          fallback: 'Order delta push failed (${response.statusCode})',
+        ),
+      );
+    }
+    return payload;
+  }
+
+  Future<Map<String, dynamic>> pullOrderDeltas(
+    int cursor, {
+    int limit = 100,
+  }) async {
+    final uri = Uri.parse(
+      '$_base/api/v2/outlets/${Uri.encodeComponent(session.outletId)}/sync/pull',
+    ).replace(queryParameters: {'cursor': '$cursor', 'limit': '$limit'});
+    final response = await http.get(uri, headers: _headers);
+    final payload = _jsonMap(response.body);
+    if (response.statusCode < 200 || response.statusCode >= 300) {
+      throw Exception('Order delta pull failed (${response.statusCode})');
+    }
+    return payload;
   }
 
   WebSocketChannel connectRealtime() {

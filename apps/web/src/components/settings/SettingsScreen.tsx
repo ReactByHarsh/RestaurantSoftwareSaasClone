@@ -7,7 +7,8 @@ import { useBillingStore } from '../../store/billingStore'
 import { useAuthStore } from '../../store/authStore'
 import { useStaffStore } from '../../store/staffStore'
 import { checkForAppUpdate, downloadAndInstallUpdate } from '../../lib/appUpdater'
-import { runCloudLogin, saveCloudSnapshot, syncCloudStaff, type BillingSnapshot, type CloudSyncSettings } from '../../lib/cloudSync'
+import { runCloudLogin, syncCloudStaff, type BillingSnapshot, type CloudSyncSettings } from '../../lib/cloudSync'
+import { getOrderSyncHealth, syncOrderDeltasNow } from '../../lib/orderSync'
 import { getLanServerStatus, isTauriDesktop, type LanServerStatus } from '../../lib/localDb'
 import { getLanBridgeStatus, type LanBridgeStatus } from '../../lib/lanBridge'
 
@@ -29,6 +30,15 @@ export default function SettingsScreen() {
   const [logoPreview, setLogoPreview] = useState(outlet.logoDataUrl ?? '')
   const [lanStatus, setLanStatus] = useState<DisplayLanStatus | null>(null)
   const [lanQrDataUrl, setLanQrDataUrl] = useState('')
+  const [syncHealth, setSyncHealth] = useState<{ pending: number; conflicts: number; oldestPendingAt?: string }>({ pending: 0, conflicts: 0 })
+
+  useEffect(() => {
+    let active = true
+    const refresh = () => void getOrderSyncHealth().then((health) => { if (active) setSyncHealth(health) })
+    refresh()
+    const timer = window.setInterval(refresh, 10_000)
+    return () => { active = false; window.clearInterval(timer) }
+  }, [cloudBusy])
 
   useEffect(() => {
     let cancelled = false
@@ -97,9 +107,13 @@ export default function SettingsScreen() {
       outletId: String(data.get('outletId') ?? '').trim(),
       accountLogin: String(data.get('accountLogin') ?? '').trim(),
       accountSecret: String(data.get('accountSecret') ?? '').trim(),
-      autoSyncDaily: data.get('autoSyncDaily') === 'on',
+      autoSyncEnabled: data.get('autoSyncEnabled') === 'on',
+      syncIntervalHours: Math.max(1, Number(data.get('syncIntervalHours') ?? 4) || 4),
+      autoSyncDaily: data.get('autoSyncEnabled') === 'on',
       syncHour24: Number(data.get('syncHour24') ?? 2),
-      cloudMode: 'daily_snapshot',
+      cloudMode: 'delta_v2',
+      lastSuccessfulSyncAt: cloudSync.lastSuccessfulSyncAt,
+      nextSyncAt: cloudSync.nextSyncAt,
       lastSyncedAt: cloudSync.lastSyncedAt,
       lastCloudUploadedAt: cloudSync.lastCloudUploadedAt,
       lastCloudDownloadedAt: cloudSync.lastCloudDownloadedAt,
@@ -246,17 +260,14 @@ export default function SettingsScreen() {
       tenantId = tenantId || outlet.tenantId
       outletId = outletId || outlet.id
       const cloudAuth = { accountLogin: formSettings.accountLogin, accountSecret: formSettings.accountSecret }
-      const effectiveCloud = { ...formSettings, enabled: true, tenantId, outletId, cloudMode: 'daily_snapshot' as const }
+      const effectiveCloud = { ...formSettings, enabled: true, tenantId, outletId, cloudMode: 'delta_v2' as const }
       const snapshot = exportSnapshot()
-      let result = await saveCloudSnapshot(outletId, tenantId, { ...snapshot, cloudSync: effectiveCloud }, 'desktop-manual', serverUrl, cloudAuth)
-      const latestSnapshot = exportSnapshot()
-      if (JSON.stringify(latestSnapshot) !== JSON.stringify(snapshot)) {
-        result = await saveCloudSnapshot(outletId, tenantId, { ...latestSnapshot, cloudSync: effectiveCloud }, 'desktop-manual', serverUrl, cloudAuth)
-      }
+      const result = await syncOrderDeltasNow({ ...snapshot, cloudSync: effectiveCloud }, effectiveCloud)
+      if (result.changed) importSnapshot(result.snapshot, true)
       await syncCloudStaff(staff, serverUrl, cloudAuth)
-      const syncedAt = result.updatedAt || new Date().toISOString()
-      updateCloudSyncSettings({ ...effectiveCloud, lastSyncedAt: syncedAt, lastCloudUploadedAt: syncedAt })
-      addToast('success', 'Daily snapshot uploaded to cloud', 'Cloud Sync')
+      const syncedAt = new Date().toISOString()
+      updateCloudSyncSettings({ ...effectiveCloud, lastSyncedAt: syncedAt, lastSuccessfulSyncAt: syncedAt, lastCloudUploadedAt: syncedAt, lastCloudDownloadedAt: syncedAt })
+      addToast('success', `Delta sync complete (${result.uploaded} uploaded, ${result.conflicts} conflicts)`, 'Cloud Sync')
     } catch (error) {
       addToast('error', error instanceof Error ? error.message : 'Cloud sync failed', 'Cloud Sync')
     } finally {
@@ -281,10 +292,10 @@ export default function SettingsScreen() {
         enabled: true,
         tenantId,
         outletId,
-        cloudMode: 'daily_snapshot',
+        cloudMode: 'delta_v2',
       })
       updateOutlet(session.outlets[0] ? { ...session.outlets[0], enableDirtyTableStatus: outlet.enableDirtyTableStatus } : { tenantId, id: outletId })
-      addToast('success', 'Cloud account connected. Use Sync Now to upload this desktop snapshot.', 'Cloud Sync')
+      addToast('success', 'Cloud account connected. Use Sync Now to upload pending order changes.', 'Cloud Sync')
     } catch (error) {
       addToast('error', error instanceof Error ? error.message : 'Cloud account connection failed', 'Cloud Sync')
     } finally {
@@ -693,19 +704,20 @@ export default function SettingsScreen() {
                   <input name="accountSecret" type="password" defaultValue={cloudSync.accountSecret} placeholder="App password or sync key" className="w-full px-3 py-2 rounded-xl border-2 border-slate-200 text-sm font-bold text-slate-800 focus:outline-none focus:border-primary/50 focus:ring-4 focus:ring-primary/10 transition-all shadow-sm" />
                 </div>
                 <div>
-                  <label className="block text-xs font-black text-slate-700 mb-1.5 uppercase tracking-wider">Daily Sync Hour</label>
-                  <select name="syncHour24" defaultValue={String(cloudSync.syncHour24)} className="w-full px-3 py-2 rounded-xl border-2 border-slate-200 text-sm font-bold text-slate-800 focus:outline-none focus:border-primary/50 focus:ring-4 focus:ring-primary/10 transition-all shadow-sm bg-white">
-                    {Array.from({ length: 24 }, (_, hour) => (
-                      <option key={hour} value={hour}>{String(hour).padStart(2, '0')}:00</option>
-                    ))}
+                  <label className="block text-xs font-black text-slate-700 mb-1.5 uppercase tracking-wider">Sync Interval</label>
+                  <select name="syncIntervalHours" defaultValue={String(cloudSync.syncIntervalHours || 4)} className="w-full px-3 py-2 rounded-xl border-2 border-slate-200 text-sm font-bold text-slate-800 focus:outline-none focus:border-primary/50 focus:ring-4 focus:ring-primary/10 transition-all shadow-sm bg-white">
+                    <option value="1">Every 1 hour</option>
+                    <option value="4">Every 4 hours</option>
+                    <option value="8">Every 8 hours</option>
+                    <option value="24">Every 24 hours</option>
                   </select>
                 </div>
                 <div className="flex items-end">
                   <label className="flex items-center gap-3 cursor-pointer p-3 rounded-xl border-2 border-slate-100 bg-slate-50 w-full">
-                    <input name="autoSyncDaily" type="checkbox" defaultChecked={cloudSync.autoSyncDaily} className="w-5 h-5 rounded text-primary" />
+                    <input name="autoSyncEnabled" type="checkbox" defaultChecked={cloudSync.autoSyncEnabled} className="w-5 h-5 rounded text-primary" />
                     <div>
-                      <p className="font-black text-slate-800 text-sm">Sync once per day</p>
-                      <p className="text-[10px] font-bold text-slate-500 mt-0.5">Runs one silent background sync after the selected hour.</p>
+                      <p className="font-black text-slate-800 text-sm">Automatic delta sync</p>
+                      <p className="text-[10px] font-bold text-slate-500 mt-0.5">Uploads only changed orders; default is every four hours.</p>
                     </div>
                   </label>
                 </div>
@@ -714,6 +726,8 @@ export default function SettingsScreen() {
               <div className="flex flex-wrap items-center gap-2 justify-between">
                 <p className="text-[11px] font-bold text-slate-500">
                   Last sync: {cloudSync.lastSyncedAt ? new Date(cloudSync.lastSyncedAt).toLocaleString('en-IN') : 'Not synced yet'}
+                  {' · '}Outbox: {syncHealth.pending} pending · Conflicts: {syncHealth.conflicts}
+                  {syncHealth.oldestPendingAt ? ` · Oldest: ${new Date(syncHealth.oldestPendingAt).toLocaleString('en-IN')}` : ''}
                 </p>
                 <div className="flex gap-2">
                   <button type="button" onClick={handleCloudConnect} disabled={cloudBusy} className="px-4 py-2 rounded-xl bg-slate-900 text-white text-xs font-black disabled:opacity-40">

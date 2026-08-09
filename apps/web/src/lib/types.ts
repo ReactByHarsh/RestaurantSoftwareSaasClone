@@ -174,6 +174,12 @@ export interface RestaurantTable {
 
 export interface Order {
   id: string
+  /** Stable client-generated UUID. Existing order ids remain valid sync ids. */
+  orderUuid?: string
+  /** Monotonic aggregate version used by the v2 delta-sync protocol. */
+  version?: number
+  /** Once true this can never be cleared by a remote or local stale update. */
+  isClosed?: boolean
   outletId: string
   orderNo: string
   businessDate: string
@@ -397,6 +403,7 @@ export type RealtimeEventType =
   | 'PAYMENT_ADDED'
   | 'KOTS_TRANSFERRED'
   | 'STAFF_UPDATED'
+  | 'SYNC_DELTA_AVAILABLE'
 
 export interface RealtimeEvent {
   type: RealtimeEventType

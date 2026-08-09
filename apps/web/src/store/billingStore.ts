@@ -1,5 +1,5 @@
 import { create } from 'zustand'
-import { persist } from 'zustand/middleware'
+import { createJSONStorage, persist } from 'zustand/middleware'
 import type {
   AuditLog,
   Floor,
@@ -22,7 +22,8 @@ import type {
   StockUnit,
   TableStatus,
 } from '../lib/types'
-import { saveCloudSnapshot, type BillingSnapshot, type CloudSyncSettings } from '../lib/cloudSync'
+import { type BillingSnapshot, type CloudSyncSettings } from '../lib/cloudSync'
+import { dexieBusinessStateStorage, syncOrderDeltasNow } from '../lib/orderSync'
 import { calculateTax } from '../lib/money'
 import { isTauriDesktop, saveDesktopState } from '../lib/localDb'
 import { realtimeClient } from '../lib/realtime'
@@ -114,9 +115,11 @@ const DEFAULT_CLOUD_SYNC_SETTINGS: CloudSyncSettings = {
   outletId: '',
   accountLogin: '',
   accountSecret: '',
+  autoSyncEnabled: true,
+  syncIntervalHours: 4,
   autoSyncDaily: true,
   syncHour24: 2,
-  cloudMode: 'daily_snapshot',
+  cloudMode: 'delta_v2',
 }
 
 const DEFAULT_APP_UPDATE_SETTINGS: AppUpdateSettings = {
@@ -689,8 +692,8 @@ function getActiveItemCountByOrder(orderItems: OrderItem[]) {
   return itemCountByOrder
 }
 
-function isClosedOrder(order?: Order | null) {
-  return !order || ['paid', 'cancelled', 'void'].includes(order.status)
+export function isClosedOrder(order?: Order | null) {
+  return !order || order.isClosed === true || Boolean(order.closedAt) || ['paid', 'cancelled', 'void'].includes(order.status)
 }
 
 export function isRestorableCurrentOrder(order: Order | null | undefined, tables: RestaurantTable[]) {
@@ -794,8 +797,16 @@ function reconcileSnapshot(snapshot: BillingSnapshot): BillingSnapshot {
   )
   // A completed/cancelled order must not leave a parked cart behind when an
   // imported snapshot still points the table at that closed order.
+  // Legacy table-keyed drafts are migrated only when the table still points to
+  // a real open order. Orphan carts are the source of products reappearing when
+  // a table is opened days later, so they are intentionally discarded.
   const savedCarts = Object.fromEntries(
-    Object.entries(cleanedSavedCarts).filter(([tableId]) => !closedLinkedTableIds.has(tableId))
+    Object.entries(cleanedSavedCarts).filter(([tableId]) => {
+      if (closedLinkedTableIds.has(tableId)) return false
+      const linkedOrderId = snapshot.tables.find((table) => table.id === tableId)?.activeOrderId
+      const linkedOrder = linkedOrderId ? snapshot.orders.find((order) => order.id === linkedOrderId) : undefined
+      return Boolean(linkedOrder && !isClosedOrder(linkedOrder))
+    })
   ) as Record<string, CartItem[]>
   const itemCountByOrder = getActiveItemCountByOrder(snapshot.orderItems)
 
@@ -922,10 +933,16 @@ export const useBillingStore = create<BillingStore>()(
         }
       }),
 
-      updateCloudSyncSettings: (settings) => set((state) => ({
-        cloudSync: { ...state.cloudSync, ...settings },
-        auditLogs: addAudit(state, 'settings.cloudsync.updated', 'settings', 'Cloud sync settings updated'),
-      })),
+      updateCloudSyncSettings: (settings) => set((state) => {
+        const cloudSync = { ...state.cloudSync, ...settings }
+        if (typeof localStorage !== 'undefined') {
+          localStorage.setItem('bhojpatra-cloud-settings-v2', JSON.stringify(cloudSync))
+        }
+        return {
+          cloudSync,
+          auditLogs: addAudit(state, 'settings.cloudsync.updated', 'settings', 'Cloud sync settings updated'),
+        }
+      }),
 
       updateAppUpdateSettings: (settings) => set((state) => ({
         appUpdate: { ...state.appUpdate, ...settings },
@@ -1509,8 +1526,12 @@ export const useBillingStore = create<BillingStore>()(
       startNewOrder: (userId, userName) => {
         const state = get()
         const table = state.selectedTableId ? state.tables.find((candidate) => candidate.id === state.selectedTableId) : undefined
+        const orderUuid = newId('ord')
         const order: Order = {
-          id: newId('ord'),
+          id: orderUuid,
+          orderUuid,
+          version: 1,
+          isClosed: false,
           outletId: state.outlet.id,
           orderNo: orderNo(state.orders),
           businessDate: today(),
@@ -1537,6 +1558,11 @@ export const useBillingStore = create<BillingStore>()(
           tables: order.tableId ? current.tables.map((candidate) => candidate.id === order.tableId ? { ...candidate, status: 'occupied', activeOrderId: order.id } : candidate) : current.tables,
           auditLogs: addAudit(current, 'order.created', 'order', `Created ${order.orderNo}`, order.id),
         }))
+        const afterCreate = get()
+        if (order.tableId && afterCreate.cloudSync.enabled && (typeof navigator === 'undefined' || navigator.onLine)) {
+          // Claim the table immediately. Offline mutations retain their batch id.
+          void syncOrderDeltasNow(afterCreate.exportSnapshot(), afterCreate.cloudSync).catch(() => undefined)
+        }
       },
 
       loadOrder: (orderId) => {
@@ -1556,8 +1582,12 @@ export const useBillingStore = create<BillingStore>()(
           let workingState = state
           if (!workingState.currentOrder) {
             const table = workingState.selectedTableId ? workingState.tables.find((candidate) => candidate.id === workingState.selectedTableId) : undefined
+            const orderUuid = newId('ord')
             const order: Order = {
-              id: newId('ord'),
+              id: orderUuid,
+              orderUuid,
+              version: 1,
+              isClosed: false,
               outletId: workingState.outlet.id,
               orderNo: orderNo(workingState.orders),
               businessDate: today(),
@@ -1815,8 +1845,12 @@ export const useBillingStore = create<BillingStore>()(
         if (state.cart.length === 0) return null
         const table = state.selectedTableId ? state.tables.find((candidate) => candidate.id === state.selectedTableId) : undefined
         const totals = state.getCartTotal()
+        const pendingOrderUuid = newId('ord')
         const baseOrder = state.currentOrder ?? {
-          id: newId('ord'),
+          id: pendingOrderUuid,
+          orderUuid: pendingOrderUuid,
+          version: 1,
+          isClosed: false,
           outletId: state.outlet.id,
           orderNo: orderNo(state.orders),
           businessDate: today(),
@@ -1973,6 +2007,7 @@ export const useBillingStore = create<BillingStore>()(
             paidPaise: cappedPaidPaise,
             paymentStatus: newPaymentStatus,
             status: newOrderStatus,
+            isClosed: targetOrder.isClosed || newPaymentStatus === 'paid',
             closedAt: newPaymentStatus === 'paid' ? (targetOrder.closedAt ?? now()) : targetOrder.closedAt,
             updatedAt: now()
           }
@@ -2007,9 +2042,13 @@ export const useBillingStore = create<BillingStore>()(
           isDirectCheckout = true
           const table = state.selectedTableId ? state.tables.find((candidate) => candidate.id === state.selectedTableId) : undefined
           const totals = state.getCartTotal()
+          const orderUuid = newId('ord')
           
           targetOrder = {
-            id: newId('ord'),
+            id: orderUuid,
+            orderUuid,
+            version: 1,
+            isClosed: false,
             outletId: state.outlet.id,
             orderNo: orderNo(state.orders),
             businessDate: today(),
@@ -2110,6 +2149,7 @@ export const useBillingStore = create<BillingStore>()(
             paidPaise: cappedCollectedPaise,
             paymentStatus,
             status: paymentStatus === 'paid' ? 'paid' : 'billed',
+            isClosed: true,
             closedAt: now(),
             updatedAt: now(),
           }
@@ -2167,18 +2207,14 @@ export const useBillingStore = create<BillingStore>()(
         }
         const cloud = afterSettle.cloudSync
         if (cloud.enabled && cloud.serverUrl && cloud.outletId && cloud.accountLogin && cloud.accountSecret) {
-          void saveCloudSnapshot(
-            cloud.outletId,
-            cloud.tenantId || afterSettle.outlet.tenantId,
-            completedSnapshot,
-            realtimeClient.getClientId(),
-            cloud.serverUrl,
-            { accountLogin: cloud.accountLogin, accountSecret: cloud.accountSecret },
-          )
+          void syncOrderDeltasNow(completedSnapshot, cloud)
             .then((result) => {
+              if (result.changed) afterSettle.importSnapshot(result.snapshot)
+              const syncedAt = new Date().toISOString()
               get().updateCloudSyncSettings({
-                lastSyncedAt: result.updatedAt,
-                lastCloudUploadedAt: result.updatedAt,
+                lastSyncedAt: syncedAt,
+                lastSuccessfulSyncAt: syncedAt,
+                lastCloudUploadedAt: syncedAt,
               })
             })
             .catch((error) => {
@@ -2228,6 +2264,8 @@ export const useBillingStore = create<BillingStore>()(
         const restoredOrder = targetOrder ? {
           ...targetOrder,
           status: 'cancelled' as const,
+          isClosed: true,
+          closedAt: targetOrder.closedAt ?? cancelledAt,
           paymentStatus: targetOrder.paymentStatus === 'paid' ? 'unpaid' as const : targetOrder.paymentStatus,
           paidPaise: targetOrder.paymentStatus === 'paid' ? 0 : targetOrder.paidPaise,
           cancellationReason: reason,
@@ -2474,6 +2512,8 @@ export const useBillingStore = create<BillingStore>()(
           const updatedOrder = {
             ...order,
             status: hasRemainingItems ? order.status : 'cancelled' as const,
+            isClosed: hasRemainingItems ? order.isClosed : true,
+            closedAt: hasRemainingItems ? order.closedAt : (order.closedAt ?? cancelledAt),
             subtotalPaise,
             discountPaise,
             taxPaise,
@@ -2543,6 +2583,8 @@ export const useBillingStore = create<BillingStore>()(
             orders: current.orders.map((candidate) => candidate.id === orderId ? {
               ...candidate,
               status: 'cancelled' as const,
+              isClosed: true,
+              closedAt: candidate.closedAt ?? cancelledAt,
               subtotalPaise: 0,
               discountPaise: 0,
               taxPaise: 0,
@@ -2921,6 +2963,7 @@ export const useBillingStore = create<BillingStore>()(
     {
       name: 'bhojpatra-restaurant-data-v2',
       version: 2,
+      storage: createJSONStorage(() => dexieBusinessStateStorage),
       partialize: (state) => ({
         outlet: state.outlet,
         printSettings: state.printSettings,
@@ -2978,6 +3021,13 @@ export const useBillingStore = create<BillingStore>()(
           ...currentState,
           ...persisted,
           ...normalized,
+          cloudSync: {
+            ...DEFAULT_CLOUD_SYNC_SETTINGS,
+            ...(persisted.cloudSync ?? {}),
+            autoSyncEnabled: persisted.cloudSync?.autoSyncEnabled ?? persisted.cloudSync?.autoSyncDaily ?? true,
+            syncIntervalHours: persisted.cloudSync?.syncIntervalHours ?? 4,
+            cloudMode: 'delta_v2',
+          },
           printSettings: mergeDevicePrintSettings(normalized.printSettings, persisted.printSettings),
           purchaseEntries: normalized.purchaseEntries ?? [],
           savedCarts: restoredSession.savedCarts,

@@ -24,9 +24,14 @@ export type CloudSyncSettings = {
   outletId: string
   accountLogin: string
   accountSecret: string
-  autoSyncDaily: boolean
-  syncHour24: number
-  cloudMode?: 'daily_snapshot'
+  autoSyncEnabled: boolean
+  syncIntervalHours: number
+  lastSuccessfulSyncAt?: string
+  nextSyncAt?: string
+  /** Legacy settings retained only for one-way settings migration. */
+  autoSyncDaily?: boolean
+  syncHour24?: number
+  cloudMode?: 'daily_snapshot' | 'delta_v2'
   lastSyncedAt?: string
   lastCloudUploadedAt?: string
   lastCloudDownloadedAt?: string
@@ -64,6 +69,8 @@ export type CloudAuth = {
 function getStoredCloudSettings(): CloudSyncSettings | null {
   if (typeof window === 'undefined') return null
   try {
+    const preferences = window.localStorage.getItem('bhojpatra-cloud-settings-v2')
+    if (preferences) return JSON.parse(preferences) as CloudSyncSettings
     const raw = window.localStorage.getItem('bhojpatra-restaurant-data-v2')
     if (!raw) return null
     const parsed = JSON.parse(raw) as { state?: { cloudSync?: CloudSyncSettings } }
