@@ -29,6 +29,20 @@ if (isTauriDesktop()) {
   })()
 }
 
+// A newly activated PWA worker must take control immediately so an old cached
+// app shell cannot keep using a retired cloud-sync protocol after deployment.
+if (!isTauriDesktop() && 'serviceWorker' in navigator) {
+  window.addEventListener('load', () => {
+    let reloadingForUpdate = false
+    navigator.serviceWorker.addEventListener('controllerchange', () => {
+      if (reloadingForUpdate) return
+      reloadingForUpdate = true
+      window.location.reload()
+    })
+    void navigator.serviceWorker.getRegistration('/').then((registration) => registration?.update())
+  })
+}
+
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>
     <BrowserRouter>
