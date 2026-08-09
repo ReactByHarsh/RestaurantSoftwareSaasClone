@@ -372,7 +372,7 @@ $('loginPass').addEventListener('keydown', function(e) {
 });
 
 $('btnLogout').addEventListener('click', async function() {
-  await api('/api/v1/auth/logout', { method: 'POST' });
+  await api('/api/v1/admin/logout', { method: 'POST' });
   showLogin(true);
 });
 
@@ -409,7 +409,11 @@ $('btnSubmitCustomer').addEventListener('click', async function() {
 
   var res = await api(path, { method: method, body: JSON.stringify(body) });
   var d = await res.json().catch(function() { return {}; });
-  if (!res.ok) { msg($('formMsg'), d.error || 'Failed', 'err'); return; }
+  if (!res.ok) {
+    if (res.status === 401) showLogin(true);
+    msg($('formMsg'), d.error || 'Failed', 'err');
+    return;
+  }
 
   if (!editId && d.setupJson) {
     $('credsBox').style.display = 'block';

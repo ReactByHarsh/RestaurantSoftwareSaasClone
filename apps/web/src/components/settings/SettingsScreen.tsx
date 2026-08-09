@@ -254,8 +254,8 @@ export default function SettingsScreen() {
     try {
       if (formSettings.accountLogin && formSettings.accountSecret) {
         const session = await runCloudLogin(serverUrl, formSettings.accountLogin, formSettings.accountSecret)
-        tenantId = tenantId || session.user.tenantId
-        outletId = outletId || session.outlets[0]?.id || `out_${session.user.tenantId}`
+        tenantId = session.user.tenantId
+        outletId = session.outlets[0]?.id || `out_${session.user.tenantId}`
       }
       tenantId = tenantId || outlet.tenantId
       outletId = outletId || outlet.id
@@ -593,7 +593,7 @@ export default function SettingsScreen() {
               <Cloud size={18} className="text-primary" strokeWidth={2.5} />
               <h2 className="text-sm font-black text-slate-800 tracking-tight">Cloud Sync</h2>
             </div>
-            <form ref={cloudSyncFormRef} onSubmit={handleCloudSyncSave} className="p-5 space-y-4">
+            <form key={`${cloudSync.tenantId}:${cloudSync.outletId}`} ref={cloudSyncFormRef} onSubmit={handleCloudSyncSave} className="p-5 space-y-4">
               <div className="rounded-2xl border-2 border-sky-100 bg-sky-50/60 p-4">
                 <div className="flex items-start gap-3">
                   <div className="mt-0.5 rounded-xl bg-white p-2 text-sky-600 shadow-sm">

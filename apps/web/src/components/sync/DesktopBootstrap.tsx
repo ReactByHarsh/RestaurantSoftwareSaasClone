@@ -83,8 +83,8 @@ export default function DesktopBootstrap({ children }: { children: ReactNode }) 
         let outletId = cloud.outletId.trim()
         if (cloud.accountLogin && cloud.accountSecret) {
           const session = await runCloudLogin(cloud.serverUrl, cloud.accountLogin, cloud.accountSecret)
-          tenantId = tenantId || session.user.tenantId
-          outletId = outletId || session.outlets[0]?.id || `out_${session.user.tenantId}`
+          tenantId = session.user.tenantId
+          outletId = session.outlets[0]?.id || `out_${session.user.tenantId}`
         }
         tenantId = tenantId || billing.outlet.tenantId
         outletId = outletId || billing.outlet.id

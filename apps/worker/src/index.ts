@@ -1627,6 +1627,7 @@ function normalizeLogin(value: string) {
 
 const HASH_PREFIX = 'sha256$'
 const SESSION_COOKIE = 'rf_session'
+const ADMIN_SESSION_COOKIE = 'rf_admin_session'
 const SESSION_MAX_AGE = 60 * 60 * 12
 
 function base64UrlEncode(value: string) {
@@ -1805,12 +1806,27 @@ async function getAuthenticatedUser(c: { env: Bindings; req: any }) {
 }
 
 async function getPlatformAdmin(c: { env: Bindings; req: any }) {
-  const auth = await getAuthenticatedUser(c)
-  if ('response' in auth) return auth
-  if (auth.user.tenantId !== 'platform' || auth.user.role !== 'admin') {
-    return { response: Response.json({ error: 'Forbidden' }, { status: 403 }) }
+  if (!c.env.DB) return { response: Response.json({ error: 'Database binding is not configured' }, { status: 500 }) }
+
+  // Platform administration has its own cookie so a restaurant login from the
+  // Pages app cannot replace an open Cloud Admin session on the Worker origin.
+  // Accept the old shared cookie only when it still identifies a platform admin
+  // so existing admin sessions survive this deployment.
+  const adminToken = getCookie(c as any, ADMIN_SESSION_COOKIE)
+  const legacyToken = adminToken ? undefined : getCookie(c as any, SESSION_COOKIE)
+  const token = adminToken || legacyToken
+  if (token) {
+    const secret = c.env.SESSION_SECRET || 'dev-fallback-secret-change-in-production'
+    const userId = await verifySessionToken(token, secret)
+    const user = userId ? await findUserById(c.env.DB, userId) : undefined
+    if (user?.status === 'active' && user.tenantId === 'platform' && user.role === 'admin') {
+      const issue = getUserAccessIssue(user)
+      if (!issue) return { user }
+    }
+    if (adminToken) deleteCookie(c as any, ADMIN_SESSION_COOKIE, { path: '/' })
   }
-  return auth
+
+  return { response: Response.json({ error: 'Admin session expired. Please sign in again.' }, { status: 401 }) }
 }
 
 async function getTenantStaffAdmin(c: { env: Bindings; req: any }) {
@@ -1918,7 +1934,7 @@ app.post('/api/v1/admin/login', async (c) => {
   const secret = c.env.SESSION_SECRET || 'dev-fallback-secret-change-in-production'
   const token = await createSessionToken(user.id, secret)
 
-  setCookie(c, SESSION_COOKIE, token, {
+  setCookie(c, ADMIN_SESSION_COOKIE, token, {
     httpOnly: true,
     sameSite: 'None',
     secure: new URL(c.req.url).protocol === 'https:',
@@ -1927,6 +1943,11 @@ app.post('/api/v1/admin/login', async (c) => {
   })
 
   return c.json({ user: publicUser(user), outlets: [getDynamicOutlet(user)] })
+})
+
+app.post('/api/v1/admin/logout', (c) => {
+  deleteCookie(c, ADMIN_SESSION_COOKIE, { path: '/' })
+  return c.json({ ok: true })
 })
 
 app.get('/api/v1/me', async (c) => {

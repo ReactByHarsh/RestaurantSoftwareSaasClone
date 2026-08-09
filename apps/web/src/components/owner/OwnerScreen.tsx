@@ -194,7 +194,7 @@ export default function OwnerScreen() {
     try {
       const session = await runCloudLogin(cloudSync.serverUrl, cloudSync.accountLogin, cloudSync.accountSecret)
       const tenantId = session.user.tenantId
-      const outletId = cloudSync.outletId || session.outlets[0]?.id || `out_${tenantId}`
+      const outletId = session.outlets[0]?.id || `out_${tenantId}`
       updateCloudSyncSettings({
         enabled: true,
         tenantId,
