@@ -1,4 +1,4 @@
-import { useMemo } from 'react'
+import { useMemo, useState } from 'react'
 import { useBillingStore } from '../../store/billingStore'
 import { Printer, Download } from 'lucide-react'
 
@@ -9,6 +9,8 @@ interface Props {
 
 export default function BusinessSummaryReport({ fromDate, toDate }: Props) {
   const { orders, orderItems, kots, menuItems, menuCategories, tables, floors, payments } = useBillingStore()
+  const [showCategorySales, setShowCategorySales] = useState(true)
+  const [showSubcategorySales, setShowSubcategorySales] = useState(true)
 
   const reportData = useMemo(() => {
     // 1. Filter orders by date range
@@ -38,13 +40,34 @@ export default function BusinessSummaryReport({ fromDate, toDate }: Props) {
     const discountOnBills = filteredOrders.reduce((sum, order) => sum + order.discountPaise, 0)
     const totalDiscount = discountOnItems + discountOnBills
 
-    // Category wise sales
+    // Category and subcategory wise sales. Menu items can be assigned to a
+    // subcategory, so category sales must always roll up to the top-level
+    // parent category instead of mixing parent and child names together.
     const categorySales: Record<string, number> = {}
+    const subcategorySales: Record<string, number> = {}
+    const categoryById = new Map(menuCategories.map(category => [category.id, category]))
+
     filteredItems.forEach(item => {
       const mi = menuItems.find(m => m.id === item.menuItemId)
-      const cat = mi ? menuCategories.find(c => c.id === mi.categoryId)?.name : 'Unknown'
-      const key = cat || 'Unknown'
-      categorySales[key] = (categorySales[key] || 0) + (item.unitPricePaise * item.quantity)
+      const assignedCategory = mi ? categoryById.get(mi.categoryId) : undefined
+      const amount = item.unitPricePaise * item.quantity
+
+      let rootCategory = assignedCategory
+      const visited = new Set<string>()
+      while (rootCategory?.parentId && !visited.has(rootCategory.id)) {
+        visited.add(rootCategory.id)
+        const parentCategory = categoryById.get(rootCategory.parentId)
+        if (!parentCategory) break
+        rootCategory = parentCategory
+      }
+
+      const categoryName = rootCategory?.name || 'Unknown'
+      categorySales[categoryName] = (categorySales[categoryName] || 0) + amount
+
+      if (assignedCategory?.parentId) {
+        const subcategoryName = assignedCategory.name || 'Unknown'
+        subcategorySales[subcategoryName] = (subcategorySales[subcategoryName] || 0) + amount
+      }
     })
 
     // Kitchen wise sales
@@ -138,6 +161,7 @@ export default function BusinessSummaryReport({ fromDate, toDate }: Props) {
       sales: { totalBills, itemsSold, netSalesAmount },
       discount: { billsWithDiscount, discountOnItems, discountOnBills, totalDiscount },
       categorySales,
+      subcategorySales,
       kitchenSales,
       sectionSales,
       counterTypeSales,
@@ -179,11 +203,21 @@ export default function BusinessSummaryReport({ fromDate, toDate }: Props) {
       <div className="p-4 border-b border-slate-100 bg-slate-50 flex flex-wrap items-center justify-between gap-4">
         <div className="flex gap-4">
           <label className="flex items-center gap-2 cursor-pointer">
-            <input type="checkbox" defaultChecked className="rounded text-primary focus:ring-primary" />
+            <input
+              type="checkbox"
+              checked={showCategorySales}
+              onChange={(event) => setShowCategorySales(event.target.checked)}
+              className="rounded text-primary focus:ring-primary"
+            />
             <span className="text-xs font-bold text-slate-600">Category wise Sales</span>
           </label>
           <label className="flex items-center gap-2 cursor-pointer">
-            <input type="checkbox" className="rounded text-primary focus:ring-primary" />
+            <input
+              type="checkbox"
+              checked={showSubcategorySales}
+              onChange={(event) => setShowSubcategorySales(event.target.checked)}
+              className="rounded text-primary focus:ring-primary"
+            />
             <span className="text-xs font-bold text-slate-600">Subcat. wise Sales</span>
           </label>
           <label className="flex items-center gap-2 cursor-pointer">
@@ -236,7 +270,8 @@ export default function BusinessSummaryReport({ fromDate, toDate }: Props) {
               'Total Discount (A+B)': reportData.discount.totalDiscount,
             })}
 
-            {renderSection('Category wise sales', reportData.categorySales)}
+            {showCategorySales && renderSection('Category wise sales', reportData.categorySales)}
+            {showSubcategorySales && renderSection('Subcategory wise sales', reportData.subcategorySales)}
             {renderSection('Kitchen wise sales', reportData.kitchenSales)}
             {renderSection('Section wise sales', reportData.sectionSales)}
             {renderSection('Counter type wise sales', reportData.counterTypeSales)}
