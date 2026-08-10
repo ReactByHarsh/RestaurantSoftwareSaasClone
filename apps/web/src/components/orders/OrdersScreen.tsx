@@ -1,6 +1,6 @@
-import { useMemo, useState } from 'react'
+import { Fragment, useMemo, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { Edit3, Printer, RefreshCw, Undo } from 'lucide-react'
+import { ChevronDown, ChevronUp, Edit3, Printer, RefreshCw, Undo } from 'lucide-react'
 import { clsx } from 'clsx'
 import { useBillingStore } from '../../store/billingStore'
 import { formatPaise } from '../../lib/money'
@@ -19,8 +19,32 @@ interface Props {
 
 const CREDIT_PAYMENT_METHODS = new Set(['account', 'due'])
 
+function formatOrderDateTime(value: string) {
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return '—'
+  return date.toLocaleString('en-IN', {
+    day: '2-digit',
+    month: 'short',
+    year: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: true,
+  })
+}
+
+function formatOrderTime(value: string) {
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return '—'
+  return date.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', hour12: true })
+}
+
+function formatQuantity(quantity: number) {
+  return Number.isInteger(quantity) ? String(quantity) : quantity.toFixed(2).replace(/0+$/, '').replace(/\.$/, '')
+}
+
 export default function OrdersScreen({ onBack }: Props = {}) {
-  const { orders, orderItems, payments, cancelOrder, cancelPayments, updateOrderGlobalDiscount, printReceipt } = useBillingStore()
+  const { orders, orderItems, payments, tables, cancelOrder, cancelPayments, updateOrderGlobalDiscount, printReceipt } = useBillingStore()
   const { addToast } = useUIStore()
   const navigate = useNavigate()
 
@@ -35,6 +59,7 @@ export default function OrdersScreen({ onBack }: Props = {}) {
   })
   
   const [selectedOrderId, setSelectedOrderId] = useState<string | null>(null)
+  const [expandedOrderId, setExpandedOrderId] = useState<string | null>(null)
   
   const [cancelOrderId, setCancelOrderId] = useState<string | null>(null)
   const [returnOrderId, setReturnOrderId] = useState<string | null>(null)
@@ -95,6 +120,11 @@ export default function OrdersScreen({ onBack }: Props = {}) {
     })
     return index
   }, [payments])
+
+  const tableNameById = useMemo(() => new Map(tables.map(table => [table.id, table.name])), [tables])
+
+  const getOrderTableName = (order: typeof orders[number]) =>
+    order.tableName || (order.tableId ? tableNameById.get(order.tableId) : undefined) || (order.type === 'dine_in' ? 'Table not assigned' : '—')
 
   const getCollectedPaidPaise = (orderId: string) => {
     const orderPayments = paymentsByOrderId.get(orderId) || []
@@ -170,6 +200,7 @@ export default function OrdersScreen({ onBack }: Props = {}) {
         <table className="w-full text-left border border-slate-200 bg-white whitespace-nowrap">
           <thead className="bg-[#f1f5f9] border-b border-slate-300 sticky top-0 z-10">
             <tr>
+              <th className="w-10 px-2 py-2" aria-label="Expand order" />
               <th className="px-3 py-2 text-xs font-bold text-slate-600 uppercase">Receipt No</th>
               <th className="px-3 py-2 text-xs font-bold text-slate-600 uppercase">Counter</th>
               <th className="px-3 py-2 text-xs font-bold text-slate-600 uppercase">Customer</th>
@@ -186,10 +217,11 @@ export default function OrdersScreen({ onBack }: Props = {}) {
           <tbody>
             {filtered.length === 0 ? (
               <tr>
-                <td colSpan={11} className="px-4 py-8 text-center text-slate-500 font-bold">No orders found for the selected dates.</td>
+                <td colSpan={12} className="px-4 py-8 text-center text-slate-500 font-bold">No orders found for the selected dates.</td>
               </tr>
             ) : filtered.map(order => {
               const isSelected = selectedOrderId === order.id
+              const isExpanded = expandedOrderId === order.id
               const items = itemsByOrderId.get(order.id) || []
               const orderPayments = paymentsByOrderId.get(order.id) || []
               const collectedPaidPaise = getCollectedPaidPaise(order.id)
@@ -203,35 +235,113 @@ export default function OrdersScreen({ onBack }: Props = {}) {
                 : '-'
 
               return (
-                <tr 
-                  key={order.id} 
-                  onClick={() => setSelectedOrderId(isSelected ? null : order.id)}
-                  className={clsx(
-                    "border-b border-slate-200 cursor-pointer transition-colors",
-                    isSelected ? "bg-blue-100 shadow-[inset_4px_0_0_#3b82f6]" : "hover:bg-slate-50"
+                <Fragment key={order.id}>
+                  <tr
+                    onClick={() => setSelectedOrderId(isSelected ? null : order.id)}
+                    className={clsx(
+                      "border-b border-slate-200 cursor-pointer transition-colors",
+                      isSelected ? "bg-blue-100 shadow-[inset_4px_0_0_#3b82f6]" : "hover:bg-slate-50"
+                    )}
+                  >
+                    <td className="px-2 py-1 text-center">
+                      <button
+                        type="button"
+                        onClick={(event) => {
+                          event.stopPropagation()
+                          setExpandedOrderId(isExpanded ? null : order.id)
+                        }}
+                        className="inline-flex h-7 w-7 items-center justify-center rounded text-slate-500 hover:bg-slate-200 hover:text-slate-800 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                        aria-label={`${isExpanded ? 'Collapse' : 'Expand'} ${order.orderNo}`}
+                        aria-expanded={isExpanded}
+                        aria-controls={`order-details-${order.id}`}
+                      >
+                        {isExpanded ? <ChevronUp size={17} /> : <ChevronDown size={17} />}
+                      </button>
+                    </td>
+                    <td className="px-3 py-1 text-sm font-bold text-slate-800">{order.orderNo}</td>
+                    <td className="px-3 py-1 text-sm font-bold text-slate-600">{order.type.replace('_', ' ').toUpperCase()}</td>
+                    <td className="px-3 py-1 text-sm font-bold text-slate-800">{order.customerName || 'Walk-in'}</td>
+                    <td className="px-3 py-1 text-sm text-slate-600">{order.businessDate}</td>
+                    <td className="px-3 py-1 text-sm text-slate-600">{formatOrderTime(order.createdAt)}</td>
+                    <td className="px-3 py-1 text-sm font-black text-center">{items.length}</td>
+                    <td className="px-3 py-1 text-sm text-slate-600 text-right">{formatPaise(order.discountPaise)}</td>
+                    <td className="px-3 py-1 text-sm font-black text-slate-800 text-right">{formatPaise(order.totalPaise)}</td>
+                    <td className="px-3 py-1 text-sm font-black text-rose-600 text-right">{pendingAmt > 0 ? formatPaise(pendingAmt) : '0.00'}</td>
+                    <td className="px-3 py-1 text-xs font-bold text-slate-600 max-w-[150px] truncate" title={pymtDetails}>{pymtDetails}</td>
+                    <td className="px-3 py-1">
+                      <span className={clsx(
+                        "px-2 py-0.5 rounded text-[10px] font-black uppercase tracking-wider",
+                        order.status === 'cancelled' ? 'bg-red-100 text-red-700' :
+                        derivedPaymentStatus === 'paid' ? 'bg-emerald-100 text-emerald-700' :
+                        'bg-orange-100 text-orange-700'
+                      )}>
+                        {order.status === 'cancelled' ? 'Cancelled' : derivedPaymentStatus}
+                      </span>
+                    </td>
+                  </tr>
+                  {isExpanded && (
+                    <tr id={`order-details-${order.id}`} className="border-b border-slate-200 bg-slate-50">
+                      <td colSpan={12} className="px-5 py-4 whitespace-normal">
+                        <div className="rounded-lg border border-slate-200 bg-white p-4 shadow-sm">
+                          <div className="grid gap-3 border-b border-slate-200 pb-4 sm:grid-cols-2 lg:grid-cols-4">
+                            <div>
+                              <div className="text-[10px] font-bold uppercase tracking-wider text-slate-500">Table</div>
+                              <div className="mt-1 text-sm font-black text-slate-800">{getOrderTableName(order)}</div>
+                            </div>
+                            <div>
+                              <div className="text-[10px] font-bold uppercase tracking-wider text-slate-500">Business date</div>
+                              <div className="mt-1 text-sm font-bold text-slate-700">{order.businessDate || '—'}</div>
+                            </div>
+                            <div>
+                              <div className="text-[10px] font-bold uppercase tracking-wider text-slate-500">Order date &amp; time</div>
+                              <div className="mt-1 text-sm font-bold text-slate-700">{formatOrderDateTime(order.createdAt)}</div>
+                            </div>
+                            <div>
+                              <div className="text-[10px] font-bold uppercase tracking-wider text-slate-500">Customer</div>
+                              <div className="mt-1 text-sm font-bold text-slate-700">{order.customerName || 'Walk-in'}</div>
+                            </div>
+                          </div>
+
+                          <div className="mt-4">
+                            <div className="mb-2 flex items-center justify-between gap-3">
+                              <h2 className="text-sm font-black uppercase tracking-wide text-slate-700">Ordered items</h2>
+                              <span className="text-xs font-bold text-slate-500">{items.length} {items.length === 1 ? 'item' : 'items'}</span>
+                            </div>
+                            {items.length > 0 ? (
+                              <div className="overflow-hidden rounded border border-slate-200">
+                                <div className="grid grid-cols-[minmax(0,1fr)_4rem_7rem_7rem] gap-3 bg-slate-100 px-3 py-2 text-[10px] font-bold uppercase tracking-wider text-slate-500">
+                                  <span>Item</span>
+                                  <span className="text-center">Qty</span>
+                                  <span className="text-right">Rate</span>
+                                  <span className="text-right">Amount</span>
+                                </div>
+                                {items.map(item => (
+                                  <div key={item.id} className="grid grid-cols-[minmax(0,1fr)_4rem_7rem_7rem] items-start gap-3 border-t border-slate-200 px-3 py-2 text-sm">
+                                    <div className="min-w-0">
+                                      <div className="font-bold text-slate-800">{item.nameSnapshot}</div>
+                                      {(item.modifiers?.length || item.note) && (
+                                        <div className="mt-0.5 text-xs text-slate-500">
+                                          {item.modifiers?.length ? item.modifiers.join(' · ') : null}
+                                          {item.modifiers?.length && item.note ? ' · ' : null}
+                                          {item.note ? item.note : null}
+                                        </div>
+                                      )}
+                                    </div>
+                                    <span className="text-center font-bold text-slate-700">{formatQuantity(item.quantity)}</span>
+                                    <span className="text-right text-slate-600">{formatPaise(item.unitPricePaise)}</span>
+                                    <span className="text-right font-black text-slate-800">{formatPaise(item.totalPaise)}</span>
+                                  </div>
+                                ))}
+                              </div>
+                            ) : (
+                              <div className="rounded border border-dashed border-slate-300 px-3 py-4 text-center text-sm font-bold text-slate-500">No active items on this order.</div>
+                            )}
+                          </div>
+                        </div>
+                      </td>
+                    </tr>
                   )}
-                >
-                  <td className="px-3 py-1 text-sm font-bold text-slate-800">{order.orderNo}</td>
-                  <td className="px-3 py-1 text-sm font-bold text-slate-600">{order.type.replace('_', ' ').toUpperCase()}</td>
-                  <td className="px-3 py-1 text-sm font-bold text-slate-800">{order.customerName || 'Walk-in'}</td>
-                  <td className="px-3 py-1 text-sm text-slate-600">{order.businessDate}</td>
-                  <td className="px-3 py-1 text-sm text-slate-600">{new Date(order.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</td>
-                  <td className="px-3 py-1 text-sm font-black text-center">{items.length}</td>
-                  <td className="px-3 py-1 text-sm text-slate-600 text-right">{formatPaise(order.discountPaise)}</td>
-                  <td className="px-3 py-1 text-sm font-black text-slate-800 text-right">{formatPaise(order.totalPaise)}</td>
-                  <td className="px-3 py-1 text-sm font-black text-rose-600 text-right">{pendingAmt > 0 ? formatPaise(pendingAmt) : '0.00'}</td>
-                  <td className="px-3 py-1 text-xs font-bold text-slate-600 max-w-[150px] truncate" title={pymtDetails}>{pymtDetails}</td>
-                  <td className="px-3 py-1">
-                    <span className={clsx(
-                      "px-2 py-0.5 rounded text-[10px] font-black uppercase tracking-wider",
-                      order.status === 'cancelled' ? 'bg-red-100 text-red-700' :
-                      derivedPaymentStatus === 'paid' ? 'bg-emerald-100 text-emerald-700' :
-                      'bg-orange-100 text-orange-700'
-                    )}>
-                      {order.status === 'cancelled' ? 'Cancelled' : derivedPaymentStatus}
-                    </span>
-                  </td>
-                </tr>
+                </Fragment>
               )
             })}
           </tbody>
