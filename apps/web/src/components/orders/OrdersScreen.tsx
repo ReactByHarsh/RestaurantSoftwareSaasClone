@@ -198,7 +198,7 @@ export default function OrdersScreen({ onBack }: Props = {}) {
       {/* DATA GRID */}
       <div className="flex-1 overflow-auto bg-slate-50 p-4">
         <table className="w-full text-left border border-slate-200 bg-white whitespace-nowrap">
-          <thead className="bg-[#f1f5f9] border-b border-slate-300 sticky top-0 z-10">
+          <thead className="bg-[#f1f5f9] border-b border-slate-300 sticky top-[-1rem] z-20 shadow-[0_1px_0_#cbd5e1]">
             <tr>
               <th className="w-10 px-2 py-2" aria-label="Expand order" />
               <th className="px-3 py-2 text-xs font-bold text-slate-600 uppercase">Receipt No</th>
