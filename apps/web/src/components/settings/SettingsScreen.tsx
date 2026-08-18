@@ -7,7 +7,8 @@ import { useBillingStore } from '../../store/billingStore'
 import { useAuthStore } from '../../store/authStore'
 import { useStaffStore } from '../../store/staffStore'
 import { checkForAppUpdate, downloadAndInstallUpdate } from '../../lib/appUpdater'
-import { runCloudLogin, syncCloudStaff, type BillingSnapshot, type CloudSyncSettings } from '../../lib/cloudSync'
+import { runCloudLogin, syncCloudStaff, type CloudSyncSettings } from '../../lib/cloudSync'
+import { extractBillingSnapshot } from '../../lib/backup'
 import { getOrderSyncHealth, syncOrderDeltasNow } from '../../lib/orderSync'
 import { getLanServerStatus, isTauriDesktop, type LanServerStatus } from '../../lib/localDb'
 import { getLanBridgeStatus, type LanBridgeStatus } from '../../lib/lanBridge'
@@ -153,26 +154,6 @@ export default function SettingsScreen() {
     addToast('success', 'Local backup exported successfully', 'Backup Export')
   }
 
-  const isBillingSnapshot = (value: unknown): value is BillingSnapshot => {
-    if (!value || typeof value !== 'object') return false
-    const snapshot = value as Partial<BillingSnapshot>
-    return Boolean(
-      snapshot.outlet &&
-      snapshot.printSettings &&
-      Array.isArray(snapshot.menuCategories) &&
-      Array.isArray(snapshot.menuItems) &&
-      Array.isArray(snapshot.floors) &&
-      Array.isArray(snapshot.tables) &&
-      Array.isArray(snapshot.stations) &&
-      Array.isArray(snapshot.inventoryItems) &&
-      Array.isArray(snapshot.orders) &&
-      Array.isArray(snapshot.orderItems) &&
-      Array.isArray(snapshot.kots) &&
-      Array.isArray(snapshot.payments) &&
-      Array.isArray(snapshot.auditLogs)
-    )
-  }
-
   const handleBackupImport = async (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0]
     event.target.value = ''
@@ -181,10 +162,8 @@ export default function SettingsScreen() {
     try {
       const text = await file.text()
       const parsed = JSON.parse(text) as unknown
-      const snapshot = parsed && typeof parsed === 'object' && 'snapshot' in parsed
-        ? (parsed as { snapshot?: unknown }).snapshot
-        : parsed
-      if (!isBillingSnapshot(snapshot)) {
+      const snapshot = extractBillingSnapshot(parsed)
+      if (!snapshot) {
         throw new Error('Invalid BhojPatra backup file')
       }
       importSnapshot(snapshot, false)

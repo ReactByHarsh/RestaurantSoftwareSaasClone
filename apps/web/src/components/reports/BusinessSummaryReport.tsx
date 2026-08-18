@@ -1,6 +1,9 @@
 import { useMemo, useState } from 'react'
 import { useBillingStore } from '../../store/billingStore'
 import { Printer, Download } from 'lucide-react'
+import { useUIStore } from '../../store/uiStore'
+import { describePrinterError, sendPrintJob } from '../../lib/printer'
+import { buildBusinessSummaryPrintText } from '../../lib/businessSummaryPrint'
 
 interface Props {
   fromDate: string
@@ -8,9 +11,11 @@ interface Props {
 }
 
 export default function BusinessSummaryReport({ fromDate, toDate }: Props) {
-  const { orders, orderItems, kots, menuItems, menuCategories, tables, floors, payments } = useBillingStore()
+  const { outlet, printSettings, orders, orderItems, kots, menuItems, menuCategories, tables, floors, payments } = useBillingStore()
+  const { addToast } = useUIStore()
   const [showCategorySales, setShowCategorySales] = useState(true)
   const [showSubcategorySales, setShowSubcategorySales] = useState(true)
+  const [printBusy, setPrintBusy] = useState(false)
 
   const reportData = useMemo(() => {
     // 1. Filter orders by date range
@@ -173,6 +178,31 @@ export default function BusinessSummaryReport({ fromDate, toDate }: Props) {
     }
   }, [orders, orderItems, kots, menuItems, menuCategories, tables, floors, payments, fromDate, toDate])
 
+  const handlePrint = async () => {
+    if (printBusy) return
+    setPrintBusy(true)
+    try {
+      const result = await sendPrintJob(printSettings, {
+        jobName: `BhojPatra Business Summary ${fromDate} to ${toDate}`,
+        text: buildBusinessSummaryPrintText(reportData, fromDate, toDate, {
+          name: outlet.name,
+          businessName: printSettings.businessName || outlet.name,
+          address: outlet.address,
+          phone: outlet.phone,
+          gstin: outlet.gstin,
+          receiptWidth: printSettings.receiptWidth,
+          showGstin: printSettings.showGstin,
+        }),
+        logoDataUrl: outlet.logoDataUrl,
+      })
+      addToast('success', result === 'direct' ? 'Business summary sent directly to the printer' : 'Business summary opened in the system print dialog', 'Business Summary Print')
+    } catch (error) {
+      addToast('error', describePrinterError(error), 'Business Summary Print')
+    } finally {
+      setPrintBusy(false)
+    }
+  }
+
   const renderSection = (title: string, data: Record<string, number | string>, isCurrency = true) => {
     const entries = Object.entries(data)
     if (entries.length === 0) return null
@@ -240,8 +270,8 @@ export default function BusinessSummaryReport({ fromDate, toDate }: Props) {
           <button className="flex items-center gap-1.5 px-4 py-2 bg-[#FFC107] hover:bg-amber-500 text-amber-900 text-xs font-black rounded-lg transition-colors shadow-sm">
             <Download size={14} /> Csv
           </button>
-          <button className="flex items-center gap-1.5 px-4 py-2 bg-[#FFC107] hover:bg-amber-500 text-amber-900 text-xs font-black rounded-lg transition-colors shadow-sm">
-            <Printer size={14} /> Prnt
+          <button onClick={handlePrint} disabled={printBusy} className="flex items-center gap-1.5 px-4 py-2 bg-[#FFC107] hover:bg-amber-500 disabled:cursor-wait disabled:opacity-60 text-amber-900 text-xs font-black rounded-lg transition-colors shadow-sm">
+            <Printer size={14} /> {printBusy ? 'Printing...' : 'Prnt'}
           </button>
         </div>
       </div>
