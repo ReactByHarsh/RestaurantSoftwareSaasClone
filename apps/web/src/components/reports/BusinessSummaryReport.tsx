@@ -193,7 +193,6 @@ export default function BusinessSummaryReport({ fromDate, toDate }: Props) {
           receiptWidth: printSettings.receiptWidth,
           showGstin: printSettings.showGstin,
         }),
-        logoDataUrl: outlet.logoDataUrl,
       })
       addToast('success', result === 'direct' ? 'Business summary sent directly to the printer' : 'Business summary opened in the system print dialog', 'Business Summary Print')
     } catch (error) {
