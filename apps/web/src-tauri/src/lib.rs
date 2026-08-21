@@ -35,9 +35,6 @@ use tokio::{
 };
 use tower_http::cors::CorsLayer;
 
-mod license;
-use license::{require_license, LicenseGuard, LicenseManager};
-
 #[derive(Debug, Serialize)]
 struct LocalStatePayload {
     snapshot: Option<Value>,
@@ -82,7 +79,6 @@ struct NativePrintPayload {
 #[derive(Clone)]
 struct LanServerState {
     app: AppHandle,
-    license_guard: LicenseGuard,
     broadcaster: broadcast::Sender<String>,
 }
 
@@ -138,7 +134,6 @@ struct LanHelloPayload {
     discovery_port: u16,
     primary_url: Option<String>,
     ip_address: Option<String>,
-    licensed: bool,
     outlet: Option<LanOutlet>,
 }
 
@@ -423,8 +418,143 @@ fn parse_staff_accounts(value: Option<Value>) -> Vec<LanStaffAccount> {
         .unwrap_or_default()
 }
 
+fn is_open_order_value(order: &Value) -> bool {
+    let status = order.get("status").and_then(Value::as_str).unwrap_or_default();
+    !order
+        .get("isClosed")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+        && order.get("closedAt").is_none()
+        && !matches!(status, "paid" | "cancelled" | "void")
+}
+
+fn snapshot_has_active_table_without_items(snapshot: &Value) -> bool {
+    let Some(payload) = snapshot.as_object() else {
+        return false;
+    };
+    let tables = payload.get("tables").and_then(Value::as_array).cloned().unwrap_or_default();
+    let orders = payload.get("orders").and_then(Value::as_array).cloned().unwrap_or_default();
+    let order_items = payload
+        .get("orderItems")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let saved_carts = payload.get("savedCarts").and_then(Value::as_object);
+
+    tables.iter().any(|table| {
+        let Some(table_id) = table.get("id").and_then(Value::as_str) else {
+            return false;
+        };
+        let Some(order_id) = table.get("activeOrderId").and_then(Value::as_str) else {
+            return false;
+        };
+        let Some(order) = orders.iter().find(|candidate| {
+            candidate.get("id").and_then(Value::as_str) == Some(order_id)
+        }) else {
+            return false;
+        };
+        if !is_open_order_value(order) {
+            return false;
+        }
+        let has_items = order_items.iter().any(|item| {
+            item.get("orderId").and_then(Value::as_str) == Some(order_id)
+                && item.get("status").and_then(Value::as_str) != Some("cancelled")
+        });
+        let has_cart = saved_carts
+            .and_then(|carts| carts.get(table_id))
+            .and_then(Value::as_array)
+            .is_some_and(|cart| !cart.is_empty());
+        !has_items && !has_cart
+    })
+}
+
+fn snapshot_restores_active_table_cart(current: &Value, candidate: &Value) -> bool {
+    let Some(current_payload) = current.as_object() else {
+        return false;
+    };
+    let Some(candidate_payload) = candidate.as_object() else {
+        return false;
+    };
+    let current_tables = current_payload
+        .get("tables")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let candidate_tables = candidate_payload
+        .get("tables")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let candidate_orders = candidate_payload
+        .get("orders")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let candidate_carts = candidate_payload.get("savedCarts").and_then(Value::as_object);
+
+    current_tables.iter().any(|current_table| {
+        let Some(table_id) = current_table.get("id").and_then(Value::as_str) else {
+            return false;
+        };
+        let Some(order_id) = current_table.get("activeOrderId").and_then(Value::as_str) else {
+            return false;
+        };
+        let Some(cart) = candidate_carts
+            .and_then(|carts| carts.get(table_id))
+            .and_then(Value::as_array)
+        else {
+            return false;
+        };
+        if cart.is_empty() {
+            return false;
+        }
+        let candidate_table_matches = candidate_tables.iter().any(|candidate_table| {
+            candidate_table.get("id").and_then(Value::as_str) == Some(table_id)
+                && candidate_table.get("activeOrderId").and_then(Value::as_str) == Some(order_id)
+        });
+        let candidate_order_open = candidate_orders.iter().any(|candidate_order| {
+            candidate_order.get("id").and_then(Value::as_str) == Some(order_id)
+                && is_open_order_value(candidate_order)
+        });
+        candidate_table_matches && candidate_order_open
+    })
+}
+
 fn read_snapshot(connection: &Connection) -> Result<Option<Value>, String> {
-    read_json(connection, "snapshot")
+    let current_raw = connection
+        .query_row("SELECT value FROM app_state WHERE key = ?1", ["snapshot"], |row| {
+            row.get::<_, String>(0)
+        })
+        .optional()
+        .map_err(to_error)?;
+
+    let Some(current_raw) = current_raw else {
+        return read_json(connection, "snapshot");
+    };
+    let Ok(current) = serde_json::from_str::<Value>(&current_raw) else {
+        return read_json(connection, "snapshot");
+    };
+    if !snapshot_has_active_table_without_items(&current) {
+        return Ok(Some(current));
+    }
+
+    // A previous build could save the table/order link but omit the parked
+    // cart during shutdown. Recover the most recent history entry that still
+    // contains the matching cart before exposing the local state to the UI.
+    let mut statement = connection
+        .prepare("SELECT value FROM app_state_history WHERE key = ?1 ORDER BY id DESC LIMIT 20")
+        .map_err(to_error)?;
+    let history = statement
+        .query_map(["snapshot"], |row| row.get::<_, String>(0))
+        .map_err(to_error)?;
+    for raw in history.flatten() {
+        if let Ok(candidate) = serde_json::from_str::<Value>(&raw) {
+            if snapshot_restores_active_table_cart(&current, &candidate) {
+                return Ok(Some(candidate));
+            }
+        }
+    }
+    Ok(Some(current))
 }
 
 fn read_staff_accounts(connection: &Connection) -> Result<Vec<LanStaffAccount>, String> {
@@ -542,12 +672,6 @@ fn authenticate_basic(
     headers: &HeaderMap,
     state: &LanServerState,
 ) -> Result<LanStaffAccount, (StatusCode, Json<Value>)> {
-    if !state.license_guard.is_valid() {
-        return Err((
-            StatusCode::FORBIDDEN,
-            Json(json!({ "error": "Valid license required to use BhojPatra Desk" })),
-        ));
-    }
     let auth_header = headers
         .get(header::AUTHORIZATION)
         .and_then(|value| value.to_str().ok())
@@ -578,12 +702,6 @@ fn authenticate_credentials(
     secret: &str,
     state: &LanServerState,
 ) -> Result<LanStaffAccount, (StatusCode, Json<Value>)> {
-    if !state.license_guard.is_valid() {
-        return Err((
-            StatusCode::FORBIDDEN,
-            Json(json!({ "error": "Valid license required to use BhojPatra Desk" })),
-        ));
-    }
     let connection = open_database(&state.app).map_err(|error| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -1251,9 +1369,7 @@ $printers |
 #[tauri::command]
 fn load_local_state(
     app: AppHandle,
-    guard: State<'_, LicenseGuard>,
 ) -> Result<LocalStatePayload, String> {
-    require_license(&guard)?;
     let connection = open_database(&app)?;
     Ok(LocalStatePayload {
         snapshot: read_json(&connection, "snapshot")?,
@@ -1264,13 +1380,11 @@ fn load_local_state(
 #[tauri::command]
 fn save_local_state(
     app: AppHandle,
-    guard: State<'_, LicenseGuard>,
     write_lock: State<'_, DesktopStateWriteLock>,
     broadcaster: State<'_, broadcast::Sender<String>>,
     snapshot: Value,
     staff: Value,
 ) -> Result<(), String> {
-    require_license(&guard)?;
     let _write_guard = write_lock
         .0
         .lock()
@@ -1315,8 +1429,7 @@ fn read_sync_rows(connection: &Connection, table: &str) -> Result<Vec<Value>, St
 }
 
 #[tauri::command]
-fn load_sync_metadata(app: AppHandle, guard: State<'_, LicenseGuard>) -> Result<Value, String> {
-    require_license(&guard)?;
+fn load_sync_metadata(app: AppHandle) -> Result<Value, String> {
     let connection = open_database(&app)?;
     let mut state_statement = connection
         .prepare("SELECT key, value FROM sync_state")
@@ -1341,13 +1454,11 @@ fn load_sync_metadata(app: AppHandle, guard: State<'_, LicenseGuard>) -> Result<
 #[tauri::command]
 fn save_sync_metadata(
     app: AppHandle,
-    guard: State<'_, LicenseGuard>,
     records: Vec<Value>,
     outbox: Vec<Value>,
     sync_state: Vec<Value>,
     conflicts: Vec<Value>,
 ) -> Result<(), String> {
-    require_license(&guard)?;
     let mut connection = open_database(&app)?;
     let transaction = connection.transaction().map_err(to_error)?;
     transaction
@@ -1395,38 +1506,7 @@ fn save_sync_metadata(
 }
 
 #[tauri::command]
-async fn activate_license(
-    manager: State<'_, LicenseManager>,
-    guard: State<'_, LicenseGuard>,
-    key: String,
-) -> Result<Value, String> {
-    match manager.activate(key).await {
-        Ok(message) => {
-            guard.set_valid(true);
-            Ok(serde_json::json!({ "success": true, "message": message }))
-        }
-        Err(message) => Ok(serde_json::json!({ "success": false, "message": message })),
-    }
-}
-
-#[tauri::command]
-async fn check_license(
-    manager: State<'_, LicenseManager>,
-    guard: State<'_, LicenseGuard>,
-) -> Result<bool, String> {
-    let valid = manager.check_license().await;
-    guard.set_valid(valid);
-    Ok(valid)
-}
-
-#[tauri::command]
-fn get_license_status(manager: State<'_, LicenseManager>) -> Result<license::LicenseData, String> {
-    Ok(manager.get_status())
-}
-
-#[tauri::command]
-fn list_native_printers(guard: State<'_, LicenseGuard>) -> Result<Vec<NativePrinter>, String> {
-    require_license(&guard)?;
+fn list_native_printers() -> Result<Vec<NativePrinter>, String> {
     #[cfg(windows)]
     {
         query_windows_printers()
@@ -1440,10 +1520,8 @@ fn list_native_printers(guard: State<'_, LicenseGuard>) -> Result<Vec<NativePrin
 #[tauri::command]
 fn print_native(
     app: AppHandle,
-    guard: State<'_, LicenseGuard>,
     payload: NativePrintPayload,
 ) -> Result<(), String> {
-    require_license(&guard)?;
     let printer = payload.printer.trim();
     if printer.is_empty() {
         return Err("Select a printer before printing.".to_string());
@@ -1500,7 +1578,6 @@ fn lan_hello_payload(
         discovery_port: 3001,
         primary_url,
         ip_address: reachable_ip.or(status.ip_address),
-        licensed: state.license_guard.is_valid(),
         outlet,
     }
 }
@@ -1769,7 +1846,7 @@ async fn handle_lan_socket(
     }
 }
 
-fn spawn_lan_discovery_responder(app: AppHandle, license_guard: LicenseGuard) {
+fn spawn_lan_discovery_responder(app: AppHandle) {
     tauri::async_runtime::spawn(async move {
         let socket = match UdpSocket::bind(SocketAddr::from(([0, 0, 0, 0], 3001))).await {
             Ok(socket) => socket,
@@ -1780,7 +1857,6 @@ fn spawn_lan_discovery_responder(app: AppHandle, license_guard: LicenseGuard) {
         };
         let state = LanServerState {
             app,
-            license_guard,
             broadcaster: broadcast::channel::<String>(1).0,
         };
         let mut buffer = [0u8; 512];
@@ -1810,14 +1886,12 @@ fn spawn_lan_discovery_responder(app: AppHandle, license_guard: LicenseGuard) {
 
 fn spawn_lan_server(
     app: AppHandle,
-    license_guard: LicenseGuard,
     status: Arc<Mutex<LanServerStatusPayload>>,
     broadcaster: broadcast::Sender<String>,
 ) {
     let port = status.lock().map(|value| value.port).unwrap_or(3000);
     let shared_state = LanServerState {
         app: app.clone(),
-        license_guard,
         broadcaster,
     };
     tauri::async_runtime::spawn(async move {
@@ -1872,19 +1946,15 @@ pub fn run() {
             #[cfg(desktop)]
             app.handle()
                 .plugin(tauri_plugin_updater::Builder::new().build())?;
-            app.manage(LicenseManager::new(app.handle()));
-            let license_guard = LicenseGuard::new();
             app.manage(DesktopStateWriteLock::default());
             let lan_status = Arc::new(Mutex::new(lan_status_snapshot(3000, false, None)));
             let (lan_broadcaster, _) = broadcast::channel::<String>(128);
             spawn_lan_server(
                 app.handle().clone(),
-                license_guard.clone(),
                 lan_status.clone(),
                 lan_broadcaster.clone(),
             );
-            spawn_lan_discovery_responder(app.handle().clone(), license_guard.clone());
-            app.manage(license_guard);
+            spawn_lan_discovery_responder(app.handle().clone());
             app.manage(lan_status);
             app.manage(lan_broadcaster);
             #[cfg(desktop)]
@@ -1898,9 +1968,6 @@ pub fn run() {
             save_local_state,
             load_sync_metadata,
             save_sync_metadata,
-            activate_license,
-            check_license,
-            get_license_status,
             get_lan_server_status,
             list_native_printers,
             print_native

@@ -2,28 +2,21 @@ import { useEffect, useState } from 'react'
 import type { ReactNode } from 'react'
 import { ChefHat, DatabaseZap, MonitorSmartphone } from 'lucide-react'
 import {
-  checkDesktopLicense,
-  getDesktopLicenseStatus,
   loadDesktopState,
   saveDesktopState,
   isTauriDesktop,
-  type LicenseStatus,
 } from '../../lib/localDb'
 import { checkForAppUpdate, downloadAndInstallUpdate } from '../../lib/appUpdater'
-import { fetchCloudStaff, runCloudLogin, syncCloudStaff } from '../../lib/cloudSync'
+import { fetchCloudSnapshot, hasSnapshotData, runCloudLogin, saveCloudSnapshot } from '../../lib/cloudSync'
 import { syncOrderDeltasNow } from '../../lib/orderSync'
 import { realtimeClient } from '../../lib/realtime'
 import { useBillingStore } from '../../store/billingStore'
+import { useAuthStore } from '../../store/authStore'
 import { useStaffStore } from '../../store/staffStore'
 import { useUIStore } from '../../store/uiStore'
-import ActivationScreen from '../auth/ActivationScreen'
 
 export default function DesktopBootstrap({ children }: { children: ReactNode }) {
   const [ready, setReady] = useState(() => !isTauriDesktop())
-  const [licensed, setLicensed] = useState(() => !isTauriDesktop())
-  const [checkingLicense, setCheckingLicense] = useState(() => isTauriDesktop())
-  const [licenseStatus, setLicenseStatus] = useState<LicenseStatus | null>(null)
-  const [licenseError, setLicenseError] = useState('')
 
   useEffect(() => {
     if (!isTauriDesktop()) return
@@ -32,24 +25,40 @@ export default function DesktopBootstrap({ children }: { children: ReactNode }) 
     let saveTimer: number | undefined
     let hydrationComplete = false
     let cloudTimer: number | undefined
-    let staffTimer: number | undefined
     let cloudSyncInFlight = false
     let cloudRetryAttempt = 0
+    let saveInFlight: Promise<void> = Promise.resolve()
     let unsubscribeBilling: (() => void) | undefined
     let unsubscribeStaff: (() => void) | undefined
     let unlistenLanState: (() => void) | undefined
+
+    const saveNow = () => {
+      if (!hydrationComplete || disposed) return Promise.resolve()
+      const snapshot = useBillingStore.getState().exportSnapshot()
+      const staff = useStaffStore.getState().staff
+      // Serialize writes so a slower older invocation cannot finish after a
+      // newer one and put stale table carts back into SQLite.
+      saveInFlight = saveInFlight
+        .catch(() => undefined)
+        .then(() => saveDesktopState(snapshot, staff))
+      return saveInFlight
+    }
 
     const queueSave = () => {
       if (!hydrationComplete || disposed) return
       window.clearTimeout(saveTimer)
       saveTimer = window.setTimeout(() => {
-        void saveDesktopState(
-          useBillingStore.getState().exportSnapshot(),
-          useStaffStore.getState().staff
-        ).catch((error) => {
+        void saveNow().catch((error) => {
           console.error('Failed to save desktop state', error)
         })
-      }, 180)
+      }, 50)
+    }
+
+    const flushSave = () => {
+      window.clearTimeout(saveTimer)
+      return saveNow().catch((error) => {
+        console.error('Failed to flush desktop state', error)
+      })
     }
 
     const runAutoUpdate = async () => {
@@ -71,8 +80,9 @@ export default function DesktopBootstrap({ children }: { children: ReactNode }) 
       }
     }
 
-    const syncCloudSnapshotNow = async (reason: 'startup' | 'daily') => {
+    const syncCloudSnapshotNow = async (reason: 'daily') => {
       if (cloudSyncInFlight) return
+      if (!useAuthStore.getState().isAuthenticated) return
       const billing = useBillingStore.getState()
       const cloud = billing.cloudSync
       if (!cloud.enabled || !cloud.serverUrl) return
@@ -93,8 +103,29 @@ export default function DesktopBootstrap({ children }: { children: ReactNode }) 
         const localSnapshot = billing.exportSnapshot()
         const result = await syncOrderDeltasNow(localSnapshot, effectiveCloud)
         if (result.changed) useBillingStore.getState().importSnapshot(result.snapshot, true)
-        const cloudStaff = await syncCloudStaff(useStaffStore.getState().staff, cloud.serverUrl, cloudAuth)
-        useStaffStore.getState().replaceStaff([...cloudStaff.staff, ...useStaffStore.getState().staff])
+        const signedInRole = useAuthStore.getState().user?.role
+        const canUploadSetup = signedInRole === 'owner' || signedInRole === 'admin' || signedInRole === 'manager'
+        let uploadedAt = cloud.lastCloudUploadedAt
+        if (canUploadSetup) {
+          const uploaded = await saveCloudSnapshot(
+            outletId,
+            tenantId,
+            useBillingStore.getState().exportSnapshot(),
+            'desktop-auto-sync',
+            cloud.serverUrl,
+            cloudAuth,
+          )
+          uploadedAt = uploaded.updatedAt
+          if (uploaded.payload) useBillingStore.getState().importSnapshot(uploaded.payload, true)
+        }
+        const remote = await fetchCloudSnapshot(outletId, cloud.serverUrl, cloudAuth)
+        if (remote.exists) {
+          const remoteUpdatedAt = Date.parse(remote.updatedAt) || 0
+          const lastDownloadedAt = Date.parse(cloud.lastCloudDownloadedAt || '') || 0
+          if (remoteUpdatedAt > lastDownloadedAt) {
+            useBillingStore.getState().importSnapshot(remote.payload, true)
+          }
+        }
         const syncedAt = new Date().toISOString()
         useBillingStore.getState().updateCloudSyncSettings({
           tenantId,
@@ -102,9 +133,9 @@ export default function DesktopBootstrap({ children }: { children: ReactNode }) 
           cloudMode: 'delta_v2',
           lastSyncedAt: syncedAt,
           lastSuccessfulSyncAt: syncedAt,
-          lastCloudUploadedAt: syncedAt,
+          lastCloudUploadedAt: uploadedAt || syncedAt,
           lastCloudDownloadedAt: syncedAt,
-          nextSyncAt: new Date(Date.now() + Math.max(1, cloud.syncIntervalHours || 4) * 3_600_000).toISOString(),
+          nextSyncAt: new Date(Date.now() + 4 * 3_600_000).toISOString(),
         })
         cloudRetryAttempt = 0
         if (reason === 'daily') useUIStore.getState().addToast('success', 'Cloud delta sync completed', 'Cloud Sync')
@@ -122,48 +153,74 @@ export default function DesktopBootstrap({ children }: { children: ReactNode }) 
       }
     }
 
-    const refreshCloudStaff = async () => {
-      const cloud = useBillingStore.getState().cloudSync
-      if (!cloud.enabled || !cloud.serverUrl || !cloud.accountLogin || !cloud.accountSecret) return
-      try {
-        const result = await fetchCloudStaff(cloud.serverUrl, {
-          accountLogin: cloud.accountLogin,
-          accountSecret: cloud.accountSecret,
-        })
-        if (disposed) return
-        useStaffStore.getState().replaceStaff([...result.staff, ...useStaffStore.getState().staff])
-        queueSave()
-      } catch (error) {
-        console.error('Cloud staff refresh failed', error)
-      }
-    }
-
     const scheduleCloudSync = () => {
       window.clearTimeout(cloudTimer)
       const cloud = useBillingStore.getState().cloudSync
-      if (!cloud.enabled || !cloud.autoSyncEnabled) return
+      if (!useAuthStore.getState().isAuthenticated || !cloud.enabled || !cloud.autoSyncEnabled) return
 
       const now = new Date()
-      const intervalMs = Math.max(1, cloud.syncIntervalHours || 4) * 3_600_000
-      const lastSuccess = Date.parse(cloud.lastSuccessfulSyncAt || cloud.lastSyncedAt || '') || 0
-      const nextRun = new Date(Math.max(now.getTime() + 1_000, lastSuccess + intervalMs))
+      const intervalMs = 4 * 3_600_000
+      // Startup is deliberately local-only. Begin the cloud cycle four hours
+      // after this desktop session starts; never use a missing timestamp to
+      // trigger an immediate cloud download during login.
+      const nextRun = new Date(now.getTime() + intervalMs)
 
       cloudTimer = window.setTimeout(
         () => void syncCloudSnapshotNow('daily'),
         Math.max(1000, nextRun.getTime() - now.getTime())
       )
-      window.clearInterval(staffTimer)
-      staffTimer = window.setInterval(() => void refreshCloudStaff(), 60 * 1000)
     }
 
     const hydrateRestaurantState = async () => {
       let loadedSuccessfully = false
       try {
+        // The billing store also has an asynchronous browser/Dexie persist
+        // layer. Let it finish first, otherwise it can complete after the
+        // Tauri load and overwrite SQLite data with an older empty snapshot.
+        const billingPersist = useBillingStore.persist
+        if (!billingPersist.hasHydrated()) {
+          await new Promise<void>((resolve) => {
+            let unsubscribe: (() => void) | undefined
+            const finish = () => {
+              unsubscribe?.()
+              resolve()
+            }
+            unsubscribe = billingPersist.onFinishHydration(finish)
+            if (billingPersist.hasHydrated()) finish()
+          })
+        }
         const data = await loadDesktopState()
         if (disposed) return
 
+        const browserSnapshot = useBillingStore.getState().exportSnapshot()
         if (data?.snapshot) {
-          useBillingStore.getState().importSnapshot(data.snapshot)
+          // A previous interrupted build may have left SQLite with an empty
+          // or partial snapshot while the browser persist layer still has the
+          // restaurant. Fill only missing collections from that local copy so
+          // products/tables cannot be wiped during startup recovery.
+          const diskSnapshot = data.snapshot
+          const recoveredSnapshot = {
+            ...diskSnapshot,
+            menuCategories: diskSnapshot.menuCategories?.length ? diskSnapshot.menuCategories : browserSnapshot.menuCategories,
+            menuItems: diskSnapshot.menuItems?.length ? diskSnapshot.menuItems : browserSnapshot.menuItems,
+            floors: diskSnapshot.floors?.length ? diskSnapshot.floors : browserSnapshot.floors,
+            tables: diskSnapshot.tables?.length ? diskSnapshot.tables : browserSnapshot.tables,
+            stations: diskSnapshot.stations?.length ? diskSnapshot.stations : browserSnapshot.stations,
+            inventoryItems: diskSnapshot.inventoryItems?.length ? diskSnapshot.inventoryItems : browserSnapshot.inventoryItems,
+            purchaseEntries: diskSnapshot.purchaseEntries?.length ? diskSnapshot.purchaseEntries : browserSnapshot.purchaseEntries,
+            orders: diskSnapshot.orders?.length ? diskSnapshot.orders : browserSnapshot.orders,
+            orderItems: diskSnapshot.orderItems?.length ? diskSnapshot.orderItems : browserSnapshot.orderItems,
+            kots: diskSnapshot.kots?.length ? diskSnapshot.kots : browserSnapshot.kots,
+            payments: diskSnapshot.payments?.length ? diskSnapshot.payments : browserSnapshot.payments,
+            auditLogs: diskSnapshot.auditLogs?.length ? diskSnapshot.auditLogs : browserSnapshot.auditLogs,
+            savedCarts: { ...(browserSnapshot.savedCarts ?? {}), ...(diskSnapshot.savedCarts ?? {}) },
+          }
+          useBillingStore.getState().importSnapshot(recoveredSnapshot)
+          if (!hasSnapshotData(diskSnapshot) && hasSnapshotData(browserSnapshot)) {
+            await saveDesktopState(browserSnapshot, data.staff ?? [])
+          }
+        } else if (hasSnapshotData(browserSnapshot)) {
+          await saveDesktopState(browserSnapshot, data?.staff ?? [])
         }
 
         if (data?.staff?.length) {
@@ -176,10 +233,8 @@ export default function DesktopBootstrap({ children }: { children: ReactNode }) 
       } finally {
         if (disposed) return
         hydrationComplete = loadedSuccessfully
-        setReady(true)
         if (loadedSuccessfully) queueSave()
         scheduleCloudSync()
-        void refreshCloudStaff()
         if (isTauriDesktop()) void runAutoUpdate()
         // scheduleCloudSync catches up immediately when the configured time
         // has passed, and schedules the next exact local time otherwise.
@@ -188,122 +243,84 @@ export default function DesktopBootstrap({ children }: { children: ReactNode }) 
     }
 
     const start = async () => {
-      setCheckingLicense(true)
-      setLicenseError('')
-      try {
-        const valid = await checkDesktopLicense()
-        const status = await getDesktopLicenseStatus()
-        if (disposed) return
-        setLicenseStatus(status)
-        setLicensed(valid)
-        if (valid) {
-          await hydrateRestaurantState()
-          const onStateChanged = () => {
-            queueSave()
-            scheduleCloudSync()
-          }
-          unsubscribeBilling = useBillingStore.subscribe(onStateChanged)
-          unsubscribeStaff = useStaffStore.subscribe(onStateChanged)
-          const { listen } = await import('@tauri-apps/api/event')
-          unlistenLanState = await listen('lan_state_updated', (event) => {
-            const payload = event.payload
-            if (!payload || typeof payload !== 'object') return
-            const snapshot = payload as Record<string, unknown>
-            if (!Array.isArray(snapshot.orders) || !Array.isArray(snapshot.tables)) return
-            useBillingStore.getState().importSnapshot(snapshot as any, true)
-          })
-          const unsubscribeRealtime = realtimeClient.subscribe((event) => {
-            if (event.type === 'STAFF_UPDATED') {
-              void refreshCloudStaff()
-              return
-            }
-            if (event.type === 'SYNC_DELTA_AVAILABLE') {
-              void syncCloudSnapshotNow('daily')
-              return
-            }
-            if (event.type !== 'STATE_UPDATED') return
-            const payload = event.payload
-            if (!payload || !Array.isArray((payload as any).orders) || !Array.isArray((payload as any).tables)) return
-            useBillingStore.getState().importSnapshot(payload as any, true)
-          })
-          const previousBillingUnsubscribe = unsubscribeBilling
-          unsubscribeBilling = () => {
-            previousBillingUnsubscribe?.()
-            unsubscribeRealtime()
-          }
-          const cloud = useBillingStore.getState().cloudSync
-          if (cloud.enabled && cloud.serverUrl && cloud.outletId && cloud.accountLogin && cloud.accountSecret) {
-            realtimeClient.connect({
-              serverUrl: cloud.serverUrl,
-              outletId: cloud.outletId,
-              accountLogin: cloud.accountLogin,
-              accountSecret: cloud.accountSecret,
-              clientId: 'desktop-lan-host',
-            })
-          }
-        } else {
-          setReady(true)
-        }
-      } catch (error) {
-        if (disposed) return
-        setLicensed(false)
-        setReady(true)
-        setLicenseError(error instanceof Error ? error.message : 'License check failed')
-      } finally {
-        if (!disposed) setCheckingLicense(false)
+      // Validate the saved Workers credentials before restoring the session.
+      // This gives first launch a login screen while allowing trusted repeat
+      // launches to open directly only when Cloud Admin still accepts them.
+      useAuthStore.getState().logout()
+      await hydrateRestaurantState()
+      if (disposed) return
+
+      const onStateChanged = () => {
+        queueSave()
       }
+      unsubscribeBilling = useBillingStore.subscribe(onStateChanged)
+      unsubscribeStaff = useStaffStore.subscribe(onStateChanged)
+      const unsubscribeAuth = useAuthStore.subscribe((state) => {
+        if (!state.isAuthenticated) {
+          window.clearTimeout(cloudTimer)
+          realtimeClient.disconnect()
+          return
+        }
+        scheduleCloudSync()
+      })
+
+      const { listen } = await import('@tauri-apps/api/event')
+      unlistenLanState = await listen('lan_state_updated', (event) => {
+        const payload = event.payload
+        if (!payload || typeof payload !== 'object') return
+        const snapshot = payload as Record<string, unknown>
+        if (!Array.isArray(snapshot.orders) || !Array.isArray(snapshot.tables)) return
+        useBillingStore.getState().importSnapshot(snapshot as any, true)
+      })
+      const previousBillingUnsubscribe = unsubscribeBilling
+      unsubscribeBilling = () => {
+        previousBillingUnsubscribe?.()
+        unsubscribeAuth()
+      }
+
+      const savedCloud = useBillingStore.getState().cloudSync
+      if (savedCloud.accountLogin && savedCloud.accountSecret) {
+        const result = await useAuthStore.getState().login(savedCloud.accountLogin, savedCloud.accountSecret)
+        if (!result.success && !disposed) {
+          useUIStore.getState().addToast('warning', 'Saved cloud login could not be verified. Please sign in again.', 'Cloud Login')
+        }
+      }
+      if (disposed) return
+
+      const flushOnPageExit = () => {
+        void flushSave()
+      }
+      window.addEventListener('beforeunload', flushOnPageExit)
+      window.addEventListener('pagehide', flushOnPageExit)
+      setReady(true)
+      scheduleCloudSync()
+
+      const priorBillingCleanup = unsubscribeBilling
+      const priorStaffCleanup = unsubscribeStaff
+      unsubscribeBilling = () => {
+        priorBillingCleanup?.()
+        priorStaffCleanup?.()
+        window.removeEventListener('beforeunload', flushOnPageExit)
+        window.removeEventListener('pagehide', flushOnPageExit)
+      }
+      // The billing cleanup now owns both Zustand subscriptions and the
+      // window listeners, so the outer cleanup must not invoke staff twice.
+      unsubscribeStaff = undefined
     }
 
     void start()
-    const catchUpOnFocus = () => void syncCloudSnapshotNow('startup')
-    window.addEventListener('focus', catchUpOnFocus)
-    window.addEventListener('online', catchUpOnFocus)
 
     return () => {
       disposed = true
       hydrationComplete = false
       window.clearTimeout(saveTimer)
       window.clearInterval(cloudTimer)
-      window.clearInterval(staffTimer)
       unsubscribeBilling?.()
       unsubscribeStaff?.()
       unlistenLanState?.()
-      window.removeEventListener('focus', catchUpOnFocus)
-      window.removeEventListener('online', catchUpOnFocus)
       realtimeClient.disconnect()
     }
   }, [])
-
-  const unlockAfterActivation = async () => {
-    setCheckingLicense(true)
-    setLicenseError('')
-    try {
-      const valid = await checkDesktopLicense()
-      const status = await getDesktopLicenseStatus()
-      setLicenseStatus(status)
-      setLicensed(valid)
-      if (!valid) {
-        setLicenseError('License is not active for this device')
-        return
-      }
-      window.location.reload()
-    } catch (error) {
-      setLicenseError(error instanceof Error ? error.message : 'License check failed')
-    } finally {
-      setCheckingLicense(false)
-    }
-  }
-
-  if (ready && !licensed) {
-    return (
-      <ActivationScreen
-        status={licenseStatus}
-        checking={checkingLicense}
-        error={licenseError}
-        onActivated={unlockAfterActivation}
-      />
-    )
-  }
 
   if (ready) return <>{children}</>
 

@@ -164,6 +164,83 @@ describe('billing store stale-state recovery', () => {
     useBillingStore.getState().reset()
   })
 
+  it('exports the active table cart even before the user switches tables', () => {
+    const activeOrder = order('running')
+    useBillingStore.setState({
+      tables: [table(activeOrder.id)],
+      orders: [activeOrder],
+      currentOrder: activeOrder,
+      selectedTableId: 'table-1',
+      cart: [cartItem],
+      savedCarts: {},
+      activeOrderType: 'dine_in',
+    })
+
+    expect(useBillingStore.getState().exportSnapshot().savedCarts).toEqual({
+      'table-1': [cartItem],
+    })
+  })
+
+  it('reopens a persisted occupied table with its unsent cart', () => {
+    const activeOrder = order('running')
+    const snapshot = {
+      ...useBillingStore.getState().exportSnapshot(),
+      tables: [table(activeOrder.id)],
+      orders: [activeOrder],
+      orderItems: [],
+      savedCarts: { 'table-1': [cartItem] },
+    }
+
+    useBillingStore.getState().importSnapshot(snapshot)
+    useBillingStore.getState().selectTable('table-1')
+
+    const state = useBillingStore.getState()
+    expect(state.currentOrder?.id).toBe(activeOrder.id)
+    expect(state.selectedTableId).toBe('table-1')
+    expect(state.cart).toEqual([cartItem])
+    expect(state.tables[0].activeOrderId).toBe(activeOrder.id)
+  })
+
+  it('parks the cart and clears the modal session when leaving a table', () => {
+    const activeOrder = order('running')
+    useBillingStore.setState({
+      tables: [table(activeOrder.id)],
+      orders: [activeOrder],
+      currentOrder: activeOrder,
+      selectedTableId: 'table-1',
+      cart: [cartItem],
+      savedCarts: {},
+      activeOrderType: 'dine_in',
+    })
+
+    useBillingStore.getState().closeTableView()
+
+    const state = useBillingStore.getState()
+    expect(state.selectedTableId).toBeNull()
+    expect(state.currentOrder).toBeNull()
+    expect(state.cart).toEqual([])
+    expect(state.savedCarts['table-1']).toEqual([cartItem])
+
+    useBillingStore.getState().selectTable('table-1')
+    expect(useBillingStore.getState().cart).toEqual([cartItem])
+    expect(useBillingStore.getState().currentOrder?.id).toBe(activeOrder.id)
+  })
+
+  it('does not delete a parked cart during the transient table-open state', () => {
+    const activeOrder = order('running')
+    useBillingStore.setState({
+      tables: [table(activeOrder.id)],
+      orders: [activeOrder],
+      currentOrder: null,
+      selectedTableId: 'table-1',
+      cart: [],
+      savedCarts: { 'table-1': [cartItem] },
+      activeOrderType: 'dine_in',
+    })
+
+    expect(useBillingStore.getState().exportSnapshot().savedCarts?.['table-1'] ?? []).toEqual([cartItem])
+  })
+
   it('clears a stale paid order when the already-selected empty table is selected again', () => {
     const paidOrder = order('paid')
     useBillingStore.setState({
@@ -212,18 +289,37 @@ describe('billing store stale-state recovery', () => {
     expect(state.savedCarts).not.toHaveProperty('table-1')
   })
 
-  it('uploads the completed snapshot immediately after checkout', async () => {
+  it('preserves a local open table session when the remote snapshot has not received it yet', () => {
     const activeOrder = order('running')
-    let finishUpload: ((value: { ok: boolean; json: () => Promise<Record<string, unknown>> }) => void) | undefined
-    const uploadResponse = new Promise<{ ok: boolean; json: () => Promise<Record<string, unknown>> }>((resolve) => {
-      finishUpload = resolve
+    useBillingStore.setState({
+      tables: [table(activeOrder.id)],
+      orders: [activeOrder],
+      currentOrder: activeOrder,
+      selectedTableId: 'table-1',
+      cart: [cartItem],
+      savedCarts: {},
+      activeOrderType: 'dine_in',
     })
-    const fetchMock = vi.fn((_: string, request?: RequestInit) => request?.method === 'POST'
-      ? uploadResponse
-      : Promise.resolve({
-          ok: true,
-          json: async () => ({ changes: [], cursor: 1, hasMore: false }),
-        }))
+
+    const remoteSnapshot = {
+      ...useBillingStore.getState().exportSnapshot(),
+      tables: [table()],
+      orders: [],
+      orderItems: [],
+      savedCarts: {},
+    }
+    useBillingStore.getState().importSnapshot(remoteSnapshot, true)
+
+    const state = useBillingStore.getState()
+    expect(state.tables[0].activeOrderId).toBe(activeOrder.id)
+    expect(state.orders[0].id).toBe(activeOrder.id)
+    expect(state.savedCarts['table-1']).toEqual([cartItem])
+    expect(state.cart).toEqual([cartItem])
+  })
+
+  it('keeps checkout local and defers cloud sync to the desktop timer', async () => {
+    const activeOrder = order('running')
+    const fetchMock = vi.fn()
     vi.stubGlobal('fetch', fetchMock)
     useBillingStore.setState((state) => ({
       tables: [table(activeOrder.id)],
@@ -254,35 +350,12 @@ describe('billing store stale-state recovery', () => {
     )
 
     expect(settled).toBe(true)
-    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalled())
-    const [, request] = fetchMock.mock.calls[0] as [string, RequestInit]
-    const wire = JSON.parse(String(request.body)) as { changes: Array<{ orderUuid: string; version: number; isClosed: boolean; payloadHash: string; payload: any }> }
-    const uploaded = wire.changes[0]
-    expect(uploaded.orderUuid).toBe(activeOrder.id)
-    expect(uploaded.version).toBe(1)
-    expect(uploaded.isClosed).toBe(true)
-    expect(uploaded.payload.order.status).toBe('paid')
-    expect(uploaded.payload.table.activeOrderId).toBeUndefined()
-    finishUpload?.({
-      ok: true,
-      json: async () => ({
-        accepted: [{
-          entityId: activeOrder.id,
-          orderUuid: activeOrder.id,
-          version: uploaded.version,
-          payloadHash: uploaded.payloadHash,
-          syncedAt: '2026-08-08T10:11:00.000Z',
-          cursor: 1,
-        }],
-        duplicates: [],
-        conflicts: [],
-        cursor: 1,
-        serverTime: '2026-08-08T10:11:00.000Z',
-      }),
-    })
+    expect(fetchMock).not.toHaveBeenCalled()
+    expect(useBillingStore.getState().orders.find((candidate) => candidate.id === activeOrder.id)?.status).toBe('paid')
+    expect(useBillingStore.getState().tables[0].activeOrderId).toBeUndefined()
   })
 
-  it('keeps checkout completed locally when the immediate cloud upload fails', async () => {
+  it('keeps checkout completed locally while offline', async () => {
     const activeOrder = order('running')
     vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('offline')))
     vi.spyOn(console, 'error').mockImplementation(() => undefined)

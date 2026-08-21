@@ -75,13 +75,9 @@ function ProtectedRoute({ children, permission }: { children: React.ReactNode; p
 }
 
 export default function App() {
-  const { user, autoLoginIfEnabled, showStaffLoginOnDesktop, logout } = useAuthStore()
+  const { user, logout } = useAuthStore()
   const staffCount = useStaffStore((state) => state.staff.length)
   const defaultRoute = user ? getDefaultRoute(user.role) : '/app/tables'
-
-  useEffect(() => {
-    autoLoginIfEnabled()
-  }, [autoLoginIfEnabled])
 
   useEffect(() => {
     if (!user || user.tenantId === 'platform') return
@@ -184,7 +180,7 @@ export default function App() {
           lastSuccessfulSyncAt: syncedAt,
           lastCloudUploadedAt: syncedAt,
           lastCloudDownloadedAt: syncedAt,
-          nextSyncAt: new Date(Date.now() + Math.max(1, currentCloud.syncIntervalHours || 4) * 3_600_000).toISOString(),
+          nextSyncAt: new Date(Date.now() + 4 * 3_600_000).toISOString(),
         })
         retryAttempt = 0
       } catch (error) {
@@ -222,7 +218,7 @@ export default function App() {
       ])
       if (!currentCloud.enabled || !currentCloud.autoSyncEnabled) return
       const currentTime = new Date()
-      const intervalMs = Math.max(1, currentCloud.syncIntervalHours || 4) * 3_600_000
+      const intervalMs = 4 * 3_600_000
       const lastSuccess = Date.parse(currentCloud.lastSuccessfulSyncAt || currentCloud.lastSyncedAt || '') || 0
       const nextRun = new Date(lastSuccess + intervalMs)
       if (nextRun.getTime() <= currentTime.getTime()) nextRun.setTime(currentTime.getTime() + 1_000)
@@ -413,7 +409,7 @@ export default function App() {
     }
   }, [user?.id])
 
-  if (isTauriDesktop() && staffCount === 0) {
+  if (!isTauriDesktop() && staffCount === 0) {
     return (
       <>
         <FirstRunSetup />
@@ -422,7 +418,7 @@ export default function App() {
     )
   }
 
-  const fallbackRoute = user || (isTauriDesktop() && !showStaffLoginOnDesktop) ? '/app' : '/login'
+  const fallbackRoute = user ? '/app' : '/login'
 
   return (
     <>

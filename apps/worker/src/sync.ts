@@ -103,6 +103,20 @@ export async function sha256Hex(value: unknown) {
   return Array.from(new Uint8Array(digest)).map((byte) => byte.toString(16).padStart(2, '0')).join('')
 }
 
+/**
+ * Legacy snapshots can retain a KOT line after its source order item was
+ * removed (for example, when an item was cancelled after printing). The full
+ * KOT remains part of the canonical snapshot, but the relational D1 projector
+ * cannot insert that line because kot_items.order_item_id is a foreign key.
+ */
+export function validRelationalKotItems(payload: SyncChange['payload']) {
+  const orderItemIds = new Set(payload.orderItems.map((item) => text(item.id)).filter(Boolean))
+  return payload.kots.flatMap((kot) => asArray(kot.items)
+    .map(asRecord)
+    .filter((item) => orderItemIds.has(text(item.orderItemId)))
+    .map((item) => ({ kot, item })))
+}
+
 function replaceById(values: unknown[], next: Record<string, unknown>, idKey = 'id') {
   const id = text(next[idKey])
   return [next, ...values.filter((value) => text(asRecord(value)[idKey]) !== id)]
@@ -315,20 +329,22 @@ function orderStatements(
       text(kot.tableName) || null, text(kot.orderType) || null, text(kot.captainName) || null,
       text(kot.cancellationReason) || null, text(kot.cancelledAt) || null,
     ))
-    for (const rawItem of asArray(kot.items)) {
-      const item = asRecord(rawItem)
-      statements.push(db.prepare(`
-        INSERT INTO kot_items (
-          id, tenant_id, outlet_id, kot_id, order_item_id, quantity, status,
-          created_at, updated_at, name, note, modifiers, item_type
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      `).bind(
-        text(item.id), tenantId, outletId, text(kot.id), text(item.orderItemId), number(item.quantity),
-        text(item.status, 'new'), text(item.createdAt, change.updatedAt), text(item.updatedAt, change.updatedAt),
-        text(item.name) || null, text(item.note) || null,
-        item.modifiers == null ? null : JSON.stringify(item.modifiers), text(item.itemType) || null,
-      ))
-    }
+  }
+
+  // Project only KOT lines whose order item is present in this aggregate.
+  // Orphan legacy lines stay intact in app_snapshots and sync_changes.
+  for (const { kot, item } of validRelationalKotItems(payload)) {
+    statements.push(db.prepare(`
+      INSERT INTO kot_items (
+        id, tenant_id, outlet_id, kot_id, order_item_id, quantity, status,
+        created_at, updated_at, name, note, modifiers, item_type
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).bind(
+      text(item.id), tenantId, outletId, text(kot.id), text(item.orderItemId), number(item.quantity),
+      text(item.status, 'new'), text(item.createdAt, change.updatedAt), text(item.updatedAt, change.updatedAt),
+      text(item.name) || null, text(item.note) || null,
+      item.modifiers == null ? null : JSON.stringify(item.modifiers), text(item.itemType) || null,
+    ))
   }
 
   for (const payment of payload.payments) {

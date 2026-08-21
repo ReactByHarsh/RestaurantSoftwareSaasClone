@@ -1,7 +1,7 @@
 import { useState, useMemo, useEffect } from 'react'
 import {
   Grid2X2, Layers3, LayoutGrid, Pencil, Plus, Rows3, Trash2, X,
-  ArrowRightLeft, GitMerge, Info, ListTodo, AlertTriangle,
+  ArrowRightLeft, GitMerge, Info, ListTodo,
   ToggleLeft, ToggleRight,
 } from 'lucide-react'
 import { useBillingStore } from '../../store/billingStore'
@@ -42,7 +42,7 @@ export default function TableScreen() {
     tables, orders, floors,
     addFloor, updateFloor, deleteFloor,
     addTable, updateTable, deleteTable,
-    transferTable, mergeTable, getActiveKOTs
+    transferTable, mergeTable, getActiveKOTs, closeTableView,
   } = useBillingStore()
 
   const [activeFloorId, setActiveFloorId] = useState<string>('all')
@@ -52,7 +52,6 @@ export default function TableScreen() {
   const [editingTable, setEditingTable] = useState<RestaurantTable | null>(null)
   const [billingModalTableId, setBillingModalTableId] = useState<string | null>(null)
   const isRightSidebarOpen = tableRightSidebarOpen
-  const [dismissedPaymentWarning, setDismissedPaymentWarning] = useState(false)
   const [editMode, setEditMode] = useState(false)
 
   // Transfer / Merge state
@@ -106,19 +105,6 @@ export default function TableScreen() {
     })
     return Array.from(groups.entries()).sort((a, b) => a[0].localeCompare(b[0]))
   }, [getActiveKOTs, orders])
-
-  const paymentWarning = useMemo(() => {
-    if (!user || dismissedPaymentWarning) return null
-    const issues: string[] = []
-    if (user.paymentReceived === false) issues.push('software payment is pending')
-    if (user.renewalPaymentReceived === false) issues.push('renewal payment is pending')
-    if (issues.length === 0) return null
-    return {
-      title: 'Payment confirmation required',
-      message: `This client account is marked as ${issues.join(' and ')}. Billing can continue after acknowledging this reminder.`,
-      note: user.paymentNote,
-    }
-  }, [dismissedPaymentWarning, user])
 
   const [now, setNow] = useState(Date.now())
   useEffect(() => {
@@ -711,31 +697,11 @@ export default function TableScreen() {
           <BillingScreen 
               isModal={true} 
               modalTableId={billingModalTableId} 
-              onCloseModal={() => setBillingModalTableId(null)} 
+              onCloseModal={() => {
+                closeTableView()
+                setBillingModalTableId(null)
+              }}
             />
-          {paymentWarning && (
-            <div className="absolute inset-0 z-[70] bg-slate-900/45 backdrop-blur-sm flex items-center justify-center p-4">
-              <div className="w-full max-w-md rounded-2xl bg-white border border-red-100 shadow-2xl overflow-hidden">
-                <div className="px-5 py-4 border-b border-red-100 bg-red-50 flex items-center gap-3">
-                  <div className="w-10 h-10 rounded-xl bg-white border border-red-100 text-red-600 flex items-center justify-center">
-                    <AlertTriangle size={20} />
-                  </div>
-                  <div>
-                    <h2 className="text-base font-black text-slate-900">{paymentWarning.title}</h2>
-                    <p className="text-xs font-bold text-red-700 mt-0.5">Admin payment reminder</p>
-                  </div>
-                </div>
-                <div className="p-5 space-y-4">
-                  <p className="text-sm font-bold text-slate-700 leading-relaxed">{paymentWarning.message}</p>
-                  {paymentWarning.note && <p className="rounded-xl bg-slate-50 border border-slate-200 px-3 py-2 text-xs font-bold text-slate-600">{paymentWarning.note}</p>}
-                  <div className="flex gap-2">
-                    <button onClick={() => setBillingModalTableId(null)} className="flex-1 rounded-xl bg-slate-100 px-4 py-2.5 text-xs font-black text-slate-700 hover:bg-slate-200">CANCEL BILLING</button>
-                    <button onClick={() => setDismissedPaymentWarning(true)} className="flex-1 rounded-xl bg-primary px-4 py-2.5 text-xs font-black text-white hover:bg-primary-dark">CONTINUE</button>
-                  </div>
-                </div>
-              </div>
-            </div>
-          )}
         </div>
       )}
     </div>

@@ -1,7 +1,7 @@
 import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
 import type { User, Outlet } from '../lib/types'
-import { fetchCloudSnapshot, runCloudLogin, syncCloudStaff } from '../lib/cloudSync'
+import { fetchCloudSnapshot, fetchCloudStaff, runCloudLogin, syncCloudStaff } from '../lib/cloudSync'
 import { isTauriDesktop } from '../lib/localDb'
 import { useBillingStore } from './billingStore'
 import { toPublicUser, useStaffStore, type StaffAccount } from './staffStore'
@@ -76,6 +76,57 @@ export const useAuthStore = create<AuthStore>()(
       firstRunComplete: false,
 
       login: async (emailOrPhone, password) => {
+        // The installed desktop is a cloud-managed client. Its only valid
+        // login source is the account created in Cloud Admin; local staff
+        // records are retained for LAN/role data, not as desktop credentials.
+        if (isTauriDesktop()) {
+          const billing = useBillingStore.getState()
+          const serverUrl = billing.cloudSync.serverUrl || 'https://bhojpatra-cloud.yash-v-shinde.workers.dev'
+          try {
+            const session = await runCloudLogin(serverUrl, emailOrPhone, password)
+            if (session.user.tenantId === 'platform' || session.user.id === 'usr_super_admin') {
+              return { success: false, error: 'This is a platform administrator account. Use the Cloud Admin panel to manage customers.' }
+            }
+            const outlet = session.outlets[0]
+            if (!outlet) return { success: false, error: 'No outlet is assigned to this login' }
+
+            // Desktop startup only validates the Workers credentials. Local
+            // SQLite has already been hydrated by DesktopBootstrap; importing
+            // a cloud snapshot here can replace open table carts during a
+            // refresh. Cloud data is handled later by the four-hour sync.
+            useBillingStore.getState().updateOutlet(outlet)
+
+            useBillingStore.getState().updateCloudSyncSettings({
+              enabled: true,
+              serverUrl,
+              tenantId: session.user.tenantId,
+              outletId: outlet.id,
+              accountLogin: emailOrPhone.trim(),
+              accountSecret: password,
+              autoSyncEnabled: true,
+              syncIntervalHours: 4,
+              cloudMode: 'delta_v2',
+            })
+
+            const cloudAccount: StaffAccount = {
+              ...session.user,
+              password,
+              pin: session.user.pin || password,
+              restaurantName: session.user.restaurantName || outlet.name,
+            }
+            useStaffStore.getState().replaceStaff([cloudAccount, ...useStaffStore.getState().staff])
+
+            set({
+              user: { ...session.user, lastLoginAt: new Date().toISOString() },
+              outlet,
+              isAuthenticated: true,
+            })
+            return { success: true }
+          } catch (error) {
+            return { success: false, error: error instanceof Error ? error.message : 'Cloud login failed' }
+          }
+        }
+
         const account = useStaffStore.getState().findByLogin(emailOrPhone)
 
         if (!account || isCloudAccount(account)) {
@@ -173,6 +224,7 @@ export const useAuthStore = create<AuthStore>()(
 
       autoLoginIfEnabled: () => {
         const state = useAuthStore.getState()
+        if (isTauriDesktop()) return false
         const shouldBypass = isTauriDesktop() ? !state.showStaffLoginOnDesktop : state.bypassStaffLogin
         if (!shouldBypass || state.isAuthenticated) return false
         const staff = useStaffStore.getState().staff

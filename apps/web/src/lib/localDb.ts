@@ -7,23 +7,6 @@ export type DesktopStatePayload = {
   staff: StaffAccount[] | null
 }
 
-export type LicenseStatus = {
-  key?: string | null
-  status: string
-  lastCheck: number
-  expiry?: number | null
-  lastKnownDate: number
-  clientName?: string | null
-  softwareType?: string | null
-  planType?: string | null
-  offlineGrace?: boolean
-}
-
-export type ActivationResult = {
-  success: boolean
-  message: string
-}
-
 export type LanServerStatus = {
   running: boolean
   bindHost: string
@@ -69,21 +52,6 @@ export async function saveDesktopSyncMetadata(metadata: DesktopSyncMetadata) {
     syncState: metadata.state,
     conflicts: metadata.conflicts,
   })
-}
-
-export async function checkDesktopLicense() {
-  if (!isTauriDesktop()) return true
-  return invoke<boolean>('check_license')
-}
-
-export async function getDesktopLicenseStatus() {
-  if (!isTauriDesktop()) return null
-  return invoke<LicenseStatus>('get_license_status')
-}
-
-export async function activateDesktopLicense(key: string) {
-  if (!isTauriDesktop()) return { success: true, message: 'Web preview does not require activation' }
-  return invoke<ActivationResult>('activate_license', { key })
 }
 
 export async function getLanServerStatus() {

@@ -23,7 +23,7 @@ import type {
   TableStatus,
 } from '../lib/types'
 import { type BillingSnapshot, type CloudSyncSettings } from '../lib/cloudSync'
-import { dexieBusinessStateStorage, syncOrderDeltasNow } from '../lib/orderSync'
+import { dexieBusinessStateStorage } from '../lib/orderSync'
 import { calculateTax } from '../lib/money'
 import { isTauriDesktop, saveDesktopState } from '../lib/localDb'
 import { realtimeClient } from '../lib/realtime'
@@ -200,6 +200,7 @@ interface BillingStore {
 
   setOrderType: (type: OrderType) => void
   selectTable: (tableId: string | null) => void
+  closeTableView: () => void
   startNewOrder: (userId: string, userName: string) => void
   loadOrder: (orderId: string) => void
   addToCart: (item: MenuItem, options?: { modifiers?: Modifier[]; note?: string }) => void
@@ -661,6 +662,11 @@ const syncCart = (state: BillingStore, newCart: CartItem[]): Partial<BillingStor
 function parkActiveCart(state: BillingStore) {
   if (state.activeOrderType !== 'dine_in' || !state.selectedTableId) return state.savedCarts
   const savedCarts = { ...state.savedCarts }
+  // While an occupied table is being opened, selectedTableId can be assigned
+  // just before its order/cart is restored. Preserve the already parked cart
+  // during that transient state instead of treating the empty view as an
+  // explicit cart deletion.
+  if (!state.currentOrder) return savedCarts
   if (state.currentOrder && (
     state.currentOrder.type !== 'dine_in' ||
     state.currentOrder.tableId !== state.selectedTableId ||
@@ -694,6 +700,16 @@ function getActiveItemCountByOrder(orderItems: OrderItem[]) {
 
 export function isClosedOrder(order?: Order | null) {
   return !order || order.isClosed === true || Boolean(order.closedAt) || ['paid', 'cancelled', 'void'].includes(order.status)
+}
+
+// The desktop shell has its own SQLite persistence layer. Keeping a second
+// browser/Dexie copy active there allows an older browser snapshot to race the
+// SQLite restore during startup and drop unsent table carts. Browser builds
+// still use Dexie below; Tauri writes are handled by DesktopBootstrap.
+const desktopNoopStorage = {
+  getItem: async () => null,
+  setItem: async () => undefined,
+  removeItem: async () => undefined,
 }
 
 export function isRestorableCurrentOrder(order: Order | null | undefined, tables: RestaurantTable[]) {
@@ -785,6 +801,56 @@ function preserveNewerCompletedOrders(incoming: BillingSnapshot, local: BillingS
   }
 }
 
+function preserveLocalActiveTableSessions(incoming: BillingSnapshot, local: BillingStore): BillingSnapshot {
+  const localItemCountByOrder = getActiveItemCountByOrder(local.orderItems)
+  const localSavedCarts = parkActiveCart(local)
+  const localTableById = new Map(local.tables.map((table) => [table.id, table]))
+  const activeSessionOrders = local.orders.filter((order) => {
+    if (isClosedOrder(order) || !order.tableId) return false
+    const table = localTableById.get(order.tableId)
+    if (table?.activeOrderId !== order.id) return false
+    return (localItemCountByOrder.get(order.id) ?? 0) > 0 || (localSavedCarts[order.tableId]?.length ?? 0) > 0
+  })
+  if (activeSessionOrders.length === 0) return incoming
+
+  const protectedOrderIds = new Set(activeSessionOrders.map((order) => order.id))
+  const protectedTableIds = new Set(activeSessionOrders.flatMap((order) => order.tableId ? [order.tableId] : []))
+  const incomingTableIds = new Set(incoming.tables.map((table) => table.id))
+  const localOrderItems = local.orderItems.filter((item) => protectedOrderIds.has(item.orderId))
+  const localKots = local.kots.filter((kot) => protectedOrderIds.has(kot.orderId))
+  const localPayments = local.payments.filter((payment) => protectedOrderIds.has(payment.orderId))
+  const sessionSavedCarts = Object.fromEntries(
+    Array.from(protectedTableIds)
+      .map((tableId) => [tableId, localSavedCarts[tableId]])
+      .filter(([, cart]) => Array.isArray(cart) && cart.length > 0),
+  ) as Record<string, CartItem[]>
+
+  return {
+    ...incoming,
+    orders: [
+      ...incoming.orders.filter((order) => !protectedOrderIds.has(order.id)),
+      ...activeSessionOrders,
+    ],
+    orderItems: [
+      ...incoming.orderItems.filter((item) => !protectedOrderIds.has(item.orderId)),
+      ...localOrderItems,
+    ],
+    kots: [
+      ...incoming.kots.filter((kot) => !protectedOrderIds.has(kot.orderId)),
+      ...localKots,
+    ],
+    payments: [
+      ...incoming.payments.filter((payment) => !protectedOrderIds.has(payment.orderId)),
+      ...localPayments,
+    ],
+    tables: [
+      ...incoming.tables.map((table) => protectedTableIds.has(table.id) ? localTableById.get(table.id) ?? table : table),
+      ...local.tables.filter((table) => protectedTableIds.has(table.id) && !incomingTableIds.has(table.id)),
+    ],
+    savedCarts: { ...(incoming.savedCarts ?? {}), ...sessionSavedCarts },
+  }
+}
+
 function reconcileSnapshot(snapshot: BillingSnapshot): BillingSnapshot {
   const cleanedSavedCarts = cleanSavedCarts(snapshot.savedCarts)
   const closedOrderIds = new Set(
@@ -796,10 +862,9 @@ function reconcileSnapshot(snapshot: BillingSnapshot): BillingSnapshot {
       .map((table) => table.id)
   )
   // A completed/cancelled order must not leave a parked cart behind when an
-  // imported snapshot still points the table at that closed order.
-  // Legacy table-keyed drafts are migrated only when the table still points to
-  // a real open order. Orphan carts are the source of products reappearing when
-  // a table is opened days later, so they are intentionally discarded.
+  // imported snapshot still points the table at that closed order. Open
+  // table-linked orders are retained even before their first KOT; their
+  // unsent products are stored separately in savedCarts.
   const savedCarts = Object.fromEntries(
     Object.entries(cleanedSavedCarts).filter(([tableId]) => {
       if (closedLinkedTableIds.has(tableId)) return false
@@ -808,28 +873,16 @@ function reconcileSnapshot(snapshot: BillingSnapshot): BillingSnapshot {
       return Boolean(linkedOrder && !isClosedOrder(linkedOrder))
     })
   ) as Record<string, CartItem[]>
-  const itemCountByOrder = getActiveItemCountByOrder(snapshot.orderItems)
-
-  const tableByOrderId = new Map<string, RestaurantTable>()
-  snapshot.tables.forEach((table) => {
-    if (table.activeOrderId) tableByOrderId.set(table.activeOrderId, table)
-  })
-
-  const keptOrders = snapshot.orders.filter((order) => {
-    if (isClosedOrder(order)) return true
-    const hasItems = (itemCountByOrder.get(order.id) ?? 0) > 0
-    const hasPendingCart = order.tableId ? (savedCarts[order.tableId]?.length ?? 0) > 0 : false
-    const tablePointsHere = tableByOrderId.get(order.id)?.id === order.tableId
-    return hasItems || hasPendingCart || !tablePointsHere
-  })
+  // Do not infer that an open order is abandoned from a temporarily missing
+  // cart/KOT collection. Explicit actions such as Clear Cart, cancellation,
+  // or checkout are responsible for closing/removing an order.
+  const keptOrders = [...snapshot.orders]
   const keptOrderIds = new Set(keptOrders.map((order) => order.id))
 
   const tables = snapshot.tables.map((table) => {
     if (!table.activeOrderId) return table
     const order = keptOrders.find((candidate) => candidate.id === table.activeOrderId)
-    const hasConfirmedItems = order ? (itemCountByOrder.get(order.id) ?? 0) > 0 : false
-    const hasPendingCart = (savedCarts[table.id]?.length ?? 0) > 0
-    if (isClosedOrder(order) || (!hasConfirmedItems && !hasPendingCart)) {
+    if (isClosedOrder(order)) {
       return { ...table, status: 'available' as TableStatus, activeOrderId: undefined }
     }
     return table
@@ -870,14 +923,17 @@ export const useBillingStore = create<BillingStore>()(
           kots: state.kots,
           payments: state.payments,
           auditLogs: state.auditLogs,
-          savedCarts: state.savedCarts,
+          // Always park the currently open table cart in the persisted
+          // table-keyed collection. This covers refresh/close occurring
+          // between a cart mutation and the next table switch.
+          savedCarts: parkActiveCart(state),
         }))
       },
 
       importSnapshot: (snapshot, preserveSession = false) => set((state) => {
         const localSavedCarts = preserveSession ? parkActiveCart(state) : state.savedCarts
         const conflictSafeSnapshot = preserveSession
-          ? preserveNewerCompletedOrders(snapshot, state)
+          ? preserveLocalActiveTableSessions(preserveNewerCompletedOrders(snapshot, state), state)
           : snapshot
         const incomingSnapshot = preserveSession
           ? { ...conflictSafeSnapshot, savedCarts: mergeSavedCarts(conflictSafeSnapshot.savedCarts, localSavedCarts) }
@@ -1494,9 +1550,8 @@ export const useBillingStore = create<BillingStore>()(
           if (table?.activeOrderId) {
             const order = get().orders.find(o => o.id === table.activeOrderId)
             let savedCart = parkedSavedCarts[tableId] || []
-            const savedItemCount = order ? get().orderItems.filter(item => item.orderId === order.id && item.status !== 'cancelled').length : 0
-            if (!order || isClosedOrder(order) || (savedItemCount === 0 && savedCart.length === 0)) {
-              // Orphaned/empty activeOrderId, clear it before opening billing.
+            if (!order || isClosedOrder(order)) {
+              // An orphaned or closed activeOrderId can be safely cleared.
               const cleanedSavedCarts = { ...parkedSavedCarts }
               if (order && isClosedOrder(order)) {
                 delete cleanedSavedCarts[tableId]
@@ -1510,8 +1565,18 @@ export const useBillingStore = create<BillingStore>()(
                 cart: savedCart
               }))
             } else {
-              set({ selectedTableId: tableId, savedCarts: parkedSavedCarts })
-              get().loadOrder(table.activeOrderId)
+              // An open order is authoritative even when it has no KOT rows
+              // yet. Its unsent products live in savedCarts, and SQLite
+              // restores that collection independently of the current view.
+              // Never turn a running table into a new order merely because a
+              // transient cart was not present in the first render.
+              set({
+                selectedTableId: tableId,
+                savedCarts: parkedSavedCarts,
+                currentOrder: order,
+                cart: savedCart,
+                activeOrderType: order.type,
+              })
             }
           } else {
             // Restore unsaved cart if it exists
@@ -1520,6 +1585,21 @@ export const useBillingStore = create<BillingStore>()(
           }
         } else {
           set({ selectedTableId: null, currentOrder: null, cart: [], savedCarts: parkedSavedCarts })
+        }
+      },
+
+      closeTableView: () => {
+        const state = get()
+        const savedCarts = parkActiveCart(state)
+        set({ selectedTableId: null, currentOrder: null, cart: [], savedCarts })
+
+        // Leaving a table order from the modal is an explicit persistence
+        // boundary. Save immediately so closing/reopening the table cannot
+        // depend on a debounce, pagehide event, or the browser persist layer.
+        if (isTauriDesktop()) {
+          void saveDesktopState(get().exportSnapshot(), useStaffStore.getState().staff).catch((error) => {
+            console.error('Table cart local save failed', error)
+          })
         }
       },
 
@@ -1558,11 +1638,6 @@ export const useBillingStore = create<BillingStore>()(
           tables: order.tableId ? current.tables.map((candidate) => candidate.id === order.tableId ? { ...candidate, status: 'occupied', activeOrderId: order.id } : candidate) : current.tables,
           auditLogs: addAudit(current, 'order.created', 'order', `Created ${order.orderNo}`, order.id),
         }))
-        const afterCreate = get()
-        if (order.tableId && afterCreate.cloudSync.enabled && (typeof navigator === 'undefined' || navigator.onLine)) {
-          // Claim the table immediately. Offline mutations retain their batch id.
-          void syncOrderDeltasNow(afterCreate.exportSnapshot(), afterCreate.cloudSync).catch(() => undefined)
-        }
       },
 
       loadOrder: (orderId) => {
@@ -2204,27 +2279,6 @@ export const useBillingStore = create<BillingStore>()(
             console.error('Checkout local save failed', error)
             useUIStore.getState().addToast('error', 'Checkout is complete in memory, but the desktop database save will be retried.', 'Local Save Warning')
           })
-        }
-        const cloud = afterSettle.cloudSync
-        if (cloud.enabled && cloud.serverUrl && cloud.outletId && cloud.accountLogin && cloud.accountSecret) {
-          void syncOrderDeltasNow(completedSnapshot, cloud)
-            .then((result) => {
-              if (result.changed) afterSettle.importSnapshot(result.snapshot)
-              const syncedAt = new Date().toISOString()
-              get().updateCloudSyncSettings({
-                lastSyncedAt: syncedAt,
-                lastSuccessfulSyncAt: syncedAt,
-                lastCloudUploadedAt: syncedAt,
-              })
-            })
-            .catch((error) => {
-              console.error('Checkout cloud save failed', error)
-              useUIStore.getState().addToast(
-                'error',
-                'Checkout is complete on this device, but cloud sync failed. It will retry during the next scheduled sync.',
-                'Cloud Sync Warning',
-              )
-            })
         }
         if (printAfter ?? (get().printSettings.autoPrintReceipt || get().printSettings.directReceiptPrint)) setTimeout(() => get().printReceipt(actualOrderId), 0)
         return true
@@ -2963,7 +3017,7 @@ export const useBillingStore = create<BillingStore>()(
     {
       name: 'bhojpatra-restaurant-data-v2',
       version: 2,
-      storage: createJSONStorage(() => dexieBusinessStateStorage),
+      storage: createJSONStorage(() => isTauriDesktop() ? desktopNoopStorage : dexieBusinessStateStorage),
       partialize: (state) => ({
         outlet: state.outlet,
         printSettings: state.printSettings,

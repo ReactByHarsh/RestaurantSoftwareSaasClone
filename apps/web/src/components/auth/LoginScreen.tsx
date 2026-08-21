@@ -2,12 +2,13 @@ import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { Loader2, ChefHat, Eye, EyeOff, BarChart3, CreditCard, LayoutGrid, ReceiptText } from 'lucide-react'
 import { useAuthStore } from '../../store/authStore'
+import { useBillingStore } from '../../store/billingStore'
 import { getDefaultRoute } from '../../lib/permissions'
 
 export default function LoginScreen() {
   const navigate = useNavigate()
   const { isAuthenticated, user, login } = useAuthStore()
-  const [email, setEmail] = useState('')
+  const [email, setEmail] = useState(() => useBillingStore.getState().cloudSync.accountLogin || '')
   const [password, setPassword] = useState('')
   const [showPass, setShowPass] = useState(false)
   const [loading, setLoading] = useState(false)

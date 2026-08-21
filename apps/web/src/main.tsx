@@ -3,12 +3,8 @@ import ReactDOM from 'react-dom/client'
 import { BrowserRouter } from 'react-router-dom'
 import App from './App'
 import './styles/globals.css'
-import { realtimeClient } from './lib/realtime'
 import { isTauriDesktop } from './lib/localDb'
 import DesktopBootstrap from './components/sync/DesktopBootstrap'
-
-// Connect realtime client on app start
-realtimeClient.connect()
 
 if (isTauriDesktop()) {
   void (async () => {

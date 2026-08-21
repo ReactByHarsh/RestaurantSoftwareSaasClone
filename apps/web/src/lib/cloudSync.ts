@@ -57,7 +57,7 @@ export type BillingSnapshot = {
   savedCarts?: Record<string, CartItem[]>
 }
 
-type CloudStateResponse =
+export type CloudStateResponse =
   | { exists: false; outletId: string }
   | { exists: true; outletId: string; tenantId: string; updatedAt: string; payload: BillingSnapshot }
 
@@ -223,6 +223,70 @@ export async function fetchCloudSnapshot(outletId: string, serverUrl = 'https://
   return response.json() as Promise<CloudStateResponse>
 }
 
+const completeSnapshotCollections = [
+  'menuCategories', 'menuItems', 'floors', 'tables', 'stations',
+  'inventoryItems', 'purchaseEntries', 'orders', 'orderItems',
+  'kots', 'payments', 'auditLogs',
+] as const
+
+function mergeCloudCollection(primary: unknown, secondary: unknown) {
+  const values = [
+    ...(Array.isArray(primary) ? primary : []),
+    ...(Array.isArray(secondary) ? secondary : []),
+  ]
+  const byId = new Map<string, unknown>()
+  values.forEach((value, index) => {
+    if (!value || typeof value !== 'object') return
+    const id = String((value as { id?: unknown }).id ?? `row-${index}`)
+    byId.set(id, value)
+  })
+  return Array.from(byId.values())
+}
+
+/**
+ * Fetch the complete restaurant dataset. The saved app snapshot contains
+ * setup data, while initial-state also projects all relational orders,
+ * order-items, KOTs, and payments. Combining both prevents an older snapshot
+ * from hiding history that is already present in the cloud database.
+ */
+export async function fetchCompleteCloudSnapshot(
+  outletId: string,
+  serverUrl = 'https://bhojpatra-cloud.yash-v-shinde.workers.dev',
+  auth?: CloudAuth,
+): Promise<CloudStateResponse> {
+  const [savedState, initialState] = await Promise.all([
+    fetchCloudSnapshot(outletId, serverUrl, auth),
+    fetchInitialState(outletId, serverUrl, auth),
+  ])
+
+  const savedPayload = savedState.exists ? savedState.payload : null
+  const initialPayload = initialState.exists ? initialState.payload : null
+  if (!savedPayload && !initialPayload) return savedState
+
+  const merged = {
+    ...(initialPayload ?? {}),
+    ...(savedPayload ?? {}),
+  } as BillingSnapshot
+  completeSnapshotCollections.forEach((key) => {
+    ;(merged as unknown as Record<string, unknown>)[key] = mergeCloudCollection(
+      savedPayload?.[key],
+      initialPayload?.[key],
+    )
+  })
+  merged.savedCarts = {
+    ...(initialPayload?.savedCarts ?? {}),
+    ...(savedPayload?.savedCarts ?? {}),
+  }
+
+  return {
+    exists: true,
+    outletId,
+    tenantId: savedState.exists ? savedState.tenantId : initialPayload?.outlet?.tenantId ?? '',
+    updatedAt: savedState.exists ? savedState.updatedAt : initialState.updatedAt,
+    payload: merged,
+  }
+}
+
 export async function saveCloudSnapshot(
   outletId: string,
   tenantId: string,
@@ -253,11 +317,17 @@ export async function saveCloudSnapshot(
   return response.json() as Promise<{ ok: true; outletId: string; updatedAt: string; skipped?: boolean; payload?: BillingSnapshot }>
 }
 
-export async function fetchInitialState(outletId: string): Promise<{ exists: boolean; payload: BillingSnapshot; updatedAt: string }> {
+export async function fetchInitialState(
+  outletId: string,
+  serverUrl?: string,
+  auth?: CloudAuth,
+): Promise<{ exists: boolean; payload: BillingSnapshot; updatedAt: string }> {
   const cloud = activeCloudSettings()
-  if (!cloud) return { exists: false, payload: {} as BillingSnapshot, updatedAt: now() }
-  const response = await fetch(`${cleanBaseUrl(cloud.serverUrl)}/api/v1/state/${encodeURIComponent(outletId)}/initial-state`, {
-    headers: { Accept: 'application/json', ...authHeaders(cloud.auth) },
+  const baseUrl = serverUrl || cloud?.serverUrl
+  const effectiveAuth = auth || cloud?.auth
+  if (!baseUrl) return { exists: false, payload: {} as BillingSnapshot, updatedAt: now() }
+  const response = await fetch(`${cleanBaseUrl(baseUrl)}/api/v1/state/${encodeURIComponent(outletId)}/initial-state`, {
+    headers: { Accept: 'application/json', ...authHeaders(effectiveAuth) },
     credentials: 'include',
   })
   if (!response.ok) throw new Error(`Initial state fetch failed with ${response.status}`)
