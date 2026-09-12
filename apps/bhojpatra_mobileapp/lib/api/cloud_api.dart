@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'package:http/http.dart' as http;
 import 'package:web_socket_channel/web_socket_channel.dart';
+import 'package:uuid/uuid.dart';
 import 'lan_discovery.dart';
 import '../models/session.dart';
 import '../utils/utils.dart';
@@ -9,6 +10,7 @@ class CloudApi {
   CloudApi(this.session);
 
   final SavedSession session;
+  String? _lastStateUpdatedAt;
 
   String get _base => cleanBase(session.serverUrl);
 
@@ -90,9 +92,25 @@ class CloudApi {
       }
     }
 
+    // A browser-only BhojPatra SaaS session cannot host an inbound LAN server.
+    // Keep restaurant work available by falling back to the same live cloud
+    // account; LAN remains preferred whenever BhojPatra Desk is reachable.
+    try {
+      return await login(
+        defaultServerUrl,
+        loginId,
+        password,
+        mode: 'cloud_live',
+      );
+    } catch (error) {
+      errors.add(
+        'Cloud fallback: ${error.toString().replaceFirst('Exception: ', '')}',
+      );
+    }
+
     if (candidates.isEmpty) {
       throw Exception(
-        'BhojPatra Desk was not found. Keep desktop open, phone on same Wi-Fi/hotspot, and allow Windows Firewall for BhojPatra Desk.',
+        'BhojPatra Desk was not found on Wi-Fi and the cloud login also failed. Keep BhojPatra Desk open or check the staff login in the web Admin panel.',
       );
     }
     throw Exception(
@@ -112,12 +130,13 @@ class CloudApi {
     }
     final payload = jsonDecode(response.body) as Map<String, dynamic>;
     if (payload['exists'] == true && payload['payload'] is Map) {
+      _lastStateUpdatedAt = text(payload['updatedAt']);
       return Map<String, dynamic>.from(payload['payload'] as Map);
     }
     return emptySnapshot(session);
   }
 
-  Future<void> saveState(Map<String, dynamic> snapshot) async {
+  Future<Map<String, dynamic>> saveState(Map<String, dynamic> snapshot) async {
     final tenantId = text(
       snapshotValue(snapshot, 'outlet', 'tenantId'),
       fallback: session.tenantId,
@@ -130,13 +149,69 @@ class CloudApi {
       body: jsonEncode({
         'tenantId': tenantId,
         'payload': snapshot,
-        'clientId':
-            'flutter-${session.role}-${DateTime.now().millisecondsSinceEpoch}',
+        'clientId': 'flutter-${session.role}-${const Uuid().v4()}',
+        if (_lastStateUpdatedAt != null)
+          'expectedUpdatedAt': _lastStateUpdatedAt,
       }),
     );
+    final payload = _jsonMap(response.body);
+    if (response.statusCode == 409) {
+      throw StateConflictException(
+        text(payload['error'], fallback: 'Restaurant data changed'),
+        payload['payload'] is Map
+            ? Map<String, dynamic>.from(payload['payload'] as Map)
+            : null,
+        text(payload['updatedAt']),
+      );
+    }
     if (response.statusCode < 200 || response.statusCode >= 300) {
       throw Exception('Cloud sync save failed (${response.statusCode})');
     }
+    _lastStateUpdatedAt = text(
+      payload['updatedAt'],
+      fallback: _lastStateUpdatedAt ?? '',
+    );
+    if (payload['payload'] is Map) {
+      return Map<String, dynamic>.from(payload['payload'] as Map);
+    }
+    return snapshot;
+  }
+
+  Future<Map<String, dynamic>> pushOrderDeltas(
+    Map<String, dynamic> request,
+  ) async {
+    final response = await http.post(
+      Uri.parse(
+        '$_base/api/v2/outlets/${Uri.encodeComponent(session.outletId)}/sync/push',
+      ),
+      headers: {..._headers, 'Content-Type': 'application/json'},
+      body: jsonEncode(request),
+    );
+    final payload = _jsonMap(response.body);
+    if (response.statusCode < 200 || response.statusCode >= 300) {
+      throw Exception(
+        text(
+          payload['error'],
+          fallback: 'Order delta push failed (${response.statusCode})',
+        ),
+      );
+    }
+    return payload;
+  }
+
+  Future<Map<String, dynamic>> pullOrderDeltas(
+    int cursor, {
+    int limit = 100,
+  }) async {
+    final uri = Uri.parse(
+      '$_base/api/v2/outlets/${Uri.encodeComponent(session.outletId)}/sync/pull',
+    ).replace(queryParameters: {'cursor': '$cursor', 'limit': '$limit'});
+    final response = await http.get(uri, headers: _headers);
+    final payload = _jsonMap(response.body);
+    if (response.statusCode < 200 || response.statusCode >= 300) {
+      throw Exception('Order delta pull failed (${response.statusCode})');
+    }
+    return payload;
   }
 
   WebSocketChannel connectRealtime() {
@@ -153,6 +228,21 @@ class CloudApi {
         );
     return WebSocketChannel.connect(uri);
   }
+}
+
+class StateConflictException implements Exception {
+  const StateConflictException(
+    this.message,
+    this.currentSnapshot,
+    this.updatedAt,
+  );
+
+  final String message;
+  final Map<String, dynamic>? currentSnapshot;
+  final String updatedAt;
+
+  @override
+  String toString() => message;
 }
 
 Map<String, dynamic> _jsonMap(String body) {

@@ -11,8 +11,6 @@ const bridgeVersion = '1.0.4'
 const host = '127.0.0.1'
 const port = Number(process.env.BHOJPATRA_PRINT_BRIDGE_PORT || 8181)
 const allowedOrigins = new Set([
-  'https://bhojpatra-cloud.pages.dev',
-  'https://bhojpatra-cloud-701.pages.dev',
   'https://bhojpatra-cloud.yash-v-shinde.workers.dev',
   'http://127.0.0.1:5173',
   'http://localhost:5173',
@@ -21,7 +19,6 @@ const allowedOrigins = new Set([
 function corsHeaders(request) {
   const origin = request.headers.origin || ''
   const allowedOrigin = allowedOrigins.has(origin) ||
-    /^https:\/\/[a-z0-9-]+\.(bhojpatra-cloud|bhojpatra-cloud-701)\.pages\.dev$/.test(origin) ||
     /^https:\/\/bhojpatra-cloud\.yash-v-shinde\.workers\.dev$/.test(origin) ||
     /^https?:\/\/[^/\s]+$/i.test(origin) ||
     origin === 'null'

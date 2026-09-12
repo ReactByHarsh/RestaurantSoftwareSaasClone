@@ -7,23 +7,6 @@ export type DesktopStatePayload = {
   staff: StaffAccount[] | null
 }
 
-export type LicenseStatus = {
-  key?: string | null
-  status: string
-  lastCheck: number
-  expiry?: number | null
-  lastKnownDate: number
-  clientName?: string | null
-  softwareType?: string | null
-  planType?: string | null
-  offlineGrace?: boolean
-}
-
-export type ActivationResult = {
-  success: boolean
-  message: string
-}
-
 export type LanServerStatus = {
   running: boolean
   bindHost: string
@@ -32,6 +15,22 @@ export type LanServerStatus = {
   primaryUrl: string | null
   urls: string[]
   lastError: string | null
+}
+
+export type DesktopSyncMetadata = {
+  records: unknown[]
+  outbox: unknown[]
+  state: unknown[]
+  conflicts: unknown[]
+}
+
+export type LocalBackupResult = {
+  date: string
+  fileName: string
+  created: boolean
+  sizeBytes: number
+  paths: string[]
+  errors: string[]
 }
 
 export function isTauriDesktop() {
@@ -49,19 +48,24 @@ export async function saveDesktopState(snapshot: BillingSnapshot, staff: StaffAc
   await invoke('save_local_state', { snapshot, staff })
 }
 
-export async function checkDesktopLicense() {
-  if (!isTauriDesktop()) return true
-  return invoke<boolean>('check_license')
-}
-
-export async function getDesktopLicenseStatus() {
+export async function createDailyLocalBackup(force = false) {
   if (!isTauriDesktop()) return null
-  return invoke<LicenseStatus>('get_license_status')
+  return invoke<LocalBackupResult>('create_daily_local_backup', { force })
 }
 
-export async function activateDesktopLicense(key: string) {
-  if (!isTauriDesktop()) return { success: true, message: 'Web preview does not require activation' }
-  return invoke<ActivationResult>('activate_license', { key })
+export async function loadDesktopSyncMetadata() {
+  if (!isTauriDesktop()) return null
+  return invoke<DesktopSyncMetadata>('load_sync_metadata')
+}
+
+export async function saveDesktopSyncMetadata(metadata: DesktopSyncMetadata) {
+  if (!isTauriDesktop()) return
+  await invoke('save_sync_metadata', {
+    records: metadata.records,
+    outbox: metadata.outbox,
+    syncState: metadata.state,
+    conflicts: metadata.conflicts,
+  })
 }
 
 export async function getLanServerStatus() {

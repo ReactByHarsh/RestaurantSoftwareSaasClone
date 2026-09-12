@@ -5,6 +5,7 @@
   "scripts": {
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
+    "test": "vitest run",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
@@ -12,8 +13,9 @@
     "zod": "^3.23.8"
   },
   "devDependencies": {
-    "@cloudflare/workers-types": "^4.20240620.0",
+    "@cloudflare/workers-types": "^5.20260905.1",
     "typescript": "^5.4.5",
-    "wrangler": "^4.101.0"
+    "vitest": "2.1.9",
+    "wrangler": "^4.129.0"
   }
 }

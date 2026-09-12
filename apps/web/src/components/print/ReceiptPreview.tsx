@@ -101,6 +101,12 @@ export default function ReceiptPreview({
           <div className="thermal-rule" />
 
           <table className="thermal-table thermal-table-wide">
+            <colgroup>
+              <col className="thermal-item-col" />
+              <col className="thermal-qty-col" />
+              <col className="thermal-rate-col" />
+              <col className="thermal-amount-col" />
+            </colgroup>
             <thead>
               <tr><th>Item</th><th>Qty</th><th>Rate</th><th>Amount</th></tr>
             </thead>
@@ -147,7 +153,7 @@ export default function ReceiptPreview({
                 <p className="thermal-section-title">UPI PAYMENT</p>
                 <img src={upiQrByPart[part.section]} alt="UPI payment QR" />
                 {printSettings.showUpiIdOnBill === true && <p>{printSettings.upiId}</p>}
-                <p>{formatPaise(part.combinedNetPaise ?? part.netPaise)}</p>
+                <p>{formatPaise(part.upiAmountPaise ?? part.combinedNetPaise ?? part.netPaise)}</p>
               </div>
             </>
           )}
@@ -170,7 +176,7 @@ export default function ReceiptPreview({
 
           <div className="thermal-rule" />
           <div className="thermal-center">
-            <p>BILL PART {part.partIndex} OF {part.partCount}</p>
+            {printSettings.showBillPartLabel !== false && <p>BILL PART {part.partIndex} OF {part.partCount}</p>}
             <p>{printSettings.footerText || 'Thank you. Please visit again.'}</p>
           </div>
         </section>

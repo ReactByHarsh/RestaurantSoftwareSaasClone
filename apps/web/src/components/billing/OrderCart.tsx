@@ -51,7 +51,9 @@ export default function OrderCart({ onSendKOT, onSettleBill, onBackToMenu }: Pro
 
   const filteredSearchItems = useMemo(() => {
     const saleableItems = menuItems.filter(isSaleableMenuItem)
-    if (!quickSearch.trim()) return saleableItems.slice(0, 50)
+    // Do not open a 50-item dropdown merely because the cashier focused the field.
+    // Suggestions are useful only after the cashier has started typing.
+    if (!quickSearch.trim()) return []
     return filterMenuItemsByQuery(saleableItems, quickSearch)
   }, [quickSearch, menuItems])
 
@@ -253,7 +255,7 @@ export default function OrderCart({ onSendKOT, onSettleBill, onBackToMenu }: Pro
             onBlur={() => setTimeout(() => setIsSearchFocused(false), 200)}
             onKeyDown={handleSearchKeyDown} 
           />
-          {isSearchFocused && filteredSearchItems.length > 0 && (
+          {isSearchFocused && quickSearch.trim() && filteredSearchItems.length > 0 && (
             <div className="absolute top-full left-0 right-0 mt-1 bg-white border border-slate-200 rounded-lg shadow-xl z-50 max-h-60 overflow-y-auto">
               {filteredSearchItems.map((item, index) => (
                 <div 

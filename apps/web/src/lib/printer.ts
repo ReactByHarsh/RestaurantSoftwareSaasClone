@@ -2,6 +2,11 @@ import { invoke } from '@tauri-apps/api/core'
 
 export type PrinterConnectionMode = 'browser' | 'system' | 'webusb' | 'bridge' | 'native'
 
+export function normalizePrinterConnectionMode(mode?: PrinterConnectionMode): Exclude<PrinterConnectionMode, 'system'> {
+  if (mode === 'bridge' || mode === 'native' || mode === 'webusb') return mode
+  return 'browser'
+}
+
 export interface PrinterTransportSettings {
   connectionMode: PrinterConnectionMode
   printerName: string
@@ -27,6 +32,14 @@ export interface BridgePrinter {
   driverName?: string
   status?: string
   isDefault?: boolean
+}
+
+export interface BridgeHealth {
+  ok: boolean
+  service?: string
+  version?: string
+  spoolerStatus?: string
+  printerCount?: number
 }
 
 export interface PrintJob {
@@ -165,7 +178,7 @@ function escPosBytes(job: Pick<PrintJob, 'text' | 'qrCodes'>, settings: PrinterT
 function usbOpenError(error: unknown) {
   const message = error instanceof Error ? error.message : String(error)
   if (/access denied|permission|denied|security/i.test(message)) {
-    return new Error('Chrome cannot claim this printer while Windows owns it. Use Printer Bridge with the POS80 Windows queue for no-dialog USB/Bluetooth/LAN printing, or use System Dialog.')
+    return new Error('Chrome cannot claim this printer while Windows owns it. In BhojPatra Desk use Desktop Built-in with the installed Windows queue, or use System Dialog.')
   }
   return error instanceof Error ? error : new Error(message || 'USB printer failed to open.')
 }
@@ -256,6 +269,38 @@ export function isLocalBridgeUrl(value?: string) {
   }
 }
 
+export async function checkBridgeHealth(bridgeUrl?: string, timeoutMs = 2500): Promise<BridgeHealth> {
+  const controller = new AbortController()
+  const timer = window.setTimeout(() => controller.abort(), timeoutMs)
+  try {
+    const response = await fetch(`${resolveBridgeUrlInput(bridgeUrl)}/health`, {
+      headers: { Accept: 'application/json' },
+      cache: 'no-store',
+      signal: controller.signal,
+    })
+    if (!response.ok) throw new Error(await bridgeErrorMessage(response))
+    const health = await response.json() as BridgeHealth
+    if (!health?.ok) throw new Error('The local printer bridge returned an unhealthy status.')
+    return health
+  } finally {
+    window.clearTimeout(timer)
+  }
+}
+
+async function waitForBridge(bridgeUrl?: string) {
+  let lastError: unknown
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    try {
+      return await checkBridgeHealth(bridgeUrl, 2500)
+    } catch (error) {
+      lastError = error
+      if (attempt < 3) await new Promise((resolve) => window.setTimeout(resolve, 700 * (attempt + 1)))
+    }
+  }
+  const detail = lastError instanceof Error && lastError.name !== 'AbortError' ? ` ${lastError.message}` : ''
+  throw new Error(`BhojPatra Printer Bridge is temporarily unavailable after automatic retries.${detail} Windows will restart it automatically; wait a moment and retry.`)
+}
+
 function isPrivateLanHost(hostname: string) {
   const host = hostname.replace(/^\[|\]$/g, '').toLowerCase()
   if (host === 'localhost' || host.endsWith('.pages.dev') || host.endsWith('.workers.dev')) return false
@@ -275,9 +320,11 @@ export function normalizeNetworkPrinterAddress(value?: string) {
   try {
     const parsed = new URL(raw)
     if (['tcp:', 'socket:', 'raw:'].includes(parsed.protocol)) {
+      if (!parsed.hostname) return ''
       return `tcp://${parsed.hostname}:${parsed.port || '9100'}`
     }
-    if (['http:', 'https:'].includes(parsed.protocol) && isPrivateLanHost(parsed.hostname)) {
+    if (['http:', 'https:'].includes(parsed.protocol) &&
+      (isPrivateLanHost(parsed.hostname) || /^[a-z0-9][a-z0-9-]*$/i.test(parsed.hostname))) {
       return `tcp://${parsed.hostname}:${parsed.port || '9100'}`
     }
   } catch {
@@ -287,13 +334,32 @@ export function normalizeNetworkPrinterAddress(value?: string) {
   const hostPort = raw.match(/^([a-z0-9.-]+|\[[a-f0-9:]+\])(?::(\d{2,5}))?$/i)
   if (!hostPort) return ''
   const host = hostPort[1].replace(/^\[|\]$/g, '')
-  if (!isPrivateLanHost(host)) return ''
+  const hasExplicitPort = Boolean(hostPort[2])
+  const isSingleLabelHost = /^[a-z0-9][a-z0-9-]*$/i.test(host)
+  // A bare value such as POS-80C is overwhelmingly likely to be a Windows
+  // printer queue name. Only treat a single-label value as LAN when the user
+  // explicitly supplies a port (POS-80C:9100) or a URL scheme.
+  if (!isPrivateLanHost(host) && !(hasExplicitPort && isSingleLabelHost)) return ''
   if (!/^[a-z0-9.-]+$|^[a-f0-9:]+$/i.test(host)) return ''
   return `tcp://${host}:${hostPort[2] || '9100'}`
 }
 
 export async function discoverBridgePrinters(bridgeUrl?: string): Promise<BridgePrinter[]> {
-  const response = await fetch(`${resolveBridgeUrlInput(bridgeUrl)}/printers`, { headers: { Accept: 'application/json' } })
+  // Printer enumeration may legitimately take longer while Windows refreshes a USB queue.
+  // First prove the lightweight bridge heartbeat, then allow discovery its own timeout.
+  await checkBridgeHealth(bridgeUrl, 4000)
+  const controller = new AbortController()
+  const timer = window.setTimeout(() => controller.abort(), 20_000)
+  let response: Response
+  try {
+    response = await fetch(`${resolveBridgeUrlInput(bridgeUrl)}/printers`, {
+      headers: { Accept: 'application/json' },
+      cache: 'no-store',
+      signal: controller.signal,
+    })
+  } finally {
+    window.clearTimeout(timer)
+  }
   if (!response.ok) {
     if ([404, 405].includes(response.status) && !isLocalBridgeUrl(bridgeUrl)) {
       throw new Error('That looks like a printer IP/link, not the local print bridge. Use the local bridge URL and put the LAN printer IP as the printer target.')
@@ -354,19 +420,62 @@ async function printNative(settings: PrinterTransportSettings, job: PrintJob) {
 
 async function printBridge(settings: PrinterTransportSettings, job: PrintJob) {
   if (!settings.printerName.trim()) throw new Error('Select a printer queue in Settings first.')
+  await waitForBridge(settings.bridgeUrl)
   const networkTarget = normalizeNetworkPrinterAddress(settings.printerName)
-  const response = await fetch(`${resolveBridgeUrlInput(settings.bridgeUrl)}/print`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
-    body: JSON.stringify({
-      printer: networkTarget || settings.printerName,
-      jobName: job.jobName,
-      contentType: 'text/plain',
-      content: job.text,
-      options: { raw: true, autoCut: settings.autoCut !== false, openCashDrawer: Boolean(settings.openCashDrawer), qrCodes: job.qrCodes ?? [] },
-    }),
+  const requestedPrinter = networkTarget || settings.printerName
+  const sendToBridge = async (printer: string) => {
+    const response = await fetch(`${resolveBridgeUrlInput(settings.bridgeUrl)}/print`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+      body: JSON.stringify({
+        printer,
+        jobName: job.jobName,
+        contentType: 'text/plain',
+        content: job.text,
+        logoDataUrl: job.logoDataUrl ?? null,
+        options: { raw: true, autoCut: settings.autoCut !== false, openCashDrawer: Boolean(settings.openCashDrawer), qrCodes: job.qrCodes ?? [] },
+      }),
+    })
+    if (!response.ok) throw new Error(await bridgeErrorMessage(response))
+  }
+
+  try {
+    await sendToBridge(requestedPrinter)
+  } catch (error) {
+    // A stale hostname can fail even while the bridge and the Windows queue are
+    // healthy. Enumerate queues once and retry through the installed queue so the
+    // cashier does not need to know the printer's IP address.
+    if (!networkTarget || !isHostResolutionError(error)) throw error
+    let fallback: string | undefined
+    try {
+      fallback = await findInstalledQueueFallback(settings.bridgeUrl, networkTarget)
+    } catch {
+      throw error
+    }
+    if (!fallback) throw error
+    await sendToBridge(fallback)
+  }
+}
+
+function isHostResolutionError(error: unknown) {
+  return /no such host|enotfound|name or service not known|could not resolve/i.test(error instanceof Error ? error.message : String(error || ''))
+}
+
+async function findInstalledQueueFallback(bridgeUrl: string | undefined, networkTarget: string) {
+  const printers = await discoverBridgePrinters(bridgeUrl)
+  const parsed = new URL(networkTarget)
+  const host = parsed.hostname.toLowerCase()
+  const hostKey = host.replace(/[^a-z0-9]/g, '')
+  const fields = (printer: BridgePrinter) => `${printer.name} ${printer.label} ${printer.portName ?? ''} ${printer.driverName ?? ''}`.toLowerCase()
+  const matching = printers.filter((printer) => {
+    const value = fields(printer)
+    return value.includes(host) || value.replace(/[^a-z0-9]/g, '').includes(hostKey)
   })
-  if (!response.ok) throw new Error(await bridgeErrorMessage(response))
+  if (matching.length === 1) return matching[0].name
+
+  const preferred = printers.filter((printer) => printer.isDefault || /pos|thermal|receipt|printer|epson|rongta|kpc|80mm|58mm/i.test(fields(printer)))
+  if (preferred.length === 1) return preferred[0].name
+  return printers.length === 1 ? printers[0].name : undefined
 }
 
 async function bridgeErrorMessage(response: Response) {
@@ -426,4 +535,12 @@ export async function sendPrintJob(settings: PrinterTransportSettings, job: Prin
   if (job.browserUrl) printUrlWithoutPopup(job.browserUrl)
   else printTextWithDialog(job)
   return 'dialog'
+}
+
+export function describePrinterError(error: unknown) {
+  const message = error instanceof Error ? error.message : String(error || 'Direct print failed')
+  if (/no such host|enotfound|name or service not known|could not resolve/i.test(message)) {
+    return 'The bridge is online, but the saved LAN printer hostname cannot be resolved. Open Printer Settings, click Detect Printers, select the Windows printer queue, or enter the printer IP address (for example 192.168.1.50:9100).'
+  }
+  return message
 }

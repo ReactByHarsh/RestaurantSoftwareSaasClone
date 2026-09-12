@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import {
   CheckCircle2,
+  Download,
   Eye,
   FileText,
   Monitor,
@@ -18,11 +19,13 @@ import { useUIStore } from '../../store/uiStore'
 import { useBillingStore, type PrintSettings } from '../../store/billingStore'
 import type { BridgePrinter, PrinterConnectionMode } from '../../lib/printer'
 import {
+  checkBridgeHealth,
   DEFAULT_BRIDGE_URL,
   discoverBridgePrinters,
   discoverNativePrinters,
   nativePrintSupported,
   normalizeNetworkPrinterAddress,
+  normalizePrinterConnectionMode,
   requestUsbPrinter,
   resolveBridgeUrlInput,
   sendPrintJob,
@@ -79,27 +82,29 @@ const PREVIEW_MENU_ITEMS: MenuItem[] = [
 function createPreviewDraft(source: PrintSettings): PrintSettings {
   return {
     ...source,
-    connectionMode: source.connectionMode === 'system' ? 'browser' : source.connectionMode,
+    connectionMode: normalizePrinterConnectionMode(source.connectionMode),
     headingSize: source.headingSize ?? 'standard',
     fontSize: source.fontSize ?? 'standard',
   }
 }
 
 function preparePrintSettings(settings: PrintSettings): { value: PrintSettings } | { error: string } {
+  const connectionMode = normalizePrinterConnectionMode(settings.connectionMode)
   const trimmedPrinterName = settings.printerName.trim()
-  const lanTarget = settings.connectionMode === 'native'
+  const lanTarget = connectionMode === 'native'
     ? normalizeNetworkPrinterAddress(trimmedPrinterName)
     : normalizeNetworkPrinterAddress(settings.bridgeUrl)
   const bridgeUrl = lanTarget ? DEFAULT_BRIDGE_URL : resolveBridgeUrlInput(settings.bridgeUrl)
-  const printerName = settings.connectionMode === 'native' ? trimmedPrinterName : (lanTarget || trimmedPrinterName)
+  const printerName = connectionMode === 'native' ? trimmedPrinterName : (lanTarget || trimmedPrinterName)
 
-  if (settings.connectionMode !== 'browser' && !printerName) {
+  if (connectionMode !== 'browser' && !printerName) {
     return { error: 'Select or enter a printer before saving.' }
   }
 
   return {
     value: {
       ...settings,
+      connectionMode,
       printerName,
       bridgeUrl,
     },
@@ -112,10 +117,49 @@ export default function PrinterSettingsScreen() {
   const [draftSettings, setDraftSettings] = useState<PrintSettings>(() => createPreviewDraft(printSettings))
   const [detectedPrinters, setDetectedPrinters] = useState<BridgePrinter[]>([])
   const [printerBusy, setPrinterBusy] = useState(false)
+  const [bridgeStatus, setBridgeStatus] = useState<'idle' | 'checking' | 'online' | 'offline'>('idle')
+  const [bridgeVersion, setBridgeVersion] = useState('')
 
   useEffect(() => {
     setDraftSettings(createPreviewDraft(printSettings))
   }, [printSettings])
+
+  useEffect(() => {
+    if (draftSettings.connectionMode !== 'bridge') {
+      setBridgeStatus('idle')
+      return
+    }
+
+    let cancelled = false
+    let consecutiveFailures = 0
+    let hasConnected = false
+    const refreshHealth = async () => {
+      setBridgeStatus((current) => current === 'online' ? current : 'checking')
+      try {
+        const health = await checkBridgeHealth(draftSettings.bridgeUrl)
+        if (cancelled) return
+        setBridgeVersion(health.version ?? '')
+        consecutiveFailures = 0
+        hasConnected = true
+        setBridgeStatus('online')
+      } catch {
+        consecutiveFailures += 1
+        // A sleeping laptop, browser resume, or Windows spooler refresh can miss one
+        // heartbeat. Keep a known-good bridge green unless three probes fail in a row.
+        if (!cancelled && (!hasConnected || consecutiveFailures >= 3)) setBridgeStatus('offline')
+      }
+    }
+
+    void refreshHealth()
+    const timer = window.setInterval(() => void refreshHealth(), 30_000)
+    const onFocus = () => void refreshHealth()
+    window.addEventListener('focus', onFocus)
+    return () => {
+      cancelled = true
+      window.clearInterval(timer)
+      window.removeEventListener('focus', onFocus)
+    }
+  }, [draftSettings.bridgeUrl, draftSettings.connectionMode])
 
   const previewItems = useMemo<OrderItem[]>(() => ([
     {
@@ -242,6 +286,17 @@ export default function PrinterSettingsScreen() {
     setDraftSettings((current) => ({ ...current, [key]: value }))
   }
 
+  const selectConnectionMode = (mode: PrinterConnectionMode) => {
+    const normalizedMode = normalizePrinterConnectionMode(mode)
+    setDraftValue('connectionMode', normalizedMode)
+    // Persist the transport choice immediately on this computer. This prevents
+    // a cloud snapshot refresh or a browser reload from restoring legacy System mode.
+    updatePrintSettings({
+      connectionMode: normalizedMode,
+      ...(normalizedMode === 'bridge' ? { bridgeUrl: resolveBridgeUrlInput(draftSettings.bridgeUrl) } : {}),
+    })
+  }
+
   const handleUsbConnect = async () => {
     setPrinterBusy(true)
     try {
@@ -292,6 +347,7 @@ export default function PrinterSettingsScreen() {
       const selected = mergedPrinters.some((printer) => printer.name === draftSettings.printerName) ? draftSettings.printerName : (mergedPrinters[0]?.name ?? draftSettings.printerName)
 
       setDetectedPrinters(mergedPrinters)
+      setBridgeStatus('online')
       setDraftSettings((current) => ({
         ...current,
         connectionMode: 'bridge',
@@ -303,6 +359,7 @@ export default function PrinterSettingsScreen() {
       }))
       addToast('success', mergedPrinters.length > 0 ? `${mergedPrinters.length} printer${mergedPrinters.length === 1 ? '' : 's'} detected` : 'Bridge checked. Enter a LAN printer manually if needed.', 'Printer Setup')
     } catch (error) {
+      setBridgeStatus('offline')
       addToast('error', `${error instanceof Error ? error.message : 'Printer bridge unavailable'} Check the local bridge URL and CORS settings.`, 'Printer Setup')
     } finally {
       setPrinterBusy(false)
@@ -377,7 +434,7 @@ export default function PrinterSettingsScreen() {
     : draftSettings.connectionMode === 'webusb'
       ? 'Chrome USB'
       : draftSettings.connectionMode === 'bridge'
-        ? 'External bridge fallback'
+        ? bridgeStatus === 'online' ? `Local bridge online${bridgeVersion ? ` · ${bridgeVersion}` : ''}` : 'Local bridge offline'
         : 'System print dialog'
 
   return (
@@ -434,15 +491,15 @@ export default function PrinterSettingsScreen() {
 
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
                   {[
-                    ...(nativePrintSupported() ? [{ mode: 'native' as const, icon: Printer, title: 'Desktop Built-in', detail: 'Saved USB / Bluetooth / LAN' }] : []),
+                    ...(nativePrintSupported() ? [{ mode: 'native' as const, icon: Printer, title: 'Desktop Built-in', detail: 'Recommended • no helper app' }] : []),
                     { mode: 'browser' as const, icon: Monitor, title: 'System', detail: 'Windows print dialog' },
                     { mode: 'webusb' as const, icon: Usb, title: 'Chrome USB', detail: 'Only WebUSB-compatible printers' },
-                    { mode: 'bridge' as const, icon: Server, title: 'External Bridge', detail: 'Local service / LAN raw' },
+                    ...(!nativePrintSupported() ? [{ mode: 'bridge' as const, icon: Server, title: 'BhojPatra Local Bridge', detail: 'For browser-only installations' }] : []),
                   ].map((option) => (
                     <button
                       key={option.mode}
                       type="button"
-                      onClick={() => setDraftValue('connectionMode', option.mode)}
+                      onClick={() => selectConnectionMode(option.mode)}
                       className={`p-3 rounded-xl border-2 text-left transition-all ${draftSettings.connectionMode === option.mode ? 'border-primary bg-white shadow-sm' : 'border-slate-200 bg-slate-50 hover:border-slate-300'}`}
                     >
                       <option.icon size={17} className={draftSettings.connectionMode === option.mode ? 'text-primary' : 'text-slate-400'} />
@@ -463,7 +520,7 @@ export default function PrinterSettingsScreen() {
                   <div className="rounded-xl bg-white border border-slate-200 p-3 space-y-3">
                     <div>
                       <p className="text-xs font-black text-slate-700">BhojPatra desktop built-in printing</p>
-                      <p className="text-[10px] font-bold text-slate-500 mt-1">Use any installed Windows USB, Bluetooth, or network printer, or enter a LAN target like `tcp://192.168.1.50:9100`.</p>
+                      <p className="text-[10px] font-bold text-slate-500 mt-1">Prints directly from BhojPatra through the Windows spooler—no PowerShell process or separate bridge. Use any installed USB, Bluetooth, or network printer, or enter a LAN target like `tcp://192.168.1.50:9100`.</p>
                     </div>
                     <div className="grid grid-cols-1 sm:grid-cols-[1fr_auto] gap-2">
                       {detectedPrinters.length > 0 ? (
@@ -494,9 +551,15 @@ export default function PrinterSettingsScreen() {
 
                 {draftSettings.connectionMode === 'bridge' && (
                   <div className="rounded-xl bg-white border border-slate-200 p-3 space-y-3">
-                    <div>
-                      <p className="text-xs font-black text-slate-700">External local printer bridge</p>
-                      <p className="text-[10px] font-bold text-slate-500 mt-1">Fallback for local bridge or raw LAN printing. Enter the bridge URL or a printer IP like `192.168.1.50`.</p>
+                    <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+                      <div>
+                        <p className="text-xs font-black text-slate-700">BhojPatra local printer bridge</p>
+                        <p className="text-[10px] font-bold text-slate-500 mt-1">Runs automatically with Windows and supports installed USB, Bluetooth, and LAN printers.</p>
+                      </div>
+                      <span className={`inline-flex shrink-0 items-center gap-1 rounded-full px-2 py-1 text-[10px] font-black ${bridgeStatus === 'online' ? 'bg-emerald-50 text-emerald-700' : bridgeStatus === 'checking' ? 'bg-amber-50 text-amber-700' : 'bg-rose-50 text-rose-700'}`}>
+                        <CheckCircle2 size={12} />
+                        {bridgeStatus === 'online' ? `ONLINE${bridgeVersion ? ` · ${bridgeVersion}` : ''}` : bridgeStatus === 'checking' ? 'CHECKING' : 'OFFLINE'}
+                      </span>
                     </div>
                     <div className="grid grid-cols-1 sm:grid-cols-[1fr_auto] gap-2">
                       <input value={draftSettings.bridgeUrl} onChange={(event) => setDraftValue('bridgeUrl', event.target.value)} placeholder="Bridge URL or LAN printer IP/link" className="w-full px-3 py-2 rounded-xl border-2 border-slate-200 text-xs font-bold outline-none focus:border-primary/50" />
@@ -511,6 +574,12 @@ export default function PrinterSettingsScreen() {
                     ) : (
                       <input value={draftSettings.printerName} onChange={(event) => setDraftValue('printerName', event.target.value)} placeholder="Printer queue or LAN target, e.g. POS80 Printer or tcp://192.168.1.50:9100" className="w-full px-3 py-2 rounded-xl border-2 border-slate-200 text-sm font-bold outline-none focus:border-primary/50" />
                     )}
+                    <div className="flex flex-col gap-2 rounded-lg bg-slate-50 p-2.5 sm:flex-row sm:items-center sm:justify-between">
+                      <p className="text-[10px] font-bold text-slate-500">All-in-one Windows bridge with automatic startup and crash recovery. Your printer and paper settings stay saved on this computer.</p>
+                      <a href="/downloads/BhojPatra-Printer-Bridge-Setup.exe?v=3.1.2" download className="inline-flex min-h-8 shrink-0 items-center justify-center gap-1.5 rounded-lg bg-primary px-3 py-2 text-[10px] font-black text-white">
+                        <Download size={13} /> DOWNLOAD ALL-IN-ONE BRIDGE
+                      </a>
+                    </div>
                   </div>
                 )}
               </div>
@@ -536,6 +605,14 @@ export default function PrinterSettingsScreen() {
                     <option value="separate">Separate food and liquor bills</option>
                     <option value="single">Single combined bill</option>
                   </select>
+                </div>
+                <div>
+                  <label className="block text-xs font-black text-slate-700 mb-1.5 uppercase tracking-wider">KOT Printing Mode</label>
+                  <select value={draftSettings.kotPrintMode} onChange={(event) => setDraftValue('kotPrintMode', event.target.value as PrintSettings['kotPrintMode'])} className="w-full px-3 py-2 rounded-xl border-2 border-slate-200 text-sm font-bold bg-white">
+                    <option value="separate">Separate KOTs for food and liquor</option>
+                    <option value="single">Single combined KOT for food + liquor</option>
+                  </select>
+                  <p className="mt-1 text-[10px] font-bold text-slate-500">Kitchen records stay separated by station; this controls only the automatic print output.</p>
                 </div>
                 <div>
                   <label className="block text-xs font-black text-slate-700 mb-1.5 uppercase tracking-wider">Bill Heading Size</label>
@@ -593,6 +670,7 @@ export default function PrinterSettingsScreen() {
                   ['showGstinOnFirstBill', 'GSTIN on first bill'],
                   ['showGstinOnSecondBill', 'GSTIN on second bill'],
                   ['showKotToken', 'Show KOT token number'],
+                  ['showBillPartLabel', 'Show bill part label'],
                   ['directKotPrint', 'Direct KOT print'],
                   ['directReceiptPrint', 'Direct bill print'],
                   ['directProformaPrint', 'Direct proforma print'],
@@ -637,8 +715,35 @@ export default function PrinterSettingsScreen() {
                 <ReceiptText size={18} className="text-primary" strokeWidth={2.5} />
                 <h2 className="text-sm font-black text-slate-800 tracking-tight">KOT Preview</h2>
               </div>
-              <div className="p-4 bg-slate-50">
-                <pre className="rounded-2xl border border-slate-200 bg-white p-4 text-[11px] leading-5 text-slate-800 whitespace-pre-wrap overflow-auto">{previewKotText}</pre>
+              <div className="px-5 py-2 border-b border-slate-100 bg-slate-50 text-[10px] font-bold text-slate-500">
+                Print mode: <span className="font-black text-slate-700">{draftSettings.kotPrintMode === 'single' ? 'Single combined food + liquor KOT' : 'Separate food and liquor KOTs'}</span>
+              </div>
+              <div className="thermal-page !min-h-0 !bg-slate-100" style={{ ['--receipt-width' as string]: draftSettings.receiptWidth }} data-receipt-width={draftSettings.receiptWidth} data-heading-size={draftSettings.headingSize} data-font-size={draftSettings.fontSize}>
+                <section className="thermal-slip kot-slip !mb-0">
+                  <div className="thermal-center">
+                    <h1>KITCHEN ORDER TICKET</h1>
+                    <p>{outlet.name}</p>
+                    {draftSettings.showKotToken && <div className="kot-token">{previewKot.kotNo}</div>}
+                  </div>
+                  <div className="thermal-rule" />
+                  <div className="thermal-row"><span>Order</span><strong>{previewKot.orderNo}</strong></div>
+                  <div className="thermal-row"><span>Type</span><strong>{previewKot.orderType.replace('_', ' ')}</strong></div>
+                  <div className="thermal-row"><span>Time</span><strong>{new Date(previewKot.createdAt).toLocaleString('en-IN')}</strong></div>
+                  <div className="kot-meta-grid">
+                    {previewKot.tableName && <div className="kot-meta-box"><span>Table</span><strong>{previewKot.tableName}</strong></div>}
+                    <div className="kot-meta-box"><span>Items</span><strong>{previewKot.items.reduce((sum, item) => sum + item.quantity, 0)}</strong></div>
+                  </div>
+                  <div className="thermal-rule" />
+                  {previewKot.items.map((item) => (
+                    <div className="kot-item" key={item.id}>
+                      <div><strong>{item.quantity} x {item.name}</strong></div>
+                      {item.note && <div className="kot-note">Note: {item.note}</div>}
+                      {item.modifiers?.length ? <div className="kot-note">+ {item.modifiers.join(', ')}</div> : null}
+                    </div>
+                  ))}
+                  <div className="kot-total">TOTAL ITEMS: {previewKot.items.reduce((sum, item) => sum + item.quantity, 0)}</div>
+                </section>
+                <pre className="sr-only">{previewKotText}</pre>
               </div>
             </section>
           </div>

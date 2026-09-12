@@ -3,12 +3,8 @@ import ReactDOM from 'react-dom/client'
 import { BrowserRouter } from 'react-router-dom'
 import App from './App'
 import './styles/globals.css'
-import { realtimeClient } from './lib/realtime'
 import { isTauriDesktop } from './lib/localDb'
 import DesktopBootstrap from './components/sync/DesktopBootstrap'
-
-// Connect realtime client on app start
-realtimeClient.connect()
 
 if (isTauriDesktop()) {
   void (async () => {
@@ -27,6 +23,20 @@ if (isTauriDesktop()) {
       // Old service-worker caches should never block a desktop update.
     }
   })()
+}
+
+// A newly activated PWA worker must take control immediately so an old cached
+// app shell cannot keep using a retired cloud-sync protocol after deployment.
+if (!isTauriDesktop() && 'serviceWorker' in navigator) {
+  window.addEventListener('load', () => {
+    let reloadingForUpdate = false
+    navigator.serviceWorker.addEventListener('controllerchange', () => {
+      if (reloadingForUpdate) return
+      reloadingForUpdate = true
+      window.location.reload()
+    })
+    void navigator.serviceWorker.getRegistration('/').then((registration) => registration?.update())
+  })
 }
 
 ReactDOM.createRoot(document.getElementById('root')!).render(

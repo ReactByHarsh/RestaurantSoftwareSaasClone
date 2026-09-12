@@ -1,35 +1,99 @@
 import { useEffect, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { Settings as SettingsIcon, Save, Store, Printer, Bell, Wifi, Sparkles, Download, Upload, Cloud, ShieldCheck, ArrowUpCircle, Image as ImageIcon, Trash2 } from 'lucide-react'
+import { Settings as SettingsIcon, Save, Store, Printer, Bell, Wifi, Sparkles, Download, Upload, Cloud, ShieldCheck, ArrowUpCircle, Image as ImageIcon, Trash2, PanelRight } from 'lucide-react'
 import QRCode from 'qrcode'
 import { useUIStore } from '../../store/uiStore'
 import { useBillingStore } from '../../store/billingStore'
 import { useAuthStore } from '../../store/authStore'
 import { useStaffStore } from '../../store/staffStore'
 import { checkForAppUpdate, downloadAndInstallUpdate } from '../../lib/appUpdater'
-import { runCloudLogin, saveCloudSnapshot, syncCloudStaff, type BillingSnapshot, type CloudSyncSettings } from '../../lib/cloudSync'
-import { getLanServerStatus, isTauriDesktop, type LanServerStatus } from '../../lib/localDb'
+import {
+  DAILY_CLOUD_SYNC_INTERVAL_MS,
+  fetchCloudStaff,
+  fetchCompleteCloudSnapshot,
+  getDailyCloudSyncDueAt,
+  hasSnapshotData,
+  runCloudLogin,
+  saveCloudSnapshot,
+  saveCloudDailyBackup,
+  syncCloudStaff,
+  type BillingSnapshot,
+  type CloudSyncSettings,
+} from '../../lib/cloudSync'
+import { extractBillingSnapshot } from '../../lib/backup'
+import { getDeviceId, getOrderSyncHealth, syncOrderDeltasNow } from '../../lib/orderSync'
+import { createDailyLocalBackup, getLanServerStatus, isTauriDesktop, saveDesktopState, type LanServerStatus, type LocalBackupResult } from '../../lib/localDb'
+import { getLanBridgeStatus, type LanBridgeStatus } from '../../lib/lanBridge'
+
+type DisplayLanStatus = LanServerStatus | LanBridgeStatus
+
+const RESTORE_COLLECTIONS = [
+  'menuCategories', 'menuItems', 'floors', 'tables', 'stations',
+  'inventoryItems', 'purchaseEntries', 'orders', 'orderItems',
+  'kots', 'payments', 'auditLogs',
+] as const
+
+function mergeRestoreRows(localRows: unknown, cloudRows: unknown) {
+  const byId = new Map<string, unknown>()
+  for (const value of [...(Array.isArray(localRows) ? localRows : []), ...(Array.isArray(cloudRows) ? cloudRows : [])]) {
+    if (!value || typeof value !== 'object') continue
+    const id = String((value as { id?: unknown }).id ?? '')
+    if (id) byId.set(id, value)
+  }
+  return Array.from(byId.values())
+}
+
+function mergeRestoreSnapshot(local: BillingSnapshot, cloud: BillingSnapshot): BillingSnapshot {
+  const merged = { ...local, ...cloud } as BillingSnapshot
+  for (const key of RESTORE_COLLECTIONS) {
+    ;(merged as unknown as Record<string, unknown>)[key] = mergeRestoreRows(local[key], cloud[key])
+  }
+  merged.savedCarts = { ...(local.savedCarts ?? {}), ...(cloud.savedCarts ?? {}) }
+  return merged
+}
 
 export default function SettingsScreen() {
   const navigate = useNavigate()
   const { addToast } = useUIStore()
   const { outlet, printSettings, cloudSync, appUpdate, updateOutlet, updateCloudSyncSettings, updateAppUpdateSettings, exportSnapshot, importSnapshot } = useBillingStore()
-  const { showStaffLoginOnDesktop, setShowStaffLoginOnDesktop } = useAuthStore()
   const staff = useStaffStore((state) => state.staff)
   const backupInputRef = useRef<HTMLInputElement>(null)
   const outletFormRef = useRef<HTMLFormElement>(null)
-  const deviceAccessFormRef = useRef<HTMLFormElement>(null)
   const appUpdateFormRef = useRef<HTMLFormElement>(null)
   const cloudSyncFormRef = useRef<HTMLFormElement>(null)
   const [cloudBusy, setCloudBusy] = useState(false)
+  const [backupBusy, setBackupBusy] = useState(false)
+  const [lastLocalBackup, setLastLocalBackup] = useState<LocalBackupResult | null>(null)
   const [updateBusy, setUpdateBusy] = useState(false)
   const [logoPreview, setLogoPreview] = useState(outlet.logoDataUrl ?? '')
-  const [lanStatus, setLanStatus] = useState<LanServerStatus | null>(null)
+  const [lanStatus, setLanStatus] = useState<DisplayLanStatus | null>(null)
   const [lanQrDataUrl, setLanQrDataUrl] = useState('')
+  const [syncHealth, setSyncHealth] = useState<{ pending: number; conflicts: number; oldestPendingAt?: string }>({ pending: 0, conflicts: 0 })
 
   useEffect(() => {
-    if (!isTauriDesktop()) return
-    void getLanServerStatus().then(setLanStatus).catch(() => undefined)
+    let active = true
+    const refresh = () => void getOrderSyncHealth().then((health) => { if (active) setSyncHealth(health) })
+    refresh()
+    const timer = window.setInterval(refresh, 10_000)
+    return () => { active = false; window.clearInterval(timer) }
+  }, [cloudBusy])
+
+  useEffect(() => {
+    let cancelled = false
+    const refresh = async () => {
+      try {
+        const status = isTauriDesktop() ? await getLanServerStatus() : await getLanBridgeStatus()
+        if (!cancelled && status) setLanStatus(status)
+      } catch {
+        if (!cancelled) setLanStatus(null)
+      }
+    }
+    void refresh()
+    const timer = window.setInterval(() => void refresh(), 10_000)
+    return () => {
+      cancelled = true
+      window.clearInterval(timer)
+    }
   }, [])
 
   useEffect(() => {
@@ -59,11 +123,6 @@ export default function SettingsScreen() {
     })
   }
 
-  const saveDeviceAccessForm = (form: HTMLFormElement) => {
-    const data = new FormData(form)
-    setShowStaffLoginOnDesktop(data.get('showStaffLoginOnDesktop') === 'on')
-  }
-
   const saveAppUpdateForm = (form: HTMLFormElement) => {
     const data = new FormData(form)
     updateAppUpdateSettings({
@@ -81,9 +140,17 @@ export default function SettingsScreen() {
       outletId: String(data.get('outletId') ?? '').trim(),
       accountLogin: String(data.get('accountLogin') ?? '').trim(),
       accountSecret: String(data.get('accountSecret') ?? '').trim(),
-      autoSyncDaily: data.get('autoSyncDaily') === 'on',
+      autoSyncEnabled: data.get('autoSyncEnabled') === 'on',
+      syncIntervalHours: 24,
+      autoSyncDaily: data.get('autoSyncEnabled') === 'on',
       syncHour24: Number(data.get('syncHour24') ?? 2),
-      cloudMode: 'daily_snapshot',
+      cloudMode: 'delta_v2',
+      lastSuccessfulSyncAt: cloudSync.lastSuccessfulSyncAt,
+      nextSyncAt: data.get('autoSyncEnabled') === 'on'
+        ? (cloudSync.autoSyncEnabled && cloudSync.nextSyncAt
+            ? cloudSync.nextSyncAt
+            : new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString())
+        : undefined,
       lastSyncedAt: cloudSync.lastSyncedAt,
       lastCloudUploadedAt: cloudSync.lastCloudUploadedAt,
       lastCloudDownloadedAt: cloudSync.lastCloudDownloadedAt,
@@ -96,7 +163,6 @@ export default function SettingsScreen() {
 
   const handleSaveAllSettings = () => {
     if (outletFormRef.current) saveOutletForm(outletFormRef.current)
-    if (deviceAccessFormRef.current) saveDeviceAccessForm(deviceAccessFormRef.current)
     if (appUpdateFormRef.current) saveAppUpdateForm(appUpdateFormRef.current)
     if (cloudSyncFormRef.current) saveCloudSyncForm(cloudSyncFormRef.current)
     addToast('success', 'All settings saved successfully')
@@ -123,24 +189,23 @@ export default function SettingsScreen() {
     addToast('success', 'Local backup exported successfully', 'Backup Export')
   }
 
-  const isBillingSnapshot = (value: unknown): value is BillingSnapshot => {
-    if (!value || typeof value !== 'object') return false
-    const snapshot = value as Partial<BillingSnapshot>
-    return Boolean(
-      snapshot.outlet &&
-      snapshot.printSettings &&
-      Array.isArray(snapshot.menuCategories) &&
-      Array.isArray(snapshot.menuItems) &&
-      Array.isArray(snapshot.floors) &&
-      Array.isArray(snapshot.tables) &&
-      Array.isArray(snapshot.stations) &&
-      Array.isArray(snapshot.inventoryItems) &&
-      Array.isArray(snapshot.orders) &&
-      Array.isArray(snapshot.orderItems) &&
-      Array.isArray(snapshot.kots) &&
-      Array.isArray(snapshot.payments) &&
-      Array.isArray(snapshot.auditLogs)
-    )
+  const handleAllDriveBackup = async () => {
+    setBackupBusy(true)
+    try {
+      await saveDesktopState(exportSnapshot(), useStaffStore.getState().staff)
+      const result = await createDailyLocalBackup(true)
+      if (!result) throw new Error('Automatic drive backups are available only in BhojPatra Desk.')
+      setLastLocalBackup(result)
+      addToast(
+        result.errors.length ? 'warning' : 'success',
+        `Backup saved to ${result.paths.length} location${result.paths.length === 1 ? '' : 's'}${result.errors.length ? `; ${result.errors.length} drive target${result.errors.length === 1 ? '' : 's'} could not be written` : ''}`,
+        'Daily Local Backup',
+      )
+    } catch (error) {
+      addToast('error', error instanceof Error ? error.message : 'Could not create local backup', 'Daily Local Backup')
+    } finally {
+      setBackupBusy(false)
+    }
   }
 
   const handleBackupImport = async (event: React.ChangeEvent<HTMLInputElement>) => {
@@ -149,12 +214,12 @@ export default function SettingsScreen() {
     if (!file) return
 
     try {
-      const text = await file.text()
+      const text = file.name.endsWith('.gz')
+        ? await new Response(file.stream().pipeThrough(new DecompressionStream('gzip'))).text()
+        : await file.text()
       const parsed = JSON.parse(text) as unknown
-      const snapshot = parsed && typeof parsed === 'object' && 'snapshot' in parsed
-        ? (parsed as { snapshot?: unknown }).snapshot
-        : parsed
-      if (!isBillingSnapshot(snapshot)) {
+      const snapshot = extractBillingSnapshot(parsed)
+      if (!snapshot) {
         throw new Error('Invalid BhojPatra backup file')
       }
       importSnapshot(snapshot, false)
@@ -195,14 +260,6 @@ export default function SettingsScreen() {
     }
   }
 
-  const handleDeviceAccessSave = (event: React.FormEvent<HTMLFormElement>) => {
-    event.preventDefault()
-    const form = new FormData(event.currentTarget)
-    const enabled = form.get('showStaffLoginOnDesktop') === 'on'
-    setShowStaffLoginOnDesktop(enabled)
-    addToast('success', enabled ? 'Desktop login screen enabled' : 'Desktop will open directly', 'Device Access')
-  }
-
   const handleCloudSyncSave = async (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault()
     saveCloudSyncForm(event.currentTarget)
@@ -212,7 +269,11 @@ export default function SettingsScreen() {
   const handleCloudSyncNow = async () => {
     if (cloudSyncFormRef.current) saveCloudSyncForm(cloudSyncFormRef.current)
     const formSettings = cloudSyncFormRef.current ? readCloudSettingsForm(cloudSyncFormRef.current) : cloudSync
-    const snapshot = exportSnapshot()
+    const dueAt = getDailyCloudSyncDueAt(formSettings)
+    if (dueAt > Date.now()) {
+      addToast('info', `Today's cloud sync is already complete. Next sync: ${new Date(dueAt).toLocaleString('en-IN')}`, 'Cloud Sync')
+      return
+    }
     const serverUrl = formSettings.serverUrl.trim()
     let tenantId = formSettings.tenantId.trim()
     let outletId = formSettings.outletId.trim()
@@ -225,18 +286,63 @@ export default function SettingsScreen() {
     try {
       if (formSettings.accountLogin && formSettings.accountSecret) {
         const session = await runCloudLogin(serverUrl, formSettings.accountLogin, formSettings.accountSecret)
-        tenantId = tenantId || session.user.tenantId
-        outletId = outletId || session.outlets[0]?.id || `out_${session.user.tenantId}`
+        tenantId = session.user.tenantId
+        outletId = session.outlets[0]?.id || `out_${session.user.tenantId}`
       }
       tenantId = tenantId || outlet.tenantId
       outletId = outletId || outlet.id
       const cloudAuth = { accountLogin: formSettings.accountLogin, accountSecret: formSettings.accountSecret }
+      const effectiveCloud = { ...formSettings, enabled: true, tenantId, outletId, cloudMode: 'delta_v2' as const }
+      // First push any local pending order mutations, then pull the complete
+      // cloud restaurant dataset. Delta sync alone cannot restore menu,
+      // floors, inventory, or older order history into a fresh desktop.
+      const snapshot = exportSnapshot()
+      const result = await syncOrderDeltasNow({ ...snapshot, cloudSync: effectiveCloud }, effectiveCloud)
+      if (result.changed) importSnapshot(result.snapshot, true)
+      if (result.skipped || result.conflicts || result.pending) throw new Error('Sync is incomplete. Resolve pending changes or conflicts before restoring cloud data.')
+      if (['owner', 'admin', 'manager'].includes(useAuthStore.getState().user?.role ?? '')) {
+        const full = useBillingStore.getState().exportSnapshot()
+        const deviceId = await getDeviceId()
+        await saveCloudSnapshot(outletId, tenantId, full, deviceId, serverUrl, cloudAuth)
+        await saveCloudDailyBackup(outletId, tenantId, full, deviceId, serverUrl, cloudAuth)
+      }
+
+      const completeCloud = await fetchCompleteCloudSnapshot(outletId, serverUrl, cloudAuth)
+      const importedCloudData = completeCloud.exists && hasSnapshotData(completeCloud.payload)
+      if (importedCloudData) {
+        const safeRestore = mergeRestoreSnapshot(
+          useBillingStore.getState().exportSnapshot(),
+          completeCloud.payload,
+        )
+        importSnapshot({
+          ...safeRestore,
+          cloudSync: effectiveCloud,
+        }, true)
+      }
+
+      const cloudStaff = await fetchCloudStaff(serverUrl, cloudAuth)
+      useStaffStore.getState().replaceStaff([...cloudStaff.staff, ...useStaffStore.getState().staff])
+      await syncCloudStaff(useStaffStore.getState().staff, serverUrl, cloudAuth)
       const syncedAt = new Date().toISOString()
-      const effectiveCloud = { ...formSettings, enabled: true, tenantId, outletId, cloudMode: 'daily_snapshot' as const }
-      await saveCloudSnapshot(outletId, tenantId, { ...snapshot, cloudSync: effectiveCloud }, 'desktop-manual', serverUrl, cloudAuth)
-      await syncCloudStaff(staff, serverUrl, cloudAuth)
-      updateCloudSyncSettings({ ...effectiveCloud, lastSyncedAt: syncedAt, lastCloudUploadedAt: syncedAt })
-      addToast('success', 'Daily snapshot uploaded to cloud', 'Cloud Sync')
+      updateCloudSyncSettings({
+        ...effectiveCloud,
+        syncIntervalHours: 24,
+        lastSyncedAt: syncedAt,
+        lastSuccessfulSyncAt: syncedAt,
+        lastCloudUploadedAt: syncedAt,
+        lastCloudDownloadedAt: completeCloud.exists ? completeCloud.updatedAt : syncedAt,
+        nextSyncAt: new Date(Date.now() + DAILY_CLOUD_SYNC_INTERVAL_MS).toISOString(),
+      })
+      if (isTauriDesktop()) {
+        await saveDesktopState(useBillingStore.getState().exportSnapshot(), useStaffStore.getState().staff)
+      }
+      addToast(
+        importedCloudData ? 'success' : 'warning',
+        importedCloudData
+          ? 'Complete cloud restore finished: menu, setup, history, and orders imported'
+          : 'Cloud has no restaurant dataset yet; local data was kept safely',
+        'Cloud Sync',
+      )
     } catch (error) {
       addToast('error', error instanceof Error ? error.message : 'Cloud sync failed', 'Cloud Sync')
     } finally {
@@ -261,10 +367,10 @@ export default function SettingsScreen() {
         enabled: true,
         tenantId,
         outletId,
-        cloudMode: 'daily_snapshot',
+        cloudMode: 'delta_v2',
       })
       updateOutlet(session.outlets[0] ? { ...session.outlets[0], enableDirtyTableStatus: outlet.enableDirtyTableStatus } : { tenantId, id: outletId })
-      addToast('success', 'Cloud account connected. Use Sync Now to upload this desktop snapshot.', 'Cloud Sync')
+      addToast('success', 'Cloud account connected. Use Sync Now to restore the complete restaurant dataset.', 'Cloud Sync')
     } catch (error) {
       addToast('error', error instanceof Error ? error.message : 'Cloud account connection failed', 'Cloud Sync')
     } finally {
@@ -351,7 +457,7 @@ export default function SettingsScreen() {
           </div>
         </div>
         <div className="flex flex-wrap items-center gap-2 self-start sm:self-auto">
-          <input ref={backupInputRef} type="file" accept="application/json,.json" onChange={handleBackupImport} className="hidden" />
+          <input ref={backupInputRef} type="file" accept="application/json,application/gzip,.json,.gz" onChange={handleBackupImport} className="hidden" />
           <button
             onClick={handleSaveAllSettings}
             className="flex items-center gap-1.5 px-3 py-1.5 bg-primary text-white text-xs font-black rounded-lg hover:bg-primary-dark transition-all active:scale-95 shadow-sm"
@@ -443,25 +549,50 @@ export default function SettingsScreen() {
             </form>
           </section>
 
-          <section className="bg-white rounded-2xl border-2 border-slate-100 shadow-[0_2px_10px_rgba(0,0,0,0.02)] overflow-hidden">
-            <div className="px-5 py-3 border-b-2 border-slate-100 bg-slate-50/50 flex items-center gap-2">
-              <ShieldCheck size={18} className="text-primary" strokeWidth={2.5} />
-              <h2 className="text-sm font-black text-slate-800 tracking-tight">Device Access</h2>
-            </div>
-            <form ref={deviceAccessFormRef} onSubmit={handleDeviceAccessSave} className="p-5">
-              <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
-                <label className="flex flex-1 items-center gap-3 cursor-pointer rounded-xl border-2 border-slate-100 bg-slate-50 p-3">
-                  <input name="showStaffLoginOnDesktop" type="checkbox" defaultChecked={showStaffLoginOnDesktop} className="w-5 h-5 rounded border-slate-300 text-primary focus:ring-primary shadow-sm" />
-                  <div>
-                    <p className="font-black text-slate-800 text-sm">Show staff login on this desktop</p>
-                    <p className="text-[10px] font-bold text-slate-500 mt-0.5">Off by default. When off, this trusted counter device opens directly with the local admin context.</p>
-                  </div>
-                </label>
-                <button type="submit" className="flex items-center justify-center gap-1.5 px-5 py-2.5 bg-primary text-white rounded-xl text-xs font-black shadow-lg shadow-primary/20 hover:bg-primary-dark transition-all border-2 border-primary/50 active:scale-95">
-                  <Save size={15} strokeWidth={2.5} /> SAVE ACCESS
+          {isTauriDesktop() && (
+            <section className="bg-white rounded-2xl border-2 border-slate-100 shadow-[0_2px_10px_rgba(0,0,0,0.02)] overflow-hidden">
+              <div className="px-5 py-3 border-b-2 border-slate-100 bg-slate-50/50 flex items-center gap-2">
+                <Download size={18} className="text-emerald-600" strokeWidth={2.5} />
+                <h2 className="text-sm font-black text-slate-800 tracking-tight">Daily Local Database Backup</h2>
+              </div>
+              <div className="p-5 flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
+                <div>
+                  <p className="text-sm font-black text-slate-800">Automatic, date-stamped SQLite protection</p>
+                  <p className="mt-1 text-[11px] font-bold leading-5 text-slate-500">
+                    Once per day BhojPatra saves an integrity-checked copy of the complete local database, including setup, staff, tables, carts, orders, KOTs, payments, and sync metadata. A protected app-data copy is always kept, with additional copies in `BhojPatra Backups` on every writable fixed drive.
+                  </p>
+                  {lastLocalBackup && (
+                    <div className="mt-3 space-y-1 rounded-xl border border-emerald-100 bg-emerald-50 p-3">
+                      <p className="text-[10px] font-black uppercase tracking-wider text-emerald-700">{lastLocalBackup.fileName} • {(lastLocalBackup.sizeBytes / 1024 / 1024).toFixed(2)} MB</p>
+                      {lastLocalBackup.paths.map(path => <p key={path} className="break-all font-mono text-[10px] font-bold text-slate-600">{path}</p>)}
+                    </div>
+                  )}
+                </div>
+                <button type="button" onClick={handleAllDriveBackup} disabled={backupBusy} className="inline-flex shrink-0 items-center justify-center gap-1.5 rounded-xl bg-emerald-600 px-5 py-3 text-xs font-black text-white disabled:opacity-40">
+                  <Download size={15} /> {backupBusy ? 'BACKING UP...' : 'BACK UP ALL DRIVES NOW'}
                 </button>
               </div>
-            </form>
+            </section>
+          )}
+
+          <section className="bg-white rounded-2xl border-2 border-slate-100 shadow-[0_2px_10px_rgba(0,0,0,0.02)] overflow-hidden">
+            <div className="px-5 py-3 border-b-2 border-slate-100 bg-slate-50/50 flex items-center gap-2">
+              <PanelRight size={18} className="text-primary" strokeWidth={2.5} />
+              <div><h2 className="text-sm font-black text-slate-800 tracking-tight">Order Workspace</h2><p className="text-[10px] font-bold text-slate-500">Optional order-page tools are off until enabled here.</p></div>
+            </div>
+            <div className="p-5 grid grid-cols-1 md:grid-cols-3 gap-3">
+              {[
+                { key: 'enableCreditAccounts' as const, title: 'Credit / Account payments', text: 'Ask for an existing or new customer before opening Sales Orders and allow pay-later accounts.', value: outlet.enableCreditAccounts },
+                { key: 'enableOrderMenuPanelToggle' as const, title: 'Collapsible menu panel', text: 'Show a hide/expand control for the right-side product menu on the billing order workspace.', value: outlet.enableOrderMenuPanelToggle },
+                { key: 'enableOrderTablesDrawer' as const, title: 'Tables drawer', text: 'Show a scrollable slide-out table list beside the order workspace.', value: outlet.enableOrderTablesDrawer },
+              ].map(option => (
+                <label key={option.key} className="flex items-start gap-3 cursor-pointer rounded-xl border-2 border-slate-100 bg-slate-50 p-3 hover:border-emerald-200 transition-colors">
+                  <input type="checkbox" checked={option.value} onChange={event => updateOutlet({ [option.key]: event.target.checked })} className="peer sr-only" />
+                  <span className={`mt-0.5 flex h-6 w-11 shrink-0 items-center rounded-full p-1 transition-colors ${option.value ? 'bg-emerald-500 justify-end' : 'bg-slate-300 justify-start'}`}><span className="h-4 w-4 rounded-full bg-white shadow-sm" /></span>
+                  <span><p className="text-sm font-black text-slate-800">{option.title}</p><p className="mt-0.5 text-[10px] font-bold leading-4 text-slate-500">{option.text}</p></span>
+                </label>
+              ))}
+            </div>
           </section>
 
           <section className="bg-white rounded-2xl border-2 border-slate-100 shadow-[0_2px_10px_rgba(0,0,0,0.02)] overflow-hidden">
@@ -542,20 +673,34 @@ export default function SettingsScreen() {
               <Cloud size={18} className="text-primary" strokeWidth={2.5} />
               <h2 className="text-sm font-black text-slate-800 tracking-tight">Cloud Sync</h2>
             </div>
-            <form ref={cloudSyncFormRef} onSubmit={handleCloudSyncSave} className="p-5 space-y-4">
+            <form key={`${cloudSync.tenantId}:${cloudSync.outletId}`} ref={cloudSyncFormRef} onSubmit={handleCloudSyncSave} className="p-5 space-y-4">
               <div className="rounded-2xl border-2 border-sky-100 bg-sky-50/60 p-4">
                 <div className="flex items-start gap-3">
                   <div className="mt-0.5 rounded-xl bg-white p-2 text-sky-600 shadow-sm">
                     <ShieldCheck size={16} />
                   </div>
                   <div>
-                    <p className="text-sm font-black text-slate-800">Counter login stays local.</p>
+                    <p className="text-sm font-black text-slate-800">Cloud and LAN stay synchronized.</p>
                     <p className="mt-1 text-[11px] font-bold leading-5 text-slate-600">
-                      Staff should still open the desktop app without a cloud login screen. Cloud sync should use a restaurant account saved here in Settings and run silently once per day.
+                      Products, tables, orders, KOTs, and staff accounts sync through the restaurant cloud account. BhojPatra Desk also keeps the same data available to phones over local Wi-Fi.
                     </p>
                   </div>
                 </div>
               </div>
+
+              {!isTauriDesktop() && (
+                <div className={`rounded-2xl border-2 p-4 ${lanStatus?.running ? 'border-emerald-100 bg-emerald-50/70' : 'border-amber-100 bg-amber-50/70'}`}>
+                  <p className="text-sm font-black text-slate-800">All-in-one Windows bridge {lanStatus?.running ? 'is connected' : 'is required for offline Wi-Fi'}</p>
+                  <p className="mt-1 text-[11px] font-bold leading-5 text-slate-600">
+                    The bridge starts with Windows, keeps printer settings and restaurant data locally, and connects captain and kitchen phones through the restaurant router even when the internet is unavailable.
+                  </p>
+                  {!lanStatus?.running && (
+                    <a href="/downloads/BhojPatra-Printer-Bridge-Setup.exe?v=3.1.2" className="mt-3 inline-flex rounded-xl bg-slate-900 px-3 py-2 text-[10px] font-black text-white">
+                      DOWNLOAD / REPAIR BRIDGE
+                    </a>
+                  )}
+                </div>
+              )}
 
               {lanStatus && (
                 <div className={`rounded-2xl border-2 p-4 ${lanStatus.running ? 'border-emerald-100 bg-emerald-50/70' : 'border-amber-100 bg-amber-50/70'}`}>
@@ -639,19 +784,16 @@ export default function SettingsScreen() {
                   <input name="accountSecret" type="password" defaultValue={cloudSync.accountSecret} placeholder="App password or sync key" className="w-full px-3 py-2 rounded-xl border-2 border-slate-200 text-sm font-bold text-slate-800 focus:outline-none focus:border-primary/50 focus:ring-4 focus:ring-primary/10 transition-all shadow-sm" />
                 </div>
                 <div>
-                  <label className="block text-xs font-black text-slate-700 mb-1.5 uppercase tracking-wider">Daily Sync Hour</label>
-                  <select name="syncHour24" defaultValue={String(cloudSync.syncHour24)} className="w-full px-3 py-2 rounded-xl border-2 border-slate-200 text-sm font-bold text-slate-800 focus:outline-none focus:border-primary/50 focus:ring-4 focus:ring-primary/10 transition-all shadow-sm bg-white">
-                    {Array.from({ length: 24 }, (_, hour) => (
-                      <option key={hour} value={hour}>{String(hour).padStart(2, '0')}:00</option>
-                    ))}
-                  </select>
+                  <label className="block text-xs font-black text-slate-700 mb-1.5 uppercase tracking-wider">Sync Interval</label>
+                  <div className="w-full rounded-xl border-2 border-slate-200 bg-slate-50 px-3 py-2 text-sm font-bold text-slate-700">Every 24 hours</div>
+                  <input type="hidden" name="syncIntervalHours" value="24" />
                 </div>
                 <div className="flex items-end">
                   <label className="flex items-center gap-3 cursor-pointer p-3 rounded-xl border-2 border-slate-100 bg-slate-50 w-full">
-                    <input name="autoSyncDaily" type="checkbox" defaultChecked={cloudSync.autoSyncDaily} className="w-5 h-5 rounded text-primary" />
+                    <input name="autoSyncEnabled" type="checkbox" defaultChecked={cloudSync.autoSyncEnabled} className="w-5 h-5 rounded text-primary" />
                     <div>
-                      <p className="font-black text-slate-800 text-sm">Sync once per day</p>
-                      <p className="text-[10px] font-bold text-slate-500 mt-0.5">Runs one silent background sync after the selected hour.</p>
+                      <p className="font-black text-slate-800 text-sm">Automatic delta sync</p>
+                      <p className="text-[10px] font-bold text-slate-500 mt-0.5">Turn this on or off. When enabled, newest orders and changes sync once every 24 hours.</p>
                     </div>
                   </label>
                 </div>
@@ -660,13 +802,15 @@ export default function SettingsScreen() {
               <div className="flex flex-wrap items-center gap-2 justify-between">
                 <p className="text-[11px] font-bold text-slate-500">
                   Last sync: {cloudSync.lastSyncedAt ? new Date(cloudSync.lastSyncedAt).toLocaleString('en-IN') : 'Not synced yet'}
+                  {' · '}Outbox: {syncHealth.pending} pending · Conflicts: {syncHealth.conflicts}
+                  {syncHealth.oldestPendingAt ? ` · Oldest: ${new Date(syncHealth.oldestPendingAt).toLocaleString('en-IN')}` : ''}
                 </p>
                 <div className="flex gap-2">
                   <button type="button" onClick={handleCloudConnect} disabled={cloudBusy} className="px-4 py-2 rounded-xl bg-slate-900 text-white text-xs font-black disabled:opacity-40">
                     CONNECT ACCOUNT
                   </button>
                   <button type="button" onClick={handleCloudSyncNow} disabled={cloudBusy} className="px-4 py-2 rounded-xl bg-sky-600 text-white text-xs font-black disabled:opacity-40">
-                    {cloudBusy ? 'SYNCING...' : 'SYNC NOW'}
+                    {cloudBusy ? 'SYNCING...' : 'RUN DAILY SYNC'}
                   </button>
                   <button type="submit" className="px-4 py-2 rounded-xl bg-primary text-white text-xs font-black shadow-sm">
                     SAVE CLOUD SETTINGS

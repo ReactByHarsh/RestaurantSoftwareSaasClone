@@ -37,6 +37,10 @@ export interface User {
   paymentReceived?: boolean
   renewalPaymentReceived?: boolean
   paymentNote?: string
+  paymentAmount?: number
+  paymentDate?: string
+  renewalAmount?: number
+  renewalDate?: string
 }
 
 export interface Outlet {
@@ -170,6 +174,12 @@ export interface RestaurantTable {
 
 export interface Order {
   id: string
+  /** Stable client-generated UUID. Existing order ids remain valid sync ids. */
+  orderUuid?: string
+  /** Monotonic aggregate version used by the v2 delta-sync protocol. */
+  version?: number
+  /** Once true this can never be cleared by a remote or local stale update. */
+  isClosed?: boolean
   outletId: string
   orderNo: string
   businessDate: string
@@ -197,6 +207,9 @@ export interface Order {
   closedAt?: string
   cancellationReason?: string
   cancelledAt?: string
+  recipeConsumptionStatus?: 'none' | 'consumed' | 'reversed'
+  recipeConsumedAt?: string
+  recipeReversedAt?: string
 }
 
 export interface OrderItem {
@@ -218,6 +231,24 @@ export interface OrderItem {
   note?: string
   modifiers?: string[]
   createdAt: string
+}
+
+export interface OrderItemEditInput {
+  id?: string
+  menuItemId: string
+  nameSnapshot: string
+  itemType: ItemType
+  isSeparateBill?: boolean
+  quantity: number
+  unitPricePaise: number
+  taxPercent?: number
+  taxType?: 'GST' | 'VAT' | 'None'
+  discountPaise?: number
+  stationId?: string
+  note?: string
+  modifiers?: string[]
+  status?: OrderItem['status']
+  createdAt?: string
 }
 
 // ─── KOT ──────────────────────────────────────────────────────────────────────
@@ -270,6 +301,7 @@ export interface Payment {
 export interface InventoryItem {
   id: string
   outletId: string
+  menuItemId?: string
   name: string
   unit: StockUnit
   currentStock: number
@@ -371,10 +403,12 @@ export type RealtimeEventType =
   | 'PAYMENT_ADDED'
   | 'KOTS_TRANSFERRED'
   | 'STAFF_UPDATED'
+  | 'SYNC_DELTA_AVAILABLE'
 
 export interface RealtimeEvent {
   type: RealtimeEventType
   outletId: string
   payload: Record<string, unknown>
   timestamp: string
+  clientId?: string
 }
