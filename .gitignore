@@ -24,6 +24,7 @@ worker-configuration.d.ts
 apps/worker/out_*.json
 
 # Sensitive / debug files
+backups/
 cookiejar.txt
 headers.txt
 response.json
@@ -40,6 +41,7 @@ lerna-debug.log*
 .vscode/*
 !.vscode/extensions.json
 .idea
+.commandcode/
 .DS_Store
 *.suo
 *.ntvs*

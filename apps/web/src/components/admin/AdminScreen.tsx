@@ -900,7 +900,7 @@ function StationModal({
                 placeholder="LAN: 192.168.1.50 or tcp://192.168.1.50:9100, Bluetooth/USB/Wired: Windows printer queue name"
                 className="w-full px-3 py-2.5 rounded-xl border-2 border-slate-200 text-sm font-bold text-slate-800 focus:outline-none focus:border-primary/50 focus:ring-4 focus:ring-primary/10 transition-all shadow-sm"
               />
-              <p className="mt-1 text-[10px] font-bold text-slate-500">Queue names work for installed Bluetooth, USB, and wired printers through the Windows bridge. LAN printers are normalized to raw `tcp://...:9100` automatically.</p>
+              <p className="mt-1 text-[10px] font-bold text-slate-500">Queue names print through BhojPatra Desk’s built-in Windows spooler for installed Bluetooth, USB, and wired printers. LAN printers are normalized to raw `tcp://...:9100` automatically.</p>
             </label>
           </div>
 

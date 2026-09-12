@@ -1,3 +1,4 @@
-name = "bhojpatra-cloud"
-pages_build_output_dir = "dist"
+# Customer-facing Cloudflare Pages deployment is intentionally disabled.
+# This source is still built locally as the UI bundled inside the Tauri app.
+# The only hosted UI is the Cloud Admin page served by apps/worker.
 compatibility_date = "2026-06-18"

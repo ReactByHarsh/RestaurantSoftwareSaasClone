@@ -1,7 +1,7 @@
 import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
 import type { User, Outlet } from '../lib/types'
-import { fetchCloudSnapshot, fetchCloudStaff, runCloudLogin, syncCloudStaff } from '../lib/cloudSync'
+import { runCloudLogin } from '../lib/cloudSync'
 import { isTauriDesktop } from '../lib/localDb'
 import { useBillingStore } from './billingStore'
 import { toPublicUser, useStaffStore, type StaffAccount } from './staffStore'
@@ -93,7 +93,7 @@ export const useAuthStore = create<AuthStore>()(
             // Desktop startup only validates the Workers credentials. Local
             // SQLite has already been hydrated by DesktopBootstrap; importing
             // a cloud snapshot here can replace open table carts during a
-            // refresh. Cloud data is handled later by the four-hour sync.
+            // refresh. Cloud data is handled later by the daily sync.
             useBillingStore.getState().updateOutlet(outlet)
 
             useBillingStore.getState().updateCloudSyncSettings({
@@ -103,8 +103,8 @@ export const useAuthStore = create<AuthStore>()(
               outletId: outlet.id,
               accountLogin: emailOrPhone.trim(),
               accountSecret: password,
-              autoSyncEnabled: true,
-              syncIntervalHours: 4,
+              autoSyncEnabled: billing.cloudSync.autoSyncEnabled,
+              syncIntervalHours: 24,
               cloudMode: 'delta_v2',
             })
 
@@ -140,23 +140,21 @@ export const useAuthStore = create<AuthStore>()(
             const outlet = session.outlets[0]
             if (!outlet) return { success: false, error: 'No outlet is assigned to this login' }
 
-            const cloudAuth = { accountLogin: emailOrPhone, accountSecret: password }
-            const remote = await fetchCloudSnapshot(outlet.id, serverUrl, cloudAuth)
-            if (remote.exists) {
-              useBillingStore.getState().importSnapshot(remote.payload)
-            } else {
-              useBillingStore.getState().reset()
-              useBillingStore.getState().updateOutlet(outlet)
-            }
+            // Credential validation must not trigger a restaurant-data sync.
+            // App.tsx owns the same persisted once-daily schedule used by the
+            // desktop client, so repeated sign-ins remain read-only.
+            useBillingStore.getState().updateOutlet(outlet)
 
             useBillingStore.getState().updateCloudSyncSettings({
               enabled: true,
               serverUrl,
               tenantId: session.user.tenantId,
               outletId: outlet.id,
-              accountLogin: emailOrPhone,
+              accountLogin: emailOrPhone.trim(),
               accountSecret: password,
-              lastSyncedAt: new Date().toISOString(),
+              autoSyncEnabled: billing.cloudSync.autoSyncEnabled,
+              syncIntervalHours: 24,
+              cloudMode: 'delta_v2',
             })
 
             const cloudAccount: StaffAccount = {
@@ -165,15 +163,10 @@ export const useAuthStore = create<AuthStore>()(
               pin: session.user.pin || password,
               restaurantName: session.user.restaurantName || outlet.name,
             }
-            const tenantStaff = [cloudAccount, ...useStaffStore.getState().staff]
-              .filter((account) => account.tenantId === session.user.tenantId)
-            try {
-              const syncedStaff = await syncCloudStaff(tenantStaff, serverUrl, cloudAuth)
-              useStaffStore.getState().replaceStaff([...syncedStaff.staff, ...tenantStaff])
-            } catch (error) {
-              console.error('Cloud staff reconciliation failed', error)
-              useStaffStore.getState().replaceStaff(tenantStaff)
-            }
+            useStaffStore.getState().replaceStaff([
+              cloudAccount,
+              ...useStaffStore.getState().staff.filter((candidate) => candidate.id !== cloudAccount.id),
+            ])
             set({
               user: { ...session.user, lastLoginAt: new Date().toISOString() },
               outlet,

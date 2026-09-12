@@ -1,5 +1,10 @@
 import Dexie, { type EntityTable } from 'dexie'
-import type { BillingSnapshot, CloudSyncSettings } from './cloudSync'
+import {
+  fetchCompleteCloudSnapshot,
+  mergeOperationalSnapshot,
+  type BillingSnapshot,
+  type CloudSyncSettings,
+} from './cloudSync'
 import type { Order } from './types'
 import { isTauriDesktop, loadDesktopSyncMetadata, saveDesktopSyncMetadata } from './localDb'
 
@@ -178,7 +183,8 @@ export function orderIsClosed(order: Order) {
 }
 
 function sourceAggregate(snapshot: BillingSnapshot, order: Order): OrderAggregatePayload {
-  const table = order.tableId ? snapshot.tables.find((candidate) => candidate.id === order.tableId) : undefined
+  // Reusing a table must not make every historical bill appear changed.
+  const table = !orderIsClosed(order) && order.tableId ? snapshot.tables.find((candidate) => candidate.id === order.tableId) : undefined
   return {
     order: { ...order, orderUuid: order.orderUuid || order.id, isClosed: orderIsClosed(order) },
     orderItems: snapshot.orderItems.filter((item) => item.orderId === order.id),
@@ -188,7 +194,7 @@ function sourceAggregate(snapshot: BillingSnapshot, order: Order): OrderAggregat
   }
 }
 
-async function getDeviceId() {
+export async function getDeviceId() {
   const existing = await localSyncDb.syncState.get('deviceId')
   if (existing?.value) return existing.value
   const value = `web_${crypto.randomUUID()}`
@@ -197,12 +203,12 @@ async function getDeviceId() {
 }
 
 async function getCursor(outletId: string) {
-  const row = await localSyncDb.syncState.get(`cursor:${outletId}`)
+  const row = await localSyncDb.syncState.get(`pullCursor:v3:${outletId}`)
   return Number(row?.value || 0) || 0
 }
 
 async function setCursor(outletId: string, cursor: number) {
-  await localSyncDb.syncState.put({ key: `cursor:${outletId}`, value: String(cursor) })
+  await localSyncDb.syncState.put({ key: `pullCursor:v3:${outletId}`, value: String(cursor) })
 }
 
 export async function persistBrowserBusinessSnapshot(snapshot: BillingSnapshot) {
@@ -291,8 +297,27 @@ type PushResponse = {
 }
 
 const retryMinutes = [1, 5, 15, 60]
+export const MAX_ORDER_CHANGES_PER_PUSH = 50
 
-async function pushOutboxRow(settings: CloudSyncSettings, row: SyncOutboxRow, deviceId: string, cursor: number) {
+export function chunkOrderChanges<T>(rows: T[], size = MAX_ORDER_CHANGES_PER_PUSH) {
+  if (!Number.isInteger(size) || size < 1 || size > MAX_ORDER_CHANGES_PER_PUSH) throw new Error('Batch size must be between 1 and 50')
+  const batches: T[][] = []
+  let batch: T[] = []
+  let bytes = 0
+  for (const row of rows) {
+    const rowBytes = new TextEncoder().encode(JSON.stringify(row)).length
+    if (rowBytes > 512 * 1024) throw new Error('An order is too large to sync automatically; its local data has been retained')
+    if (batch.length && (batch.length >= size || bytes + rowBytes > 512 * 1024)) {
+      batches.push(batch); batch = []; bytes = 0
+    }
+    batch.push(row); bytes += rowBytes
+  }
+  if (batch.length) batches.push(batch)
+  return batches
+}
+
+async function pushOutboxBatch(settings: CloudSyncSettings, rows: SyncOutboxRow[], deviceId: string, cursor: number) {
+  const batchIdentity = await payloadHash(rows.map((row) => row.batchId))
   const response = await fetch(`${cleanBaseUrl(settings.serverUrl)}/api/v2/outlets/${encodeURIComponent(settings.outletId)}/sync/push`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Accept: 'application/json', ...authorization(settings) },
@@ -300,9 +325,11 @@ async function pushOutboxRow(settings: CloudSyncSettings, row: SyncOutboxRow, de
     body: JSON.stringify({
       protocolVersion: 2,
       deviceId,
-      batchId: row.batchId,
+      // Derived from immutable per-row mutation IDs so a network retry reuses
+      // the same idempotency key, while any changed row produces a new key.
+      batchId: `batch_${batchIdentity.slice(0, 48)}`,
       baseCursor: cursor,
-      changes: [{
+      changes: rows.map((row) => ({
         entityType: row.entityType,
         entityId: row.entityId,
         orderUuid: row.orderUuid,
@@ -313,11 +340,16 @@ async function pushOutboxRow(settings: CloudSyncSettings, row: SyncOutboxRow, de
         isClosed: row.isClosed,
         payloadHash: row.payloadHash,
         payload: row.payload,
-      }],
+      })),
     }),
   })
-  if (!response.ok) throw new Error(`Order delta push failed with ${response.status}`)
-  return response.json() as Promise<PushResponse>
+  const body = await response.json().catch(() => null) as (PushResponse & { error?: string }) | null
+  if (!response.ok) {
+    const detail = body?.error ? `: ${body.error}` : ''
+    throw new Error(`Order delta push failed with ${response.status}${detail}`)
+  }
+  if (!body) throw new Error('Order delta push returned an invalid response')
+  return body
 }
 
 async function acknowledge(row: SyncOutboxRow, acknowledgement: PushAck) {
@@ -342,8 +374,11 @@ async function acknowledge(row: SyncOutboxRow, acknowledgement: PushAck) {
 async function recordConflict(row: SyncOutboxRow, item: PushConflict) {
   const createdAt = new Date().toISOString()
   await localSyncDb.transaction('rw', localSyncDb.syncRecords, localSyncDb.syncOutbox, localSyncDb.syncConflicts, async () => {
-    await localSyncDb.syncRecords.update(row.key, { conflictState: item.code })
-    await localSyncDb.syncOutbox.delete(row.key)
+    const pending = await localSyncDb.syncOutbox.get(row.key)
+    if (pending?.version === row.version && pending.payloadHash === row.payloadHash) {
+      await localSyncDb.syncRecords.update(row.key, { conflictState: item.code })
+      await localSyncDb.syncOutbox.delete(row.key)
+    }
     await localSyncDb.syncConflicts.put({
       key: `${row.key}:${row.version}`,
       entityId: row.entityId,
@@ -364,13 +399,14 @@ function mergeRemoteAggregate(snapshot: BillingSnapshot, change: SyncChange): Bi
     kots: [...change.payload.kots, ...snapshot.kots.filter((kot) => kot.orderId !== change.orderUuid)],
     payments: [...change.payload.payments, ...snapshot.payments.filter((payment) => payment.orderId !== change.orderUuid)],
   }
-  if (change.payload.table) next.tables = [change.payload.table, ...snapshot.tables.filter((table) => table.id !== change.payload.table?.id)]
+  if (change.payload.table && !change.isClosed) next.tables = [change.payload.table, ...snapshot.tables.filter((table) => table.id !== change.payload.table?.id)]
   if (change.isClosed && order.tableId) {
-    next.tables = next.tables.map((table) => table.id === order.tableId || table.activeOrderId === order.id
+    next.tables = next.tables.map((table) => table.activeOrderId === order.id
       ? { ...table, status: table.status === 'dirty' ? 'dirty' : 'available', activeOrderId: undefined }
       : table)
     const savedCarts = { ...(next.savedCarts ?? {}) }
-    delete savedCarts[order.tableId]
+    const tableNow = next.tables.find(table => table.id === order.tableId)
+    if (!tableNow?.activeOrderId || tableNow.activeOrderId === order.id) delete savedCarts[order.tableId]
     delete savedCarts[order.id]
     next.savedCarts = savedCarts
   }
@@ -388,7 +424,52 @@ async function pullChanges(settings: CloudSyncSettings, initial: BillingSnapshot
       credentials: 'include',
     })
     if (!response.ok) throw new Error(`Order delta pull failed with ${response.status}`)
-    const page = await response.json() as { changes: Array<SyncChange & { cursor: number }>; cursor: number; hasMore: boolean }
+    const page = await response.json() as {
+      changes: Array<SyncChange & { cursor: number }>
+      cursor: number
+      hasMore: boolean
+      resetRequired?: boolean
+    }
+    if (page.resetRequired) {
+      const operational = await fetchCompleteCloudSnapshot(
+        settings.outletId,
+        settings.serverUrl,
+        { accountLogin: settings.accountLogin, accountSecret: settings.accountSecret },
+      )
+      if (operational.exists) {
+        const remote = operational.payload
+        const pending = await localSyncDb.syncOutbox.toArray()
+        const pendingIds = new Set(pending.map(row => row.orderUuid))
+        const local = snapshot
+        snapshot = mergeOperationalSnapshot(local, { ...remote, snapshotKind: 'operational' })
+        // A bootstrap cannot acknowledge pending edits. Keep them intact until
+        // they receive a matching server acknowledgement.
+        for (const order of local.orders.filter(order => pendingIds.has(order.id))) {
+          const payload = sourceAggregate(local, order)
+          snapshot = mergeRemoteAggregate(snapshot, {
+            entityType:'order_aggregate', entityId:order.id, orderUuid:order.id,
+            baseVersion:0, version:order.version ?? 1, operation:'upsert',
+            updatedAt:order.updatedAt, isClosed:orderIsClosed(order), payloadHash:'', payload,
+          })
+        }
+        for (const order of remote.orders.filter(order => !pendingIds.has(order.id))) {
+          const payload = sourceAggregate(snapshot, order)
+          const version = order.version ?? 1
+          await localSyncDb.syncRecords.put({
+            key:`order_aggregate:${order.id}`, entityType:'order_aggregate', entityId:order.id,
+            orderUuid:order.id, version, baseVersion:version, syncedVersion:version,
+            sourceHash:await payloadHash({...payload,order:{...payload.order,version:undefined}}),
+            payloadHash:await payloadHash(payload), updatedAt:order.updatedAt, syncedAt:new Date().toISOString(),
+          })
+        }
+        changed = true
+      }
+      cursor = page.cursor
+      hasMore = false
+      await persistBrowserBusinessSnapshot(snapshot)
+      await setCursor(settings.outletId, cursor)
+      continue
+    }
     for (const change of page.changes) {
       const key = `${change.entityType}:${change.entityId}`
       const local = await localSyncDb.syncRecords.get(key)
@@ -416,13 +497,14 @@ async function pullChanges(settings: CloudSyncSettings, initial: BillingSnapshot
         version: change.version,
         baseVersion: change.version,
         syncedVersion: change.version,
-        sourceHash: local?.sourceHash ?? await payloadHash({ ...change.payload, order: { ...change.payload.order, version: undefined } }),
+        sourceHash: await payloadHash({ ...sourceAggregate(snapshot, snapshot.orders.find(order => order.id === change.orderUuid)!), order: { ...snapshot.orders.find(order => order.id === change.orderUuid)!, version: undefined } }),
         payloadHash: change.payloadHash,
         updatedAt: serverUpdatedAt,
         syncedAt: serverUpdatedAt,
       })
       await localSyncDb.syncOutbox.delete(key)
     }
+    await persistBrowserBusinessSnapshot(snapshot)
     cursor = page.cursor
     hasMore = page.hasMore
     await setCursor(settings.outletId, cursor)
@@ -460,6 +542,7 @@ export type OrderSyncResult = {
   cursor: number
   changed: boolean
   skipped?: boolean
+  pending?: number
 }
 
 async function executeSync(snapshot: BillingSnapshot, settings: CloudSyncSettings): Promise<OrderSyncResult> {
@@ -471,34 +554,39 @@ async function executeSync(snapshot: BillingSnapshot, settings: CloudSyncSetting
     let cursor = await getCursor(settings.outletId)
     let uploaded = 0
     let conflictCount = 0
-    const rows = await localSyncDb.syncOutbox.orderBy('updatedAt').toArray()
-    for (const row of rows) {
-      if (row.nextRetryAt && Date.parse(row.nextRetryAt) > Date.now()) continue
+    const rows = (await localSyncDb.syncOutbox.orderBy('updatedAt').toArray())
+      .filter((row) => !row.nextRetryAt || Date.parse(row.nextRetryAt) <= Date.now())
+    for (const batch of chunkOrderChanges(rows)) {
       try {
-        const result = await pushOutboxRow(settings, row, deviceId, cursor)
-        cursor = Math.max(cursor, result.cursor)
-        await setCursor(settings.outletId, cursor)
+        const result = await pushOutboxBatch(settings, batch, deviceId, cursor)
+        // Push cursors describe writes, not consumed remote changes. Advancing
+        // the pull cursor here would skip edits made by another computer.
         for (const ack of [...result.accepted, ...result.duplicates]) {
-          if (await acknowledge(row, ack)) uploaded += 1
+          const row = batch.find((candidate) => candidate.entityId === ack.entityId)
+          if (row && await acknowledge(row, ack)) uploaded += 1
         }
         for (const item of result.conflicts) {
-          if (item.entityId === row.entityId) {
+          const row = batch.find((candidate) => candidate.entityId === item.entityId)
+          if (row) {
             await recordConflict(row, item)
             conflictCount += 1
           }
         }
       } catch (error) {
-        const retryCount = row.retryCount + 1
-        const delay = retryMinutes[Math.min(retryCount - 1, retryMinutes.length - 1)]
-        await localSyncDb.syncOutbox.update(row.key, {
-          retryCount,
-          nextRetryAt: new Date(Date.now() + delay * 60_000).toISOString(),
-        })
+        await Promise.all(batch.map(async (row) => {
+          const retryCount = row.retryCount + 1
+          const delay = retryMinutes[Math.min(retryCount - 1, retryMinutes.length - 1)]
+          await localSyncDb.syncOutbox.update(row.key, {
+            retryCount,
+            nextRetryAt: new Date(Date.now() + delay * 60_000).toISOString(),
+          })
+        }))
         throw error
       }
     }
     const pulled = await pullChanges(settings, snapshot)
-    return { snapshot: pulled.snapshot, uploaded, conflicts: conflictCount, cursor: pulled.cursor, changed: pulled.changed }
+    const pending = await localSyncDb.syncOutbox.count()
+    return { snapshot: pulled.snapshot, uploaded, conflicts: conflictCount, cursor: pulled.cursor, changed: pulled.changed, pending }
   } finally {
     await mirrorDesktopStorage()
     releaseLease(deviceId)

@@ -18,6 +18,10 @@ migrations_dir = "../../packages/db/migrations"
 binding = "CACHE"
 id = "6ec7242be31a4c6a94baee32e429513b"
 
+[[r2_buckets]]
+binding = "R2"
+bucket_name = "bhojpatra-backups"
+
 [[durable_objects.bindings]]
 name = "REALTIME_HUB"
 class_name = "RealtimeHub"

@@ -1,6 +1,7 @@
 import { Hono } from 'hono'
 import { cors } from 'hono/cors'
 import { logger } from 'hono/logger'
+import { bodyLimit } from 'hono/body-limit'
 import { getCookie, setCookie, deleteCookie } from 'hono/cookie'
 import { z } from 'zod'
 
@@ -8,7 +9,21 @@ import ordersRouter from './api/orders'
 import kotsRouter from './api/kots'
 import paymentsRouter from './api/payments'
 import stateRouter from './api/state'
-import { applyLegacyOrderMutation, applySyncPush, pullSyncChanges, syncPushSchema } from './sync'
+import {
+  applyLegacyOrderMutation,
+  applySyncPush,
+  compactOperationalSnapshot,
+  pullSyncChanges,
+  runDailySyncMaintenance,
+  syncPushSchema,
+} from './sync'
+import {
+  compactLegacyAppSnapshots,
+  dailyBackupSchema,
+  listCloudBackups,
+  migrateLegacySnapshotHistory,
+  writeDailyDesktopBackup,
+} from './backups'
 
 type Bindings = {
   DB?: D1Database
@@ -1161,6 +1176,7 @@ export class RealtimeHub {
   }
 
   private persistAndBroadcast(data: z.infer<typeof appSnapshotSchema>) {
+    const operationalPayload = compactOperationalSnapshot(data.payload)
     const rows = this.state.storage.sql.exec<{ payload_json: string; updated_at: string }>(
       'SELECT payload_json, updated_at FROM outlet_state WHERE id = 1'
     ).toArray()
@@ -1168,8 +1184,8 @@ export class RealtimeHub {
     if (existing) {
       try {
         const existingPayload = JSON.parse(existing.payload_json) as Record<string, unknown>
-        if ((getSnapshotDataScore(data.payload) === 0 && getSnapshotDataScore(existingPayload) > 0)
-          || wouldEraseCoreRestaurantData(existingPayload, data.payload)) {
+        if ((getSnapshotDataScore(operationalPayload) === 0 && getSnapshotDataScore(existingPayload) > 0)
+          || wouldEraseCoreRestaurantData(existingPayload, operationalPayload)) {
           const message = JSON.stringify({
             type: 'STATE_UPDATED',
             updatedAt: existing.updated_at,
@@ -1196,13 +1212,13 @@ export class RealtimeHub {
         tenant_id = excluded.tenant_id,
         payload_json = excluded.payload_json,
         updated_at = excluded.updated_at
-    `, data.tenantId, JSON.stringify(data.payload), updatedAt)
+    `, data.tenantId, JSON.stringify(operationalPayload), updatedAt)
     let message = JSON.stringify({
       type: 'STATE_UPDATED',
       updatedAt,
       clientId: data.clientId,
       messageId: data.messageId,
-      payload: data.payload,
+      payload: operationalPayload,
     })
     if (message.length > 750_000) {
       message = JSON.stringify({
@@ -1767,6 +1783,26 @@ async function findUserByCredentials(db: D1Database, login: string, password: st
   return user
 }
 
+async function recordDailyLastLogin(db: D1Database, userId: string) {
+  const loggedInAt = new Date().toISOString()
+  const cutoff = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString()
+  try {
+    await db.prepare(`
+      UPDATE users SET last_login_at = ?, updated_at = ?
+      WHERE id = ? AND (last_login_at IS NULL OR last_login_at < ?)
+    `).bind(loggedInAt, loggedInAt, userId, cutoff).run()
+  } catch (error) {
+    // Login telemetry is optional. Authentication must continue when D1 is
+    // temporarily read-only (for example while storage cleanup is pending).
+    console.warn(JSON.stringify({
+      level: 'warning',
+      message: 'Could not record daily last login',
+      userId,
+      error: error instanceof Error ? error.message : String(error),
+    }))
+  }
+}
+
 async function getAuthenticatedUser(c: { env: Bindings; req: any }) {
   if (!c.env.DB) return { response: Response.json({ error: 'Database binding is not configured' }, { status: 500 }) }
   const basicUser = await findUserByBasicAuth(c.env.DB, c.req.header?.('Authorization') ?? c.req.raw?.headers?.get?.('Authorization'))
@@ -1874,7 +1910,6 @@ app.use('*', cors({
     if (origin === 'http://localhost:5173' || origin === 'http://127.0.0.1:5173') return origin
     if (origin === 'http://tauri.localhost' || origin === 'https://tauri.localhost' || origin === 'tauri://localhost') return origin
     if (/^https:\/\/[a-z0-9-]+\.workers\.dev$/i.test(origin)) return origin
-    if (/^https:\/\/[a-z0-9-]+\.pages\.dev$/i.test(origin)) return origin
     return undefined
   },
   allowMethods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
@@ -1897,8 +1932,7 @@ app.post('/api/v1/auth/login', async (c) => {
   if (user.tenantId === 'platform') return c.json({ error: 'Invalid credentials' }, 401)
   const issue = getUserAccessIssue(user)
   if (issue) return c.json({ error: issue.message }, 403)
-  await c.env.DB.prepare('UPDATE users SET last_login_at = ?, updated_at = ? WHERE id = ?')
-    .bind(new Date().toISOString(), new Date().toISOString(), user.id).run()
+  c.executionCtx.waitUntil(recordDailyLastLogin(c.env.DB, user.id))
 
   const secret = c.env.SESSION_SECRET || 'dev-fallback-secret-change-in-production'
   const token = await createSessionToken(user.id, secret)
@@ -1928,8 +1962,7 @@ app.post('/api/v1/admin/login', async (c) => {
   if (!user || user.tenantId !== 'platform') return c.json({ error: 'Invalid credentials' }, 401)
   const issue = getUserAccessIssue(user)
   if (issue) return c.json({ error: issue.message }, 403)
-  await c.env.DB.prepare('UPDATE users SET last_login_at = ?, updated_at = ? WHERE id = ?')
-    .bind(new Date().toISOString(), new Date().toISOString(), user.id).run()
+  c.executionCtx.waitUntil(recordDailyLastLogin(c.env.DB, user.id))
 
   const secret = c.env.SESSION_SECRET || 'dev-fallback-secret-change-in-production'
   const token = await createSessionToken(user.id, secret)
@@ -2013,8 +2046,73 @@ app.get('/api/v1/outlets/:outletId/state', async (c) => {
     outletId,
     tenantId: dbState.tenantId,
     updatedAt: dbState.updatedAt,
-    payload: dbState.payload,
+    payload: compactOperationalSnapshot(dbState.payload),
   })
+})
+
+app.post('/api/v1/outlets/:outletId/backups/daily', bodyLimit({ maxSize: 16 * 1024 * 1024 }), async (c) => {
+  const db = c.env.DB
+  const bucket = c.env.R2
+  if (!db) return c.json({ error: 'Database binding is not configured' }, 500)
+  if (!bucket) return c.json({ error: 'R2 backup binding is not configured' }, 503)
+  const outletId = c.req.param('outletId')
+  const auth = await getAuthenticatedUser(c)
+  if ('response' in auth) return auth.response
+  if (!canAccessOutlet(auth.user, outletId)) return c.json({ error: 'Forbidden' }, 403)
+  if (!['owner', 'admin', 'manager'].includes(auth.user.role)) {
+    return c.json({ error: 'This role cannot create cloud backups' }, 403)
+  }
+  let raw: unknown
+  try { raw = await c.req.json() } catch { return c.json({ error: 'Invalid JSON' }, 400) }
+  const parsed = dailyBackupSchema.safeParse(raw)
+  if (!parsed.success) return c.json({ error: 'Invalid backup payload', details: parsed.error.flatten() }, 400)
+  if (auth.user.tenantId !== 'platform' && parsed.data.tenantId !== auth.user.tenantId) {
+    return c.json({ error: 'Forbidden' }, 403)
+  }
+  if (outletId !== `out_${parsed.data.tenantId}`) return c.json({ error: 'Outlet does not belong to tenant' }, 403)
+  const result = await writeDailyDesktopBackup(
+    db,
+    bucket,
+    outletId,
+    parsed.data.tenantId,
+    parsed.data.payload,
+    parsed.data.clientId,
+    parsed.data.createdAt,
+  )
+  console.log(JSON.stringify({ event: 'r2_daily_backup_completed', outletId, ...result }))
+  return c.json(result)
+})
+
+app.get('/api/v1/outlets/:outletId/backups', async (c) => {
+  const db = c.env.DB
+  if (!db) return c.json({ error: 'Database binding is not configured' }, 500)
+  const outletId = c.req.param('outletId')
+  const auth = await getAuthenticatedUser(c)
+  if ('response' in auth) return auth.response
+  if (!canAccessOutlet(auth.user, outletId)) return c.json({ error: 'Forbidden' }, 403)
+  const limit = Math.min(100, Math.max(1, Number.parseInt(c.req.query('limit') ?? '30', 10) || 30))
+  const backups = await listCloudBackups(db, outletId, limit)
+  return c.json({ ok: true, outletId, backups: backups.results })
+})
+
+app.get('/api/v1/outlets/:outletId/backups/:backupId/download', async (c) => {
+  const db = c.env.DB
+  const bucket = c.env.R2
+  if (!db) return c.json({ error: 'Database binding is not configured' }, 500)
+  if (!bucket) return c.json({ error: 'R2 backup binding is not configured' }, 503)
+  const outletId = c.req.param('outletId')
+  const auth = await getAuthenticatedUser(c)
+  if ('response' in auth) return auth.response
+  if (!canAccessOutlet(auth.user, outletId)) return c.json({ error: 'Forbidden' }, 403)
+  const metadata = await db.prepare(`
+    SELECT object_key FROM cloud_backups WHERE id = ? AND outlet_id = ?
+  `).bind(c.req.param('backupId'), outletId).first<{ object_key: string }>()
+  if (!metadata) return c.json({ error: 'Backup not found' }, 404)
+  const object = await bucket.get(metadata.object_key)
+  if (!object) return c.json({ error: 'Backup object not found' }, 404)
+  const headers = new Headers({ 'Cache-Control': 'private, no-store', ETag: object.httpEtag })
+  object.writeHttpMetadata(headers)
+  return new Response(object.body, { headers })
 })
 
 app.get('/api/v1/outlets/:outletId/realtime', async (c) => {
@@ -2027,7 +2125,7 @@ app.get('/api/v1/outlets/:outletId/realtime', async (c) => {
   return stub.fetch(c.req.raw)
 })
 
-app.post('/api/v2/outlets/:outletId/sync/push', async (c) => {
+app.post('/api/v2/outlets/:outletId/sync/push', bodyLimit({ maxSize: 1536 * 1024 }), async (c) => {
   const db = c.env.DB
   if (!db) return c.json({ error: 'Database binding is not configured' }, 500)
   const outletId = c.req.param('outletId')
@@ -2105,6 +2203,28 @@ app.post('/api/v1/maintenance/reconcile/:outletId', async (c) => {
   }
 })
 
+// Bounded storage migration only: this endpoint never sends renewal emails.
+app.post('/api/v1/admin/storage-migration/:outletId', async (c) => {
+  const auth = await getPlatformAdmin(c)
+  if ('response' in auth) return auth.response
+  if (!c.env.DB || !c.env.R2) return c.json({ error: 'D1 and R2 bindings are required' }, 503)
+  return c.json(await compactLegacyAppSnapshots(c.env.DB, c.env.R2, 1, c.req.param('outletId')))
+})
+
+app.post('/api/v1/admin/storage-history-migration', async (c) => {
+  const auth = await getPlatformAdmin(c)
+  if ('response' in auth) return auth.response
+  if (!c.env.DB || !c.env.R2) return c.json({ error: 'D1 and R2 bindings are required' }, 503)
+  return c.json(await migrateLegacySnapshotHistory(c.env.DB, c.env.R2, 1))
+})
+
+app.post('/api/v1/admin/storage-maintenance', async (c) => {
+  const auth = await getPlatformAdmin(c)
+  if ('response' in auth) return auth.response
+  await runScheduledDataMaintenance(c.env)
+  return c.json({ ok: true })
+})
+
 function routeLegacyStateThroughV2() { return true }
 
 app.put('/api/v1/outlets/:outletId/state', async (c) => {
@@ -2161,6 +2281,34 @@ app.put('/api/v1/outlets/:outletId/state', async (c) => {
     })
   }
 
+  if (body.data.payload.snapshotKind === 'operational') {
+    if (existing && existing.payload.snapshotKind !== 'operational') {
+      return c.json({ error: 'Cloud history migration is pending; local data is safe. Retry after maintenance.' }, 503)
+    }
+    const incoming = body.data.payload
+    const canonical = existing?.payload ?? {}
+    const canonicalTables = new Map(asArray(canonical.tables).map(table => [table.id, table]))
+    const merged = compactOperationalSnapshot({
+      ...incoming,
+      orders: canonical.orders ?? [], orderItems: canonical.orderItems ?? [],
+      kots: canonical.kots ?? [], payments: canonical.payments ?? [],
+      tables: asArray(incoming.tables).map(table => {
+        const current = canonicalTables.get(table.id)
+        return current ? { ...table, activeOrderId: current.activeOrderId, status: current.status } : table
+      }),
+      savedCarts: incoming.savedCarts ?? canonical.savedCarts ?? {},
+      cloudSync: { ...(asRecord(incoming.cloudSync) ?? {}), accountSecret: '' },
+    })
+    const updatedAt = new Date().toISOString()
+    const saved = await db.prepare(`
+      INSERT INTO app_snapshots (outlet_id, tenant_id, payload_json, updated_at) VALUES (?, ?, ?, ?)
+      ON CONFLICT(outlet_id) DO UPDATE SET payload_json = excluded.payload_json, updated_at = excluded.updated_at
+      WHERE app_snapshots.updated_at = ?
+    `).bind(outletId, body.data.tenantId, JSON.stringify(merged), updatedAt, existing?.updatedAt ?? null).run()
+    if (!saved.meta.changes) return c.json({ error: 'Cloud data changed during setup upload. Please retry.' }, 409)
+    return c.json({ ok: true, outletId, updatedAt, payload: merged })
+  }
+
   if (routeLegacyStateThroughV2()) {
     const orders = asArray(body.data.payload.orders).map(asRecord).filter((order): order is Record<string, unknown> => Boolean(order))
     const incomingItems = asArray(body.data.payload.orderItems).map(asRecord).filter((item): item is Record<string, unknown> => Boolean(item))
@@ -2186,7 +2334,7 @@ app.put('/api/v1/outlets/:outletId/state', async (c) => {
 
     const canonical = await readSnapshotRow(db, outletId)
     const operational = canonical?.payload ?? existing?.payload ?? body.data.payload
-    const mergedPayload: SnapshotPayload = {
+    const mergedPayload = compactOperationalSnapshot({
       ...body.data.payload,
       orders: operational.orders,
       orderItems: operational.orderItems,
@@ -2194,7 +2342,7 @@ app.put('/api/v1/outlets/:outletId/state', async (c) => {
       payments: operational.payments,
       tables: operational.tables,
       savedCarts: operational.savedCarts,
-    }
+    })
     const updatedAt = new Date().toISOString()
     await db.prepare(`
       INSERT INTO app_snapshots (outlet_id, tenant_id, payload_json, updated_at)
@@ -2214,7 +2362,8 @@ app.put('/api/v1/outlets/:outletId/state', async (c) => {
     return c.json({ ok: true, outletId, updatedAt, conflicts, compatibilityMode: 'delta_v2', payload: mergedPayload })
   }
 
-  const incomingPayloadJson = JSON.stringify(body.data.payload)
+  const compactPayload = compactOperationalSnapshot(body.data.payload)
+  const incomingPayloadJson = JSON.stringify(compactPayload)
   const forceProjection = body.data.clientId?.includes('manual') === true
   if (!forceProjection && existing && JSON.stringify(existing.payload) === incomingPayloadJson) {
     return c.json({
@@ -2229,13 +2378,6 @@ app.put('/api/v1/outlets/:outletId/state', async (c) => {
 
   const updatedAt = new Date().toISOString()
   const transaction: D1PreparedStatement[] = []
-  if (existing) {
-    transaction.push(db.prepare(`
-      INSERT INTO app_snapshot_history (outlet_id, tenant_id, payload_json, archived_at)
-      VALUES (?, ?, ?, ?)
-    `).bind(outletId, existing.tenantId, JSON.stringify(existing.payload), updatedAt))
-  }
-
   transaction.push(db.prepare(`
     INSERT INTO app_snapshots (outlet_id, tenant_id, payload_json, updated_at)
     VALUES (?, ?, ?, ?)
@@ -2244,13 +2386,6 @@ app.put('/api/v1/outlets/:outletId/state', async (c) => {
       payload_json = excluded.payload_json,
       updated_at = excluded.updated_at
   `).bind(outletId, body.data.tenantId, incomingPayloadJson, updatedAt))
-  transaction.push(db.prepare(`
-    DELETE FROM app_snapshot_history
-    WHERE outlet_id = ? AND id NOT IN (
-      SELECT id FROM app_snapshot_history WHERE outlet_id = ? ORDER BY id DESC LIMIT 20
-    )
-  `).bind(outletId, outletId))
-
   const outlet = asRecord(body.data.payload.outlet) ?? {}
   const outletName = stringValue(outlet.name, 'My Restaurant')
   await ensureTenantAndOutlet(db, body.data.tenantId, outletName)
@@ -2292,7 +2427,7 @@ app.put('/api/v1/outlets/:outletId/state', async (c) => {
     }).catch((error) => console.error('Optional realtime mirror failed:', error)))
   }
 
-  return c.json({ ok: true, outletId, updatedAt, projection })
+  return c.json({ ok: true, outletId, updatedAt, projection, payload: compactPayload })
 })
 
 app.get('/api/v1/staff/sync', async (c) => {
@@ -2657,7 +2792,56 @@ app.onError((err, c) => {
 app.route('/api/v1/orders', ordersRouter)
 app.route('/api/v1/kots', kotsRouter)
 app.route('/api/v1/payments', paymentsRouter)
+// Reuse the main login verifier (including PBKDF2 and current access rules) for
+// history/bootstrap, instead of the legacy router's older password verifier.
+app.use('/api/v1/state/*', async (c, next) => {
+  const auth = await getAuthenticatedUser(c)
+  if ('response' in auth) return auth.response
+  ;(c as any).set('user', { tenant_id: auth.user.tenantId, role: auth.user.role, id: auth.user.id })
+  await next()
+})
 app.route('/api/v1/state', stateRouter)
+
+async function runScheduledDataMaintenance(env: Bindings) {
+  if (!env.DB) return
+  const startedAt = new Date().toISOString()
+  const claim = await env.DB.prepare(`
+    INSERT INTO sync_maintenance (id, last_started_at, last_error)
+    VALUES ('daily', ?, NULL)
+    ON CONFLICT(id) DO UPDATE SET last_started_at = excluded.last_started_at, last_error = NULL
+    WHERE COALESCE(substr(sync_maintenance.last_completed_at, 1, 10), '') < substr(excluded.last_started_at, 1, 10)
+      AND (sync_maintenance.last_started_at IS NULL OR sync_maintenance.last_started_at < ?)
+  `).bind(startedAt, new Date(Date.now() - 10 * 60_000).toISOString()).run()
+  if (!claim.meta.changes) return
+  try {
+    const retention = await runDailySyncMaintenance(env.DB)
+    const compaction = env.R2
+      ? await compactLegacyAppSnapshots(env.DB, env.R2, 1)
+      : { compacted: 0, skipped: 0, remainingMayExist: false }
+    const legacy = env.R2
+      ? await migrateLegacySnapshotHistory(env.DB, env.R2, 1)
+      : { migrated: 0, remainingMayExist: false }
+    const completedAt = new Date().toISOString()
+    await env.DB.prepare(`
+      UPDATE sync_maintenance
+      SET last_completed_at = ?, changes_deleted = ?, batches_deleted = ?,
+        conflicts_deleted = ?, legacy_backups_migrated = legacy_backups_migrated + ?, last_error = NULL
+      WHERE id = 'daily'
+    `).bind(
+      completedAt,
+      retention.changesDeleted,
+      retention.batchesDeleted,
+      retention.conflictsDeleted,
+      legacy.migrated,
+    ).run()
+    console.log(JSON.stringify({ event: 'daily_data_maintenance_completed', ...retention, ...compaction, ...legacy, completedAt }))
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    await env.DB.prepare("UPDATE sync_maintenance SET last_error = ? WHERE id = 'daily'").bind(message).run()
+    console.error(JSON.stringify({ event: 'daily_data_maintenance_failed', error: message }))
+    throw error
+  }
+}
 
 export default {
   fetch: app.fetch,
@@ -2665,5 +2849,6 @@ export default {
     ctx.waitUntil(sendRenewalDigest(env).catch((error) => {
       console.error('Renewal digest failed:', error)
     }))
+    ctx.waitUntil(runScheduledDataMaintenance(env))
   },
 }

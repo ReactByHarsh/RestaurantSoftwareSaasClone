@@ -178,7 +178,7 @@ function escPosBytes(job: Pick<PrintJob, 'text' | 'qrCodes'>, settings: PrinterT
 function usbOpenError(error: unknown) {
   const message = error instanceof Error ? error.message : String(error)
   if (/access denied|permission|denied|security/i.test(message)) {
-    return new Error('Chrome cannot claim this printer while Windows owns it. Use Printer Bridge with the POS80 Windows queue for no-dialog USB/Bluetooth/LAN printing, or use System Dialog.')
+    return new Error('Chrome cannot claim this printer while Windows owns it. In BhojPatra Desk use Desktop Built-in with the installed Windows queue, or use System Dialog.')
   }
   return error instanceof Error ? error : new Error(message || 'USB printer failed to open.')
 }

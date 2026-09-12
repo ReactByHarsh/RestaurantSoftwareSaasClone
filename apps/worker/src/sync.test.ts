@@ -1,7 +1,21 @@
 import { describe, expect, it } from 'vitest'
-import { applyOrderAggregateToSnapshot, canonicalJson, syncChangeSchema, validRelationalKotItems } from './sync'
+import {
+  applyOrderAggregateToSnapshot,
+  canonicalJson,
+  compactOperationalSnapshot,
+  sha256Hex,
+  syncChangeSchema,
+  syncPushIdempotencyValue,
+  syncPushSchema,
+  syncRetention,
+  validRelationalKotItems,
+} from './sync'
 
 describe('v2 order sync projection', () => {
+  it('keeps delta transport history bounded for daily clients', () => {
+    expect(syncRetention.changesPerOutlet).toBe(3_000)
+  })
+
   it('accepts the public versioned aggregate wire contract', () => {
     const parsed = syncChangeSchema.parse({
       entityType: 'order_aggregate',
@@ -35,14 +49,55 @@ describe('v2 order sync projection', () => {
       tables: [{ id: 'table_1', status: 'occupied', activeOrderId: 'ord_1' }],
       savedCarts: { table_1: [{ quantity: 1 }] },
     }, change)
-    expect((result.orders as Array<any>)[0].isClosed).toBe(true)
+    expect(result.orders).toEqual([])
+    expect(result.orderItems).toEqual([])
+    expect(result.kots).toEqual([])
+    expect(result.payments).toEqual([])
     expect((result.tables as Array<any>)[0].activeOrderId).toBeUndefined()
     expect(result.savedCarts).toEqual({})
+  })
+
+  it('keeps only active order aggregates in the operational snapshot', () => {
+    const result = compactOperationalSnapshot({
+      orders: [
+        { id: 'open', status: 'running' },
+        { id: 'closed', status: 'paid', isClosed: true },
+      ],
+      orderItems: [{ id: 'oi-open', orderId: 'open' }, { id: 'oi-closed', orderId: 'closed' }],
+      kots: [{ id: 'kot-open', orderId: 'open' }, { id: 'kot-closed', orderId: 'closed' }],
+      payments: [{ id: 'pay-closed', orderId: 'closed' }],
+      tables: [{ id: 'table-1', status: 'occupied', activeOrderId: 'closed' }],
+      savedCarts: { 'table-1': [{ quantity: 1 }] },
+      purchaseEntries: [{ id: 'purchase-old' }],
+      auditLogs: [{ id: 'audit-old' }],
+    })
+    expect((result.orders as Array<{ id: string }>).map((order) => order.id)).toEqual(['open'])
+    expect((result.orderItems as Array<{ id: string }>).map((item) => item.id)).toEqual(['oi-open'])
+    expect(result.purchaseEntries).toEqual([])
+    expect(result.auditLogs).toEqual([])
+    expect(result.snapshotKind).toBe('operational')
   })
 
   it('uses deterministic canonical JSON for hashes', () => {
     expect(canonicalJson({ version: 2, order: { z: 1, a: 2 } }))
       .toBe('{"order":{"a":2,"z":1},"version":2}')
+  })
+
+  it('does not treat pull cursor progress as a different push mutation', async () => {
+    const change = syncChangeSchema.parse({
+      entityType: 'order_aggregate', entityId: 'ord_1', orderUuid: 'ord_1',
+      baseVersion: 1, version: 2, operation: 'upsert',
+      updatedAt: '2026-08-09T00:00:00.000Z', isClosed: true,
+      payloadHash: 'd'.repeat(64), payload: { order: { id: 'ord_1', status: 'paid' } },
+    })
+    const first = syncPushSchema.parse({
+      protocolVersion: 2, deviceId: 'device_1', batchId: 'batch_1',
+      baseCursor: 10, changes: [change],
+    })
+    const retry = { ...first, baseCursor: 999 }
+
+    await expect(sha256Hex(syncPushIdempotencyValue(first)))
+      .resolves.toBe(await sha256Hex(syncPushIdempotencyValue(retry)))
   })
 
   it('omits orphan legacy KOT lines from the relational projection', () => {

@@ -2,18 +2,32 @@ import { useEffect, useState } from 'react'
 import type { ReactNode } from 'react'
 import { ChefHat, DatabaseZap, MonitorSmartphone } from 'lucide-react'
 import {
+  createDailyLocalBackup,
   loadDesktopState,
   saveDesktopState,
   isTauriDesktop,
 } from '../../lib/localDb'
 import { checkForAppUpdate, downloadAndInstallUpdate } from '../../lib/appUpdater'
-import { fetchCloudSnapshot, hasSnapshotData, runCloudLogin, saveCloudSnapshot } from '../../lib/cloudSync'
-import { syncOrderDeltasNow } from '../../lib/orderSync'
+import {
+  DAILY_CLOUD_SYNC_INTERVAL_MS,
+  fetchCloudStaff,
+  fetchCloudSnapshot,
+  getDailyCloudSyncDueAt,
+  hasSnapshotData,
+  mergeOperationalSnapshot,
+  runCloudLogin,
+  saveCloudDailyBackup,
+  saveCloudSnapshot,
+  syncCloudStaff,
+} from '../../lib/cloudSync'
+import { getDeviceId, syncOrderDeltasNow } from '../../lib/orderSync'
 import { realtimeClient } from '../../lib/realtime'
 import { useBillingStore } from '../../store/billingStore'
 import { useAuthStore } from '../../store/authStore'
 import { useStaffStore } from '../../store/staffStore'
 import { useUIStore } from '../../store/uiStore'
+
+const BACKUP_CHECK_INTERVAL_MS = 60 * 60 * 1000
 
 export default function DesktopBootstrap({ children }: { children: ReactNode }) {
   const [ready, setReady] = useState(() => !isTauriDesktop())
@@ -25,12 +39,14 @@ export default function DesktopBootstrap({ children }: { children: ReactNode }) 
     let saveTimer: number | undefined
     let hydrationComplete = false
     let cloudTimer: number | undefined
+    let backupTimer: number | undefined
     let cloudSyncInFlight = false
     let cloudRetryAttempt = 0
     let saveInFlight: Promise<void> = Promise.resolve()
     let unsubscribeBilling: (() => void) | undefined
     let unsubscribeStaff: (() => void) | undefined
     let unlistenLanState: (() => void) | undefined
+    let cloudScheduleKey = ''
 
     const saveNow = () => {
       if (!hydrationComplete || disposed) return Promise.resolve()
@@ -59,6 +75,15 @@ export default function DesktopBootstrap({ children }: { children: ReactNode }) 
       return saveNow().catch((error) => {
         console.error('Failed to flush desktop state', error)
       })
+    }
+
+    const runDailyBackup = async () => {
+      if (!hydrationComplete || disposed) return
+      await flushSave()
+      const result = await createDailyLocalBackup(false)
+      if (result?.errors.length) {
+        console.warn('Daily backup completed with inaccessible drive targets', result.errors)
+      }
     }
 
     const runAutoUpdate = async () => {
@@ -103,29 +128,46 @@ export default function DesktopBootstrap({ children }: { children: ReactNode }) 
         const localSnapshot = billing.exportSnapshot()
         const result = await syncOrderDeltasNow(localSnapshot, effectiveCloud)
         if (result.changed) useBillingStore.getState().importSnapshot(result.snapshot, true)
+        if (result.skipped || result.conflicts || result.pending) throw new Error('Cloud sync is incomplete; pending changes or conflicts need attention')
         const signedInRole = useAuthStore.getState().user?.role
         const canUploadSetup = signedInRole === 'owner' || signedInRole === 'admin' || signedInRole === 'manager'
         let uploadedAt = cloud.lastCloudUploadedAt
         if (canUploadSetup) {
+          const fullLocalSnapshot = useBillingStore.getState().exportSnapshot()
           const uploaded = await saveCloudSnapshot(
             outletId,
             tenantId,
-            useBillingStore.getState().exportSnapshot(),
-            'desktop-auto-sync',
+            fullLocalSnapshot,
+            await getDeviceId(),
             cloud.serverUrl,
             cloudAuth,
           )
           uploadedAt = uploaded.updatedAt
-          if (uploaded.payload) useBillingStore.getState().importSnapshot(uploaded.payload, true)
+          await saveCloudDailyBackup(
+            outletId,
+            tenantId,
+            fullLocalSnapshot,
+            await getDeviceId(),
+            cloud.serverUrl,
+            cloudAuth,
+          )
+          if (uploaded.payload) {
+            const current = useBillingStore.getState().exportSnapshot()
+            useBillingStore.getState().importSnapshot(mergeOperationalSnapshot(current, uploaded.payload), true)
+          }
         }
         const remote = await fetchCloudSnapshot(outletId, cloud.serverUrl, cloudAuth)
         if (remote.exists) {
           const remoteUpdatedAt = Date.parse(remote.updatedAt) || 0
           const lastDownloadedAt = Date.parse(cloud.lastCloudDownloadedAt || '') || 0
           if (remoteUpdatedAt > lastDownloadedAt) {
-            useBillingStore.getState().importSnapshot(remote.payload, true)
+            const current = useBillingStore.getState().exportSnapshot()
+            useBillingStore.getState().importSnapshot(mergeOperationalSnapshot(current, remote.payload), true)
           }
         }
+        const cloudStaff = await fetchCloudStaff(cloud.serverUrl, cloudAuth)
+        useStaffStore.getState().replaceStaff([...cloudStaff.staff, ...useStaffStore.getState().staff])
+        await syncCloudStaff(useStaffStore.getState().staff, cloud.serverUrl, cloudAuth)
         const syncedAt = new Date().toISOString()
         useBillingStore.getState().updateCloudSyncSettings({
           tenantId,
@@ -135,7 +177,8 @@ export default function DesktopBootstrap({ children }: { children: ReactNode }) 
           lastSuccessfulSyncAt: syncedAt,
           lastCloudUploadedAt: uploadedAt || syncedAt,
           lastCloudDownloadedAt: syncedAt,
-          nextSyncAt: new Date(Date.now() + 4 * 3_600_000).toISOString(),
+          syncIntervalHours: 24,
+          nextSyncAt: new Date(Date.now() + DAILY_CLOUD_SYNC_INTERVAL_MS).toISOString(),
         })
         cloudRetryAttempt = 0
         if (reason === 'daily') useUIStore.getState().addToast('success', 'Cloud delta sync completed', 'Cloud Sync')
@@ -156,18 +199,32 @@ export default function DesktopBootstrap({ children }: { children: ReactNode }) 
     const scheduleCloudSync = () => {
       window.clearTimeout(cloudTimer)
       const cloud = useBillingStore.getState().cloudSync
+      cloudScheduleKey = JSON.stringify([
+        cloud.enabled,
+        cloud.autoSyncEnabled,
+        cloud.accountLogin,
+        cloud.accountSecret,
+        cloud.lastSuccessfulSyncAt,
+        cloud.nextSyncAt,
+      ])
       if (!useAuthStore.getState().isAuthenticated || !cloud.enabled || !cloud.autoSyncEnabled) return
 
-      const now = new Date()
-      const intervalMs = 4 * 3_600_000
-      // Startup is deliberately local-only. Begin the cloud cycle four hours
-      // after this desktop session starts; never use a missing timestamp to
-      // trigger an immediate cloud download during login.
-      const nextRun = new Date(now.getTime() + intervalMs)
+      const now = Date.now()
+      let nextRun = getDailyCloudSyncDueAt(cloud, now)
+
+      // Never perform a cloud restore as part of credential validation. A due
+      // cycle gets a short post-login grace period while local SQLite remains
+      // the source of truth during startup. A fresh installation therefore
+      // performs its first daily sync once, rather than waiting another day.
+      if (nextRun <= now) nextRun = now + 60_000
+      const nextSyncAt = new Date(nextRun).toISOString()
+      if (cloud.syncIntervalHours !== 24 || cloud.nextSyncAt !== nextSyncAt) {
+        useBillingStore.getState().updateCloudSyncSettings({ syncIntervalHours: 24, nextSyncAt })
+      }
 
       cloudTimer = window.setTimeout(
         () => void syncCloudSnapshotNow('daily'),
-        Math.max(1000, nextRun.getTime() - now.getTime())
+        Math.max(1000, nextRun - now)
       )
     }
 
@@ -233,11 +290,16 @@ export default function DesktopBootstrap({ children }: { children: ReactNode }) 
       } finally {
         if (disposed) return
         hydrationComplete = loadedSuccessfully
-        if (loadedSuccessfully) queueSave()
-        scheduleCloudSync()
+        if (loadedSuccessfully) {
+          await flushSave()
+          void runDailyBackup().catch((error) => {
+            console.error('Daily local backup failed', error)
+          })
+          backupTimer = window.setInterval(() => {
+            void runDailyBackup().catch((error) => console.error('Daily local backup failed', error))
+          }, BACKUP_CHECK_INTERVAL_MS)
+        }
         if (isTauriDesktop()) void runAutoUpdate()
-        // scheduleCloudSync catches up immediately when the configured time
-        // has passed, and schedules the next exact local time otherwise.
         scheduleCloudSync()
       }
     }
@@ -252,6 +314,16 @@ export default function DesktopBootstrap({ children }: { children: ReactNode }) 
 
       const onStateChanged = () => {
         queueSave()
+        const state = useBillingStore.getState().cloudSync
+        const nextScheduleKey = JSON.stringify([
+          state.enabled,
+          state.autoSyncEnabled,
+          state.accountLogin,
+          state.accountSecret,
+          state.lastSuccessfulSyncAt,
+          state.nextSyncAt,
+        ])
+        if (nextScheduleKey !== cloudScheduleKey) scheduleCloudSync()
       }
       unsubscribeBilling = useBillingStore.subscribe(onStateChanged)
       unsubscribeStaff = useStaffStore.subscribe(onStateChanged)
@@ -314,7 +386,8 @@ export default function DesktopBootstrap({ children }: { children: ReactNode }) 
       disposed = true
       hydrationComplete = false
       window.clearTimeout(saveTimer)
-      window.clearInterval(cloudTimer)
+      window.clearTimeout(cloudTimer)
+      window.clearInterval(backupTimer)
       unsubscribeBilling?.()
       unsubscribeStaff?.()
       unlistenLanState?.()

@@ -240,7 +240,7 @@ export default function OwnerScreen() {
                     Owner dashboard for tables, captain flow, and live sales.
                   </h1>
                   <p className="mt-3 max-w-2xl text-sm font-semibold leading-6 text-white/75">
-                    This desktop view reads local live restaurant data. Cloud receives versioned order deltas every four hours and after checkout.
+                    This desktop view reads local live restaurant data. Cloud receives versioned order deltas every 24 hours and after checkout.
                   </p>
                 </div>
               </div>

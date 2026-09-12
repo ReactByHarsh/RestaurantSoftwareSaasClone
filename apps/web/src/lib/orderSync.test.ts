@@ -1,6 +1,6 @@
 import 'fake-indexeddb/auto'
 import { describe, expect, it } from 'vitest'
-import { canonicalJson, orderIsClosed, payloadHash } from './orderSync'
+import { canonicalJson, chunkOrderChanges, orderIsClosed, payloadHash } from './orderSync'
 import type { Order } from './types'
 
 const baseOrder: Order = {
@@ -32,5 +32,11 @@ describe('order sync wire primitives', () => {
     expect(orderIsClosed({ ...baseOrder, closedAt: '2026-08-09T00:02:00.000Z' })).toBe(true)
     expect(orderIsClosed({ ...baseOrder, isClosed: true })).toBe(true)
     expect(orderIsClosed(baseOrder)).toBe(false)
+  })
+
+  it('uploads 150 pending orders as three batches of at most 50', () => {
+    const batches = chunkOrderChanges(Array.from({ length: 150 }, (_, index) => index))
+    expect(batches).toHaveLength(3)
+    expect(batches.map((batch) => batch.length)).toEqual([50, 50, 50])
   })
 })

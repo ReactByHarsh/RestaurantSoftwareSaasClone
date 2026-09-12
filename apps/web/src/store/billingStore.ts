@@ -22,7 +22,7 @@ import type {
   StockUnit,
   TableStatus,
 } from '../lib/types'
-import { type BillingSnapshot, type CloudSyncSettings } from '../lib/cloudSync'
+import { mergeOperationalSnapshot, type BillingSnapshot, type CloudSyncSettings } from '../lib/cloudSync'
 import { dexieBusinessStateStorage } from '../lib/orderSync'
 import { calculateTax } from '../lib/money'
 import { isTauriDesktop, saveDesktopState } from '../lib/localDb'
@@ -116,7 +116,7 @@ const DEFAULT_CLOUD_SYNC_SETTINGS: CloudSyncSettings = {
   accountLogin: '',
   accountSecret: '',
   autoSyncEnabled: true,
-  syncIntervalHours: 4,
+  syncIntervalHours: 24,
   autoSyncDaily: true,
   syncHour24: 2,
   cloudMode: 'delta_v2',
@@ -315,7 +315,7 @@ const DEFAULT_PRINT_SETTINGS: PrintSettings = {
   autoPrintReceipt: false,
   autoPrintKot: false,
   printerName: '',
-  connectionMode: 'browser',
+  connectionMode: isTauriDesktop() ? 'native' : 'browser',
   bridgeUrl: 'http://127.0.0.1:8181',
   autoCut: true,
   openCashDrawer: false,
@@ -393,14 +393,21 @@ function saveDevicePrintSettings(settings: PrintSettings) {
 }
 
 function mergeDevicePrintSettings(incoming: Partial<PrintSettings> | undefined, localFallback?: PrintSettings): PrintSettings {
-  const base = { ...DEFAULT_PRINT_SETTINGS, ...incoming, connectionMode: normalizePrinterConnectionMode(incoming?.connectionMode) }
+  const desktopMode = (mode: PrinterConnectionMode | undefined) => {
+    const normalized = normalizePrinterConnectionMode(mode)
+    return isTauriDesktop() && normalized === 'bridge' ? 'native' as const : normalized
+  }
+  const base = {
+    ...DEFAULT_PRINT_SETTINGS,
+    ...incoming,
+    connectionMode: incoming?.connectionMode ? desktopMode(incoming.connectionMode) : DEFAULT_PRINT_SETTINGS.connectionMode,
+  }
   const device = readDevicePrintSettings() ?? (localFallback ? pickDevicePrintSettings(localFallback) : null)
   const normalizedDevice = device
-    ? { ...device, connectionMode: normalizePrinterConnectionMode(device.connectionMode) }
+    ? { ...device, connectionMode: desktopMode(device.connectionMode) }
     : null
-  const bridgeWasChosen = base.connectionMode === 'bridge' || normalizedDevice?.connectionMode === 'bridge'
   const merged = normalizedDevice
-    ? { ...base, ...normalizedDevice, connectionMode: bridgeWasChosen ? 'bridge' as const : normalizedDevice.connectionMode }
+    ? { ...base, ...normalizedDevice, connectionMode: normalizedDevice.connectionMode }
     : base
   saveDevicePrintSettings(merged)
   return merged
@@ -764,7 +771,9 @@ function preserveNewerCompletedOrders(incoming: BillingSnapshot, local: BillingS
   if (protectedOrders.length === 0) return incoming
 
   const protectedOrderIds = new Set(protectedOrders.map((order) => order.id))
-  const protectedTableIds = new Set(protectedOrders.flatMap((order) => order.tableId ? [order.tableId] : []))
+  const protectedTableIds = new Set(incoming.tables
+    .filter(table => table.activeOrderId && protectedOrderIds.has(table.activeOrderId))
+    .map(table => table.id))
   const localTableById = new Map(local.tables.map((table) => [table.id, table]))
   const localOrderItems = local.orderItems.filter((item) => protectedOrderIds.has(item.orderId))
   const localKots = local.kots.filter((kot) => protectedOrderIds.has(kot.orderId))
@@ -807,6 +816,8 @@ function preserveLocalActiveTableSessions(incoming: BillingSnapshot, local: Bill
   const localTableById = new Map(local.tables.map((table) => [table.id, table]))
   const activeSessionOrders = local.orders.filter((order) => {
     if (isClosedOrder(order) || !order.tableId) return false
+    const remoteOrder = incoming.orders.find(candidate => candidate.id === order.id)
+    if (remoteOrder && isClosedOrder(remoteOrder) && (remoteOrder.version ?? 0) >= (order.version ?? 0)) return false
     const table = localTableById.get(order.tableId)
     if (table?.activeOrderId !== order.id) return false
     return (localItemCountByOrder.get(order.id) ?? 0) > 0 || (localSavedCarts[order.tableId]?.length ?? 0) > 0
@@ -931,6 +942,9 @@ export const useBillingStore = create<BillingStore>()(
       },
 
       importSnapshot: (snapshot, preserveSession = false) => set((state) => {
+        if (preserveSession && snapshot.snapshotKind === 'operational') {
+          snapshot = mergeOperationalSnapshot(state, snapshot)
+        }
         const localSavedCarts = preserveSession ? parkActiveCart(state) : state.savedCarts
         const conflictSafeSnapshot = preserveSession
           ? preserveLocalActiveTableSessions(preserveNewerCompletedOrders(snapshot, state), state)
@@ -2042,7 +2056,10 @@ export const useBillingStore = create<BillingStore>()(
           }
         })
 
-        if (state.printSettings.autoPrintKot || state.printSettings.directKotPrint || ['webusb', 'bridge'].includes(state.printSettings.connectionMode)) {
+        if (state.printSettings.autoPrintKot
+          || state.printSettings.directKotPrint
+          || ['webusb', 'bridge'].includes(state.printSettings.connectionMode)
+          || (state.printSettings.connectionMode === 'native' && Boolean(state.printSettings.printerName.trim()))) {
           if (state.printSettings.kotPrintMode === 'single' && kotsToCreate.length > 1) {
             const kotIds = kotsToCreate.map((kot) => kot.id)
             setTimeout(() => get().printKOT(kotIds[0], kotIds), 0)
@@ -3079,7 +3096,8 @@ export const useBillingStore = create<BillingStore>()(
             ...DEFAULT_CLOUD_SYNC_SETTINGS,
             ...(persisted.cloudSync ?? {}),
             autoSyncEnabled: persisted.cloudSync?.autoSyncEnabled ?? persisted.cloudSync?.autoSyncDaily ?? true,
-            syncIntervalHours: persisted.cloudSync?.syncIntervalHours ?? 4,
+            syncIntervalHours: 24,
+            nextSyncAt: persisted.cloudSync?.syncIntervalHours === 24 ? persisted.cloudSync.nextSyncAt : undefined,
             cloudMode: 'delta_v2',
           },
           printSettings: mergeDevicePrintSettings(normalized.printSettings, persisted.printSettings),

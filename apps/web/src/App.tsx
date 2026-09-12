@@ -20,12 +20,21 @@ import PrintReceipt from './components/print/PrintReceipt'
 import PrintKOT from './components/print/PrintKOT'
 import { getDefaultRoute, hasPermission, type Permission } from './lib/permissions'
 import ToastContainer from './components/shared/ToastContainer'
-import { realtimeClient } from './lib/realtime'
 import { useBillingStore } from './store/billingStore'
 import { useStaffStore } from './store/staffStore'
 import { isTauriDesktop } from './lib/localDb'
-import { fetchCloudSnapshot, getSnapshotDataScore } from './lib/cloudSync'
-import { syncOrderDeltasNow } from './lib/orderSync'
+import {
+  DAILY_CLOUD_SYNC_INTERVAL_MS,
+  fetchCloudStaff,
+  fetchCloudSnapshot,
+  getDailyCloudSyncDueAt,
+  getSnapshotDataScore,
+  isDailyCloudSyncDue,
+  saveCloudSnapshot,
+  saveCloudDailyBackup,
+  syncCloudStaff,
+} from './lib/cloudSync'
+import { getDeviceId, syncOrderDeltasNow } from './lib/orderSync'
 import { getLanBridgeState, syncLanBridge } from './lib/lanBridge'
 
 function getNormalizedSnapshotIfNeeded(state: ReturnType<typeof useBillingStore.getState>) {
@@ -158,7 +167,6 @@ export default function App() {
       } catch {
         // Network error — keep using local data as fallback.
       } finally {
-        void syncDailySnapshot()
         scheduleDailySync()
       }
     }
@@ -168,11 +176,26 @@ export default function App() {
       const current = useBillingStore.getState()
       const currentCloud = current.cloudSync
       if (!currentCloud.enabled || !currentCloud.autoSyncEnabled || !currentCloud.accountLogin || !currentCloud.accountSecret) return
+      if (!isDailyCloudSyncDue(currentCloud)) {
+        scheduleDailySync()
+        return
+      }
       cloudSyncInFlight = true
       try {
         const result = await syncOrderDeltasNow(current.exportSnapshot(), currentCloud)
         if (cancelled) return
         if (result.changed) current.importSnapshot(withActiveCloudCredentials(result.snapshot), true)
+        if (result.skipped || result.conflicts || result.pending) throw new Error('Cloud sync is incomplete; pending changes or conflicts need attention')
+        if (['owner', 'admin', 'manager'].includes(useAuthStore.getState().user?.role ?? '')) {
+          const snapshot = useBillingStore.getState().exportSnapshot()
+          const deviceId = await getDeviceId()
+          await saveCloudSnapshot(currentCloud.outletId, currentCloud.tenantId, snapshot, deviceId, currentCloud.serverUrl, auth)
+          await saveCloudDailyBackup(currentCloud.outletId, currentCloud.tenantId, snapshot, deviceId, currentCloud.serverUrl, auth)
+        }
+        const cloudStaff = await fetchCloudStaff(currentCloud.serverUrl, auth)
+        const mergedStaff = [...cloudStaff.staff, ...useStaffStore.getState().staff]
+        useStaffStore.getState().replaceStaff(mergedStaff)
+        await syncCloudStaff(useStaffStore.getState().staff, currentCloud.serverUrl, auth)
         const syncedAt = new Date().toISOString()
         current.updateCloudSyncSettings({
           cloudMode: 'delta_v2',
@@ -180,7 +203,8 @@ export default function App() {
           lastSuccessfulSyncAt: syncedAt,
           lastCloudUploadedAt: syncedAt,
           lastCloudDownloadedAt: syncedAt,
-          nextSyncAt: new Date(Date.now() + 4 * 3_600_000).toISOString(),
+          syncIntervalHours: 24,
+          nextSyncAt: new Date(Date.now() + DAILY_CLOUD_SYNC_INTERVAL_MS).toISOString(),
         })
         retryAttempt = 0
       } catch (error) {
@@ -215,40 +239,17 @@ export default function App() {
         currentCloud.autoSyncEnabled,
         currentCloud.syncIntervalHours,
         currentCloud.lastSuccessfulSyncAt,
+        currentCloud.nextSyncAt,
       ])
       if (!currentCloud.enabled || !currentCloud.autoSyncEnabled) return
-      const currentTime = new Date()
-      const intervalMs = 4 * 3_600_000
-      const lastSuccess = Date.parse(currentCloud.lastSuccessfulSyncAt || currentCloud.lastSyncedAt || '') || 0
-      const nextRun = new Date(lastSuccess + intervalMs)
-      if (nextRun.getTime() <= currentTime.getTime()) nextRun.setTime(currentTime.getTime() + 1_000)
+      const currentTime = Date.now()
+      const dueAt = getDailyCloudSyncDueAt(currentCloud, currentTime)
+      const nextRun = Math.max(dueAt, currentTime + 1_000)
       cloudTimer = window.setTimeout(
         () => void syncDailySnapshot(),
-        Math.max(1000, nextRun.getTime() - currentTime.getTime()),
+        Math.max(1000, nextRun - currentTime),
       )
     }
-
-    realtimeClient.connect({
-      serverUrl: cloud.serverUrl,
-      outletId: cloud.outletId,
-      accountLogin: cloud.accountLogin,
-      accountSecret: cloud.accountSecret,
-    })
-
-    const unsubscribeRealtime = realtimeClient.subscribe((event) => {
-      if (event.type === 'SYNC_DELTA_AVAILABLE') {
-        void syncDailySnapshot()
-        return
-      }
-      if (event.type !== 'STATE_UPDATED') return
-      const payload = event.payload as any
-      if (!payload || !Array.isArray(payload.orders) || !Array.isArray(payload.tables)) return
-      useBillingStore.getState().importSnapshot(withActiveCloudCredentials(payload), true)
-      useBillingStore.getState().updateCloudSyncSettings({
-        lastSyncedAt: event.timestamp,
-        lastCloudDownloadedAt: event.timestamp,
-      })
-    })
 
     const unsubscribeSchedule = useBillingStore.subscribe((state) => {
       const nextConfigKey = JSON.stringify([
@@ -256,13 +257,14 @@ export default function App() {
         state.cloudSync.autoSyncEnabled,
         state.cloudSync.syncIntervalHours,
         state.cloudSync.lastSuccessfulSyncAt,
+        state.cloudSync.nextSyncAt,
       ])
       if (nextConfigKey !== scheduleConfigKey) scheduleDailySync()
     })
 
     void refreshCloudData()
     const catchUp = () => {
-      if (document.visibilityState === 'visible' && navigator.onLine) void syncDailySnapshot()
+      if (document.visibilityState === 'visible' && navigator.onLine) scheduleDailySync()
     }
     window.addEventListener('focus', catchUp)
     window.addEventListener('online', catchUp)
@@ -272,7 +274,6 @@ export default function App() {
       cancelled = true
       window.clearTimeout(cloudTimer)
       unsubscribeSchedule()
-      unsubscribeRealtime()
       window.removeEventListener('focus', catchUp)
       window.removeEventListener('online', catchUp)
       document.removeEventListener('visibilitychange', catchUp)

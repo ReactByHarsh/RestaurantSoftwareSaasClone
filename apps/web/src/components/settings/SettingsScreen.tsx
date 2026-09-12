@@ -4,12 +4,25 @@ import { Settings as SettingsIcon, Save, Store, Printer, Bell, Wifi, Sparkles, D
 import QRCode from 'qrcode'
 import { useUIStore } from '../../store/uiStore'
 import { useBillingStore } from '../../store/billingStore'
+import { useAuthStore } from '../../store/authStore'
 import { useStaffStore } from '../../store/staffStore'
 import { checkForAppUpdate, downloadAndInstallUpdate } from '../../lib/appUpdater'
-import { fetchCloudStaff, fetchCompleteCloudSnapshot, hasSnapshotData, runCloudLogin, syncCloudStaff, type BillingSnapshot, type CloudSyncSettings } from '../../lib/cloudSync'
+import {
+  DAILY_CLOUD_SYNC_INTERVAL_MS,
+  fetchCloudStaff,
+  fetchCompleteCloudSnapshot,
+  getDailyCloudSyncDueAt,
+  hasSnapshotData,
+  runCloudLogin,
+  saveCloudSnapshot,
+  saveCloudDailyBackup,
+  syncCloudStaff,
+  type BillingSnapshot,
+  type CloudSyncSettings,
+} from '../../lib/cloudSync'
 import { extractBillingSnapshot } from '../../lib/backup'
-import { getOrderSyncHealth, syncOrderDeltasNow } from '../../lib/orderSync'
-import { getLanServerStatus, isTauriDesktop, saveDesktopState, type LanServerStatus } from '../../lib/localDb'
+import { getDeviceId, getOrderSyncHealth, syncOrderDeltasNow } from '../../lib/orderSync'
+import { createDailyLocalBackup, getLanServerStatus, isTauriDesktop, saveDesktopState, type LanServerStatus, type LocalBackupResult } from '../../lib/localDb'
 import { getLanBridgeStatus, type LanBridgeStatus } from '../../lib/lanBridge'
 
 type DisplayLanStatus = LanServerStatus | LanBridgeStatus
@@ -49,6 +62,8 @@ export default function SettingsScreen() {
   const appUpdateFormRef = useRef<HTMLFormElement>(null)
   const cloudSyncFormRef = useRef<HTMLFormElement>(null)
   const [cloudBusy, setCloudBusy] = useState(false)
+  const [backupBusy, setBackupBusy] = useState(false)
+  const [lastLocalBackup, setLastLocalBackup] = useState<LocalBackupResult | null>(null)
   const [updateBusy, setUpdateBusy] = useState(false)
   const [logoPreview, setLogoPreview] = useState(outlet.logoDataUrl ?? '')
   const [lanStatus, setLanStatus] = useState<DisplayLanStatus | null>(null)
@@ -125,13 +140,17 @@ export default function SettingsScreen() {
       outletId: String(data.get('outletId') ?? '').trim(),
       accountLogin: String(data.get('accountLogin') ?? '').trim(),
       accountSecret: String(data.get('accountSecret') ?? '').trim(),
-      autoSyncEnabled: true,
-      syncIntervalHours: 4,
-      autoSyncDaily: true,
+      autoSyncEnabled: data.get('autoSyncEnabled') === 'on',
+      syncIntervalHours: 24,
+      autoSyncDaily: data.get('autoSyncEnabled') === 'on',
       syncHour24: Number(data.get('syncHour24') ?? 2),
       cloudMode: 'delta_v2',
       lastSuccessfulSyncAt: cloudSync.lastSuccessfulSyncAt,
-      nextSyncAt: cloudSync.nextSyncAt,
+      nextSyncAt: data.get('autoSyncEnabled') === 'on'
+        ? (cloudSync.autoSyncEnabled && cloudSync.nextSyncAt
+            ? cloudSync.nextSyncAt
+            : new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString())
+        : undefined,
       lastSyncedAt: cloudSync.lastSyncedAt,
       lastCloudUploadedAt: cloudSync.lastCloudUploadedAt,
       lastCloudDownloadedAt: cloudSync.lastCloudDownloadedAt,
@@ -170,13 +189,34 @@ export default function SettingsScreen() {
     addToast('success', 'Local backup exported successfully', 'Backup Export')
   }
 
+  const handleAllDriveBackup = async () => {
+    setBackupBusy(true)
+    try {
+      await saveDesktopState(exportSnapshot(), useStaffStore.getState().staff)
+      const result = await createDailyLocalBackup(true)
+      if (!result) throw new Error('Automatic drive backups are available only in BhojPatra Desk.')
+      setLastLocalBackup(result)
+      addToast(
+        result.errors.length ? 'warning' : 'success',
+        `Backup saved to ${result.paths.length} location${result.paths.length === 1 ? '' : 's'}${result.errors.length ? `; ${result.errors.length} drive target${result.errors.length === 1 ? '' : 's'} could not be written` : ''}`,
+        'Daily Local Backup',
+      )
+    } catch (error) {
+      addToast('error', error instanceof Error ? error.message : 'Could not create local backup', 'Daily Local Backup')
+    } finally {
+      setBackupBusy(false)
+    }
+  }
+
   const handleBackupImport = async (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0]
     event.target.value = ''
     if (!file) return
 
     try {
-      const text = await file.text()
+      const text = file.name.endsWith('.gz')
+        ? await new Response(file.stream().pipeThrough(new DecompressionStream('gzip'))).text()
+        : await file.text()
       const parsed = JSON.parse(text) as unknown
       const snapshot = extractBillingSnapshot(parsed)
       if (!snapshot) {
@@ -229,6 +269,11 @@ export default function SettingsScreen() {
   const handleCloudSyncNow = async () => {
     if (cloudSyncFormRef.current) saveCloudSyncForm(cloudSyncFormRef.current)
     const formSettings = cloudSyncFormRef.current ? readCloudSettingsForm(cloudSyncFormRef.current) : cloudSync
+    const dueAt = getDailyCloudSyncDueAt(formSettings)
+    if (dueAt > Date.now()) {
+      addToast('info', `Today's cloud sync is already complete. Next sync: ${new Date(dueAt).toLocaleString('en-IN')}`, 'Cloud Sync')
+      return
+    }
     const serverUrl = formSettings.serverUrl.trim()
     let tenantId = formSettings.tenantId.trim()
     let outletId = formSettings.outletId.trim()
@@ -254,6 +299,13 @@ export default function SettingsScreen() {
       const snapshot = exportSnapshot()
       const result = await syncOrderDeltasNow({ ...snapshot, cloudSync: effectiveCloud }, effectiveCloud)
       if (result.changed) importSnapshot(result.snapshot, true)
+      if (result.skipped || result.conflicts || result.pending) throw new Error('Sync is incomplete. Resolve pending changes or conflicts before restoring cloud data.')
+      if (['owner', 'admin', 'manager'].includes(useAuthStore.getState().user?.role ?? '')) {
+        const full = useBillingStore.getState().exportSnapshot()
+        const deviceId = await getDeviceId()
+        await saveCloudSnapshot(outletId, tenantId, full, deviceId, serverUrl, cloudAuth)
+        await saveCloudDailyBackup(outletId, tenantId, full, deviceId, serverUrl, cloudAuth)
+      }
 
       const completeCloud = await fetchCompleteCloudSnapshot(outletId, serverUrl, cloudAuth)
       const importedCloudData = completeCloud.exists && hasSnapshotData(completeCloud.payload)
@@ -272,7 +324,15 @@ export default function SettingsScreen() {
       useStaffStore.getState().replaceStaff([...cloudStaff.staff, ...useStaffStore.getState().staff])
       await syncCloudStaff(useStaffStore.getState().staff, serverUrl, cloudAuth)
       const syncedAt = new Date().toISOString()
-      updateCloudSyncSettings({ ...effectiveCloud, lastSyncedAt: syncedAt, lastSuccessfulSyncAt: syncedAt, lastCloudUploadedAt: syncedAt, lastCloudDownloadedAt: completeCloud.exists ? completeCloud.updatedAt : syncedAt })
+      updateCloudSyncSettings({
+        ...effectiveCloud,
+        syncIntervalHours: 24,
+        lastSyncedAt: syncedAt,
+        lastSuccessfulSyncAt: syncedAt,
+        lastCloudUploadedAt: syncedAt,
+        lastCloudDownloadedAt: completeCloud.exists ? completeCloud.updatedAt : syncedAt,
+        nextSyncAt: new Date(Date.now() + DAILY_CLOUD_SYNC_INTERVAL_MS).toISOString(),
+      })
       if (isTauriDesktop()) {
         await saveDesktopState(useBillingStore.getState().exportSnapshot(), useStaffStore.getState().staff)
       }
@@ -397,7 +457,7 @@ export default function SettingsScreen() {
           </div>
         </div>
         <div className="flex flex-wrap items-center gap-2 self-start sm:self-auto">
-          <input ref={backupInputRef} type="file" accept="application/json,.json" onChange={handleBackupImport} className="hidden" />
+          <input ref={backupInputRef} type="file" accept="application/json,application/gzip,.json,.gz" onChange={handleBackupImport} className="hidden" />
           <button
             onClick={handleSaveAllSettings}
             className="flex items-center gap-1.5 px-3 py-1.5 bg-primary text-white text-xs font-black rounded-lg hover:bg-primary-dark transition-all active:scale-95 shadow-sm"
@@ -488,6 +548,32 @@ export default function SettingsScreen() {
               </div>
             </form>
           </section>
+
+          {isTauriDesktop() && (
+            <section className="bg-white rounded-2xl border-2 border-slate-100 shadow-[0_2px_10px_rgba(0,0,0,0.02)] overflow-hidden">
+              <div className="px-5 py-3 border-b-2 border-slate-100 bg-slate-50/50 flex items-center gap-2">
+                <Download size={18} className="text-emerald-600" strokeWidth={2.5} />
+                <h2 className="text-sm font-black text-slate-800 tracking-tight">Daily Local Database Backup</h2>
+              </div>
+              <div className="p-5 flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
+                <div>
+                  <p className="text-sm font-black text-slate-800">Automatic, date-stamped SQLite protection</p>
+                  <p className="mt-1 text-[11px] font-bold leading-5 text-slate-500">
+                    Once per day BhojPatra saves an integrity-checked copy of the complete local database, including setup, staff, tables, carts, orders, KOTs, payments, and sync metadata. A protected app-data copy is always kept, with additional copies in `BhojPatra Backups` on every writable fixed drive.
+                  </p>
+                  {lastLocalBackup && (
+                    <div className="mt-3 space-y-1 rounded-xl border border-emerald-100 bg-emerald-50 p-3">
+                      <p className="text-[10px] font-black uppercase tracking-wider text-emerald-700">{lastLocalBackup.fileName} • {(lastLocalBackup.sizeBytes / 1024 / 1024).toFixed(2)} MB</p>
+                      {lastLocalBackup.paths.map(path => <p key={path} className="break-all font-mono text-[10px] font-bold text-slate-600">{path}</p>)}
+                    </div>
+                  )}
+                </div>
+                <button type="button" onClick={handleAllDriveBackup} disabled={backupBusy} className="inline-flex shrink-0 items-center justify-center gap-1.5 rounded-xl bg-emerald-600 px-5 py-3 text-xs font-black text-white disabled:opacity-40">
+                  <Download size={15} /> {backupBusy ? 'BACKING UP...' : 'BACK UP ALL DRIVES NOW'}
+                </button>
+              </div>
+            </section>
+          )}
 
           <section className="bg-white rounded-2xl border-2 border-slate-100 shadow-[0_2px_10px_rgba(0,0,0,0.02)] overflow-hidden">
             <div className="px-5 py-3 border-b-2 border-slate-100 bg-slate-50/50 flex items-center gap-2">
@@ -699,15 +785,15 @@ export default function SettingsScreen() {
                 </div>
                 <div>
                   <label className="block text-xs font-black text-slate-700 mb-1.5 uppercase tracking-wider">Sync Interval</label>
-                  <div className="w-full rounded-xl border-2 border-slate-200 bg-slate-50 px-3 py-2 text-sm font-bold text-slate-700">Every 4 hours</div>
-                  <input type="hidden" name="syncIntervalHours" value="4" />
+                  <div className="w-full rounded-xl border-2 border-slate-200 bg-slate-50 px-3 py-2 text-sm font-bold text-slate-700">Every 24 hours</div>
+                  <input type="hidden" name="syncIntervalHours" value="24" />
                 </div>
                 <div className="flex items-end">
                   <label className="flex items-center gap-3 cursor-pointer p-3 rounded-xl border-2 border-slate-100 bg-slate-50 w-full">
-                    <input name="autoSyncEnabled" type="checkbox" checked readOnly className="w-5 h-5 rounded text-primary" />
+                    <input name="autoSyncEnabled" type="checkbox" defaultChecked={cloudSync.autoSyncEnabled} className="w-5 h-5 rounded text-primary" />
                     <div>
                       <p className="font-black text-slate-800 text-sm">Automatic delta sync</p>
-                      <p className="text-[10px] font-bold text-slate-500 mt-0.5">Uploads only changed orders; default is every four hours.</p>
+                      <p className="text-[10px] font-bold text-slate-500 mt-0.5">Turn this on or off. When enabled, newest orders and changes sync once every 24 hours.</p>
                     </div>
                   </label>
                 </div>
@@ -724,7 +810,7 @@ export default function SettingsScreen() {
                     CONNECT ACCOUNT
                   </button>
                   <button type="button" onClick={handleCloudSyncNow} disabled={cloudBusy} className="px-4 py-2 rounded-xl bg-sky-600 text-white text-xs font-black disabled:opacity-40">
-                    {cloudBusy ? 'SYNCING...' : 'SYNC NOW'}
+                    {cloudBusy ? 'SYNCING...' : 'RUN DAILY SYNC'}
                   </button>
                   <button type="submit" className="px-4 py-2 rounded-xl bg-primary text-white text-xs font-black shadow-sm">
                     SAVE CLOUD SETTINGS

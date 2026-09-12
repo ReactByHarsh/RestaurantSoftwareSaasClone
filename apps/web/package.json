@@ -9,7 +9,7 @@
     "build": "tsc && vite build",
     "preview": "vite preview",
     "test": "vitest run",
-    "deploy:pages": "corepack pnpm --filter worker exec wrangler pages deploy ../web/dist --project-name bhojpatra-web --branch main --commit-dirty=true",
+    "deploy:pages": "node -e \"console.error('Cloudflare Pages deployment is disabled. Ship the Tauri desktop installer instead.'); process.exit(1)\"",
     "typecheck": "tsc --noEmit",
     "tauri:dev": "cargo tauri dev",
     "tauri:build": "powershell -ExecutionPolicy Bypass -File ./scripts/Invoke-TauriSignedBuild.ps1",

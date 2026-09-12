@@ -491,10 +491,10 @@ export default function PrinterSettingsScreen() {
 
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
                   {[
-                    ...(nativePrintSupported() ? [{ mode: 'native' as const, icon: Printer, title: 'Desktop Built-in', detail: 'Saved USB / Bluetooth / LAN' }] : []),
+                    ...(nativePrintSupported() ? [{ mode: 'native' as const, icon: Printer, title: 'Desktop Built-in', detail: 'Recommended • no helper app' }] : []),
                     { mode: 'browser' as const, icon: Monitor, title: 'System', detail: 'Windows print dialog' },
                     { mode: 'webusb' as const, icon: Usb, title: 'Chrome USB', detail: 'Only WebUSB-compatible printers' },
-                    { mode: 'bridge' as const, icon: Server, title: 'BhojPatra Local Bridge', detail: 'Recommended for Windows printers' },
+                    ...(!nativePrintSupported() ? [{ mode: 'bridge' as const, icon: Server, title: 'BhojPatra Local Bridge', detail: 'For browser-only installations' }] : []),
                   ].map((option) => (
                     <button
                       key={option.mode}
@@ -520,7 +520,7 @@ export default function PrinterSettingsScreen() {
                   <div className="rounded-xl bg-white border border-slate-200 p-3 space-y-3">
                     <div>
                       <p className="text-xs font-black text-slate-700">BhojPatra desktop built-in printing</p>
-                      <p className="text-[10px] font-bold text-slate-500 mt-1">Use any installed Windows USB, Bluetooth, or network printer, or enter a LAN target like `tcp://192.168.1.50:9100`.</p>
+                      <p className="text-[10px] font-bold text-slate-500 mt-1">Prints directly from BhojPatra through the Windows spooler—no PowerShell process or separate bridge. Use any installed USB, Bluetooth, or network printer, or enter a LAN target like `tcp://192.168.1.50:9100`.</p>
                     </div>
                     <div className="grid grid-cols-1 sm:grid-cols-[1fr_auto] gap-2">
                       {detectedPrinters.length > 0 ? (

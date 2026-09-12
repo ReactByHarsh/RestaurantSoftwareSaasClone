@@ -2,9 +2,9 @@ use std::fs;
 use std::io::Write;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpStream};
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
+use std::process::Command;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use axum::{
     extract::{
@@ -22,7 +22,24 @@ use image::GenericImageView;
 use local_ip_address::{list_afinet_netifas, local_ip};
 
 #[cfg(windows)]
-use std::os::windows::process::CommandExt;
+use std::{
+    ffi::OsStr,
+    os::windows::{ffi::OsStrExt, process::CommandExt},
+    ptr,
+};
+
+#[cfg(windows)]
+use windows_sys::Win32::{
+    Foundation::HANDLE,
+    Graphics::Printing::{
+        ClosePrinter, EndDocPrinter, EndPagePrinter, EnumPrintersW, GetDefaultPrinterW,
+        OpenPrinterW, StartDocPrinterW, StartPagePrinter, WritePrinter, DOC_INFO_1W,
+        PRINTER_ATTRIBUTE_DEFAULT, PRINTER_ATTRIBUTE_WORK_OFFLINE, PRINTER_ENUM_CONNECTIONS,
+        PRINTER_ENUM_LOCAL, PRINTER_INFO_5W,
+    },
+    Storage::FileSystem::{GetDriveTypeW, GetLogicalDrives},
+    System::WindowsProgramming::DRIVE_FIXED,
+};
 
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
@@ -39,6 +56,17 @@ use tower_http::cors::CorsLayer;
 struct LocalStatePayload {
     snapshot: Option<Value>,
     staff: Option<Value>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LocalBackupResult {
+    date: String,
+    file_name: String,
+    created: bool,
+    size_bytes: u64,
+    paths: Vec<String>,
+    errors: Vec<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -258,6 +286,129 @@ fn open_database(app: &AppHandle) -> Result<Connection, String> {
     Ok(connection)
 }
 
+fn local_backup_file_name(date: &str) -> String {
+    format!("BhojPatra-Backup-{date}.sqlite")
+}
+
+#[cfg(windows)]
+fn fixed_drive_roots() -> Vec<PathBuf> {
+    let mask = unsafe { GetLogicalDrives() };
+    (0..26)
+        .filter_map(|index| {
+            if mask & (1 << index) == 0 {
+                return None;
+            }
+            let letter = (b'A' + index as u8) as char;
+            let root = format!("{letter}:\\");
+            let wide = OsStr::new(&root)
+                .encode_wide()
+                .chain(std::iter::once(0))
+                .collect::<Vec<_>>();
+            (unsafe { GetDriveTypeW(wide.as_ptr()) } == DRIVE_FIXED).then(|| PathBuf::from(root))
+        })
+        .collect()
+}
+
+#[cfg(not(windows))]
+fn fixed_drive_roots() -> Vec<PathBuf> {
+    Vec::new()
+}
+
+fn copy_backup_file(
+    source: &PathBuf,
+    directory: &PathBuf,
+    file_name: &str,
+    force: bool,
+) -> Result<PathBuf, String> {
+    fs::create_dir_all(directory).map_err(to_error)?;
+    let destination = directory.join(file_name);
+    if destination.exists() && !force {
+        return Ok(destination);
+    }
+    let temporary = directory.join(format!(".{file_name}.tmp"));
+    if temporary.exists() {
+        let _ = fs::remove_file(&temporary);
+    }
+    if let Err(error) = fs::copy(source, &temporary) {
+        let _ = fs::remove_file(&temporary);
+        return Err(to_error(error));
+    }
+    if destination.exists() {
+        fs::remove_file(&destination).map_err(to_error)?;
+    }
+    if let Err(error) = fs::rename(&temporary, &destination) {
+        let _ = fs::remove_file(&temporary);
+        return Err(to_error(error));
+    }
+    Ok(destination)
+}
+
+fn create_local_backup(app: &AppHandle, force: bool) -> Result<LocalBackupResult, String> {
+    let date = chrono::Local::now().format("%Y-%m-%d").to_string();
+    let file_name = local_backup_file_name(&date);
+    let protected_directory = app.path().app_data_dir().map_err(to_error)?.join("backups");
+    fs::create_dir_all(&protected_directory).map_err(to_error)?;
+    let protected_file = protected_directory.join(&file_name);
+    let created = force || !protected_file.exists();
+
+    if created {
+        let temporary = protected_directory.join(format!(".{file_name}.tmp"));
+        if temporary.exists() {
+            let _ = fs::remove_file(&temporary);
+        }
+        let connection = open_database(app)?;
+        connection
+            .execute_batch("PRAGMA wal_checkpoint(FULL);")
+            .map_err(to_error)?;
+        connection
+            .execute("VACUUM INTO ?1", [temporary.to_string_lossy().as_ref()])
+            .map_err(to_error)?;
+        drop(connection);
+
+        let verification = Connection::open(&temporary).map_err(to_error)?;
+        let integrity: String = verification
+            .query_row("PRAGMA integrity_check", [], |row| row.get(0))
+            .map_err(to_error)?;
+        drop(verification);
+        if integrity != "ok" {
+            let _ = fs::remove_file(&temporary);
+            return Err(format!("Backup integrity check failed: {integrity}"));
+        }
+        if protected_file.exists() {
+            fs::remove_file(&protected_file).map_err(to_error)?;
+        }
+        fs::rename(&temporary, &protected_file).map_err(to_error)?;
+    }
+
+    let mut paths = vec![protected_file.to_string_lossy().to_string()];
+    let mut errors = Vec::new();
+    for root in fixed_drive_roots() {
+        let directory = root.join("BhojPatra Backups");
+        if directory == protected_directory {
+            continue;
+        }
+        match copy_backup_file(&protected_file, &directory, &file_name, force) {
+            Ok(path) => {
+                let value = path.to_string_lossy().to_string();
+                if !paths.contains(&value) {
+                    paths.push(value);
+                }
+            }
+            Err(error) => errors.push(format!("{}: {error}", directory.display())),
+        }
+    }
+
+    let size_bytes = fs::metadata(&protected_file).map_err(to_error)?.len();
+    Ok(LocalBackupResult {
+        date,
+        file_name,
+        created,
+        size_bytes,
+        paths,
+        errors,
+    })
+}
+
 fn remove_web_cache_dirs(root: PathBuf, depth: usize) {
     if depth > 4 || !root.exists() {
         return;
@@ -320,16 +471,35 @@ fn ensure_windows_firewall_rules() {
     ];
 
     for (name, protocol, port, description) in rules {
-        let delete_script = format!(
-            "netsh advfirewall firewall delete rule name=\"{}\" | Out-Null",
-            name
-        );
-        let add_script = format!(
-            "netsh advfirewall firewall add rule name=\"{}\" dir=in action=allow protocol={} localport={} profile=any edge=yes description=\"{}\" | Out-Null",
-            name, protocol, port, description
-        );
-        let _ = powershell_command(&delete_script).output();
-        let _ = powershell_command(&add_script).output();
+        let mut delete = Command::new("netsh.exe");
+        delete
+            .args([
+                "advfirewall",
+                "firewall",
+                "delete",
+                "rule",
+                &format!("name={name}"),
+            ])
+            .creation_flags(CREATE_NO_WINDOW);
+        let _ = delete.output();
+
+        let mut add = Command::new("netsh.exe");
+        add.args([
+            "advfirewall",
+            "firewall",
+            "add",
+            "rule",
+            &format!("name={name}"),
+            "dir=in",
+            "action=allow",
+            &format!("protocol={protocol}"),
+            &format!("localport={port}"),
+            "profile=any",
+            "edge=yes",
+            &format!("description={description}"),
+        ])
+        .creation_flags(CREATE_NO_WINDOW);
+        let _ = add.output();
     }
 }
 
@@ -419,7 +589,10 @@ fn parse_staff_accounts(value: Option<Value>) -> Vec<LanStaffAccount> {
 }
 
 fn is_open_order_value(order: &Value) -> bool {
-    let status = order.get("status").and_then(Value::as_str).unwrap_or_default();
+    let status = order
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
     !order
         .get("isClosed")
         .and_then(Value::as_bool)
@@ -432,8 +605,16 @@ fn snapshot_has_active_table_without_items(snapshot: &Value) -> bool {
     let Some(payload) = snapshot.as_object() else {
         return false;
     };
-    let tables = payload.get("tables").and_then(Value::as_array).cloned().unwrap_or_default();
-    let orders = payload.get("orders").and_then(Value::as_array).cloned().unwrap_or_default();
+    let tables = payload
+        .get("tables")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let orders = payload
+        .get("orders")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
     let order_items = payload
         .get("orderItems")
         .and_then(Value::as_array)
@@ -448,9 +629,10 @@ fn snapshot_has_active_table_without_items(snapshot: &Value) -> bool {
         let Some(order_id) = table.get("activeOrderId").and_then(Value::as_str) else {
             return false;
         };
-        let Some(order) = orders.iter().find(|candidate| {
-            candidate.get("id").and_then(Value::as_str) == Some(order_id)
-        }) else {
+        let Some(order) = orders
+            .iter()
+            .find(|candidate| candidate.get("id").and_then(Value::as_str) == Some(order_id))
+        else {
             return false;
         };
         if !is_open_order_value(order) {
@@ -490,7 +672,9 @@ fn snapshot_restores_active_table_cart(current: &Value, candidate: &Value) -> bo
         .and_then(Value::as_array)
         .cloned()
         .unwrap_or_default();
-    let candidate_carts = candidate_payload.get("savedCarts").and_then(Value::as_object);
+    let candidate_carts = candidate_payload
+        .get("savedCarts")
+        .and_then(Value::as_object);
 
     current_tables.iter().any(|current_table| {
         let Some(table_id) = current_table.get("id").and_then(Value::as_str) else {
@@ -522,9 +706,11 @@ fn snapshot_restores_active_table_cart(current: &Value, candidate: &Value) -> bo
 
 fn read_snapshot(connection: &Connection) -> Result<Option<Value>, String> {
     let current_raw = connection
-        .query_row("SELECT value FROM app_state WHERE key = ?1", ["snapshot"], |row| {
-            row.get::<_, String>(0)
-        })
+        .query_row(
+            "SELECT value FROM app_state WHERE key = ?1",
+            ["snapshot"],
+            |row| row.get::<_, String>(0),
+        )
         .optional()
         .map_err(to_error)?;
 
@@ -1158,183 +1344,166 @@ fn print_tcp(target: (String, u16), bytes: &[u8]) -> Result<(), String> {
 const CREATE_NO_WINDOW: u32 = 0x08000000;
 
 #[cfg(windows)]
-fn powershell_command(script: &str) -> Command {
-    let mut command = Command::new("powershell.exe");
-    command
-        .args([
-            "-NoProfile",
-            "-NonInteractive",
-            "-ExecutionPolicy",
-            "Bypass",
-            "-Command",
-            script,
-        ])
-        .creation_flags(CREATE_NO_WINDOW);
-    command
-}
+fn print_windows_queue(printer: &str, job_name: &str, bytes: &[u8]) -> Result<(), String> {
+    let mut printer_name = OsStr::new(printer)
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>();
+    let mut document_name = OsStr::new(job_name)
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>();
+    let mut data_type = OsStr::new("RAW")
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>();
+    let mut handle: HANDLE = ptr::null_mut();
 
-#[cfg(windows)]
-fn print_windows_queue(
-    app: &AppHandle,
-    printer: &str,
-    job_name: &str,
-    bytes: &[u8],
-) -> Result<(), String> {
-    let directory = app.path().app_cache_dir().map_err(to_error)?;
-    fs::create_dir_all(&directory).map_err(to_error)?;
-    let timestamp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    let file = directory.join(format!(
-        "bhojpatra-print-job-{}-{}.bin",
-        std::process::id(),
-        timestamp
-    ));
-    if let Err(error) = fs::write(&file, bytes) {
-        let _ = fs::remove_file(&file);
-        return Err(to_error(error));
+    unsafe {
+        if OpenPrinterW(printer_name.as_mut_ptr(), &mut handle, ptr::null()) == 0 {
+            return Err(format!(
+                "Could not open Windows printer '{printer}': {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+
+        let document = DOC_INFO_1W {
+            pDocName: document_name.as_mut_ptr(),
+            pOutputFile: ptr::null_mut(),
+            pDatatype: data_type.as_mut_ptr(),
+        };
+        if StartDocPrinterW(handle, 1, &document) == 0 {
+            let error = std::io::Error::last_os_error();
+            ClosePrinter(handle);
+            return Err(format!("Could not start printer job: {error}"));
+        }
+        if StartPagePrinter(handle) == 0 {
+            let error = std::io::Error::last_os_error();
+            EndDocPrinter(handle);
+            ClosePrinter(handle);
+            return Err(format!("Could not start printer page: {error}"));
+        }
+
+        let mut offset = 0usize;
+        while offset < bytes.len() {
+            let count = (bytes.len() - offset).min(u32::MAX as usize) as u32;
+            let mut written = 0u32;
+            if WritePrinter(handle, bytes[offset..].as_ptr().cast(), count, &mut written) == 0 {
+                let error = std::io::Error::last_os_error();
+                EndPagePrinter(handle);
+                EndDocPrinter(handle);
+                ClosePrinter(handle);
+                return Err(format!("Windows printer write failed: {error}"));
+            }
+            if written == 0 {
+                EndPagePrinter(handle);
+                EndDocPrinter(handle);
+                ClosePrinter(handle);
+                return Err("Windows printer accepted no receipt data.".to_string());
+            }
+            offset += written as usize;
+        }
+
+        let page_ended = EndPagePrinter(handle) != 0;
+        let document_ended = EndDocPrinter(handle) != 0;
+        ClosePrinter(handle);
+        if !page_ended || !document_ended {
+            return Err("Windows did not finish the printer job cleanly.".to_string());
+        }
     }
-    let script = r#"
-Add-Type -TypeDefinition @"
-using System;
-using System.ComponentModel;
-using System.Runtime.InteropServices;
-public static class RawPrinterHelper {
-  [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
-  public class DOCINFO {
-    [MarshalAs(UnmanagedType.LPWStr)] public string pDocName;
-    [MarshalAs(UnmanagedType.LPWStr)] public string pOutputFile;
-    [MarshalAs(UnmanagedType.LPWStr)] public string pDataType;
-  }
-  [DllImport("winspool.Drv", EntryPoint = "OpenPrinterW", SetLastError = true, CharSet = CharSet.Unicode)]
-  public static extern bool OpenPrinter(string printerName, out IntPtr hPrinter, IntPtr defaults);
-  [DllImport("winspool.Drv", SetLastError = true)] public static extern bool ClosePrinter(IntPtr hPrinter);
-  [DllImport("winspool.Drv", EntryPoint = "StartDocPrinterW", SetLastError = true, CharSet = CharSet.Unicode)]
-  public static extern int StartDocPrinter(IntPtr hPrinter, int level, [In] DOCINFO docInfo);
-  [DllImport("winspool.Drv", SetLastError = true)] public static extern bool EndDocPrinter(IntPtr hPrinter);
-  [DllImport("winspool.Drv", SetLastError = true)] public static extern bool StartPagePrinter(IntPtr hPrinter);
-  [DllImport("winspool.Drv", SetLastError = true)] public static extern bool EndPagePrinter(IntPtr hPrinter);
-  [DllImport("winspool.Drv", SetLastError = true)] public static extern bool WritePrinter(IntPtr hPrinter, byte[] bytes, int count, out int written);
-  public static void Send(string printerName, byte[] bytes, string jobName) {
-    IntPtr hPrinter;
-    if (!OpenPrinter(printerName, out hPrinter, IntPtr.Zero)) throw new Win32Exception(Marshal.GetLastWin32Error());
-    try {
-      DOCINFO docInfo = new DOCINFO();
-      docInfo.pDocName = jobName;
-      docInfo.pDataType = "RAW";
-      if (StartDocPrinter(hPrinter, 1, docInfo) == 0) throw new Win32Exception(Marshal.GetLastWin32Error());
-      try {
-        if (!StartPagePrinter(hPrinter)) throw new Win32Exception(Marshal.GetLastWin32Error());
-        try {
-          int written;
-          if (!WritePrinter(hPrinter, bytes, bytes.Length, out written)) throw new Win32Exception(Marshal.GetLastWin32Error());
-          if (written != bytes.Length) throw new Exception("Only " + written + " of " + bytes.Length + " bytes were written.");
-        } finally { EndPagePrinter(hPrinter); }
-      } finally { EndDocPrinter(hPrinter); }
-    } finally { ClosePrinter(hPrinter); }
-  }
-}
-"@
-$bytes = [System.IO.File]::ReadAllBytes($env:BP_PRINT_FILE)
-[RawPrinterHelper]::Send($env:BP_PRINTER_NAME, $bytes, $env:BP_JOB_NAME)
-"#;
-    let mut child = match powershell_command(script)
-        .env("BP_PRINT_FILE", &file)
-        .env("BP_PRINTER_NAME", printer)
-        .env("BP_JOB_NAME", job_name)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-    {
-        Ok(child) => child,
-        Err(error) => {
-            let _ = fs::remove_file(&file);
-            return Err(to_error(error));
-        }
-    };
-    let deadline = Instant::now() + Duration::from_secs(30);
-    let result = loop {
-        match child.try_wait() {
-            Ok(Some(_)) => {
-                let output = child.wait_with_output().map_err(to_error)?;
-                if output.status.success() {
-                    break Ok(());
-                }
-                let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-                break Err(if stderr.is_empty() {
-                    "Windows printer write failed.".to_string()
-                } else {
-                    stderr
-                });
-            }
-            Ok(None) if Instant::now() >= deadline => {
-                let _ = child.kill();
-                let _ = child.wait();
-                break Err("Windows printer did not respond within 30 seconds. Check that the printer is online and try again.".to_string());
-            }
-            Ok(None) => std::thread::sleep(Duration::from_millis(100)),
-            Err(error) => break Err(format!("Windows printer process failed: {error}")),
-        }
-    };
-    let _ = fs::remove_file(&file);
-    result
+    Ok(())
 }
 
 #[cfg(windows)]
 fn query_windows_printers() -> Result<Vec<NativePrinter>, String> {
-    let script = r#"
-$printers = @()
-try { $printers = @(Get-CimInstance Win32_Printer -ErrorAction Stop) } catch { $printers = @(Get-WmiObject Win32_Printer -ErrorAction SilentlyContinue) }
-$printers |
-  Where-Object { $_.Name } |
-  Select-Object Name, DriverName, PortName, WorkOffline, Default |
-  ConvertTo-Json -Compress -Depth 3
-"#;
-    let output = powershell_command(script).output().map_err(to_error)?;
-    if !output.status.success() {
-        return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
+    unsafe fn wide_string(pointer: *const u16) -> String {
+        if pointer.is_null() {
+            return String::new();
+        }
+        let mut length = 0usize;
+        while *pointer.add(length) != 0 {
+            length += 1;
+        }
+        String::from_utf16_lossy(std::slice::from_raw_parts(pointer, length))
     }
-    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if stdout.is_empty() {
-        return Ok(vec![]);
+
+    let flags = PRINTER_ENUM_LOCAL | PRINTER_ENUM_CONNECTIONS;
+    let mut needed = 0u32;
+    let mut returned = 0u32;
+    unsafe {
+        EnumPrintersW(
+            flags,
+            ptr::null(),
+            5,
+            ptr::null_mut(),
+            0,
+            &mut needed,
+            &mut returned,
+        );
     }
-    let parsed: Value = serde_json::from_str(&stdout).map_err(to_error)?;
-    let rows = match parsed {
-        Value::Array(rows) => rows,
-        row => vec![row],
+    if needed == 0 {
+        return Ok(Vec::new());
+    }
+    let words = (needed as usize + std::mem::size_of::<usize>() - 1) / std::mem::size_of::<usize>();
+    let mut buffer = vec![0usize; words];
+    let ok = unsafe {
+        EnumPrintersW(
+            flags,
+            ptr::null(),
+            5,
+            buffer.as_mut_ptr().cast(),
+            needed,
+            &mut needed,
+            &mut returned,
+        )
+    };
+    if ok == 0 {
+        return Err(format!(
+            "Could not enumerate Windows printers: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+
+    let mut default_length = 0u32;
+    unsafe { GetDefaultPrinterW(ptr::null_mut(), &mut default_length) };
+    let default_name = if default_length > 0 {
+        let mut value = vec![0u16; default_length as usize];
+        if unsafe { GetDefaultPrinterW(value.as_mut_ptr(), &mut default_length) } != 0 {
+            String::from_utf16_lossy(
+                &value[..value.iter().position(|ch| *ch == 0).unwrap_or(value.len())],
+            )
+        } else {
+            String::new()
+        }
+    } else {
+        String::new()
+    };
+
+    let rows = unsafe {
+        std::slice::from_raw_parts(buffer.as_ptr().cast::<PRINTER_INFO_5W>(), returned as usize)
     };
     let mut printers = rows
-        .into_iter()
+        .iter()
         .filter_map(|row| {
-            let name = row.get("Name")?.as_str()?.to_string();
-            let port_name = row
-                .get("PortName")
-                .and_then(Value::as_str)
-                .unwrap_or("")
-                .to_string();
-            let driver_name = row
-                .get("DriverName")
-                .and_then(Value::as_str)
-                .unwrap_or("")
-                .to_string();
-            let is_default = row.get("Default").and_then(Value::as_bool).unwrap_or(false);
-            let offline = row
-                .get("WorkOffline")
-                .and_then(Value::as_bool)
-                .unwrap_or(false);
-            let label = [name.as_str(), port_name.as_str(), driver_name.as_str()]
+            let name = unsafe { wide_string(row.pPrinterName) };
+            if name.trim().is_empty() {
+                return None;
+            }
+            let port_name = unsafe { wide_string(row.pPortName) };
+            let label = [name.as_str(), port_name.as_str()]
                 .into_iter()
                 .filter(|part| !part.trim().is_empty())
                 .collect::<Vec<_>>()
                 .join(" - ");
+            let offline = row.Attributes & PRINTER_ATTRIBUTE_WORK_OFFLINE != 0;
             Some(NativePrinter {
+                is_default: name.eq_ignore_ascii_case(&default_name)
+                    || row.Attributes & PRINTER_ATTRIBUTE_DEFAULT != 0,
                 name,
                 label,
                 port_name,
-                driver_name,
-                status: if offline { "offline" } else { "online" }.to_string(),
-                is_default,
+                driver_name: String::new(),
+                status: if offline { "offline" } else { "ready" }.to_string(),
             })
         })
         .collect::<Vec<_>>();
@@ -1367,9 +1536,7 @@ $printers |
 }
 
 #[tauri::command]
-fn load_local_state(
-    app: AppHandle,
-) -> Result<LocalStatePayload, String> {
+fn load_local_state(app: AppHandle) -> Result<LocalStatePayload, String> {
     let connection = open_database(&app)?;
     Ok(LocalStatePayload {
         snapshot: read_json(&connection, "snapshot")?,
@@ -1410,6 +1577,19 @@ fn save_local_state(
     });
     let _ = broadcaster.send(event.to_string());
     Ok(())
+}
+
+#[tauri::command]
+fn create_daily_local_backup(
+    app: AppHandle,
+    write_lock: State<'_, DesktopStateWriteLock>,
+    force: bool,
+) -> Result<LocalBackupResult, String> {
+    let _write_guard = write_lock
+        .0
+        .lock()
+        .map_err(|_| "Desktop state backup lock was poisoned".to_string())?;
+    create_local_backup(&app, force)
 }
 
 fn read_sync_rows(connection: &Connection, table: &str) -> Result<Vec<Value>, String> {
@@ -1518,10 +1698,7 @@ fn list_native_printers() -> Result<Vec<NativePrinter>, String> {
 }
 
 #[tauri::command]
-fn print_native(
-    app: AppHandle,
-    payload: NativePrintPayload,
-) -> Result<(), String> {
+fn print_native(payload: NativePrintPayload) -> Result<(), String> {
     let printer = payload.printer.trim();
     if printer.is_empty() {
         return Err("Select a printer before printing.".to_string());
@@ -1532,7 +1709,7 @@ fn print_native(
     }
     #[cfg(windows)]
     {
-        print_windows_queue(&app, printer, &payload.job_name, &bytes)
+        print_windows_queue(printer, &payload.job_name, &bytes)
     }
     #[cfg(not(windows))]
     {
@@ -1968,6 +2145,7 @@ pub fn run() {
             save_local_state,
             load_sync_metadata,
             save_sync_metadata,
+            create_daily_local_backup,
             get_lan_server_status,
             list_native_printers,
             print_native

@@ -37,7 +37,28 @@ export type CloudSyncSettings = {
   lastCloudDownloadedAt?: string
 }
 
+export const DAILY_CLOUD_SYNC_INTERVAL_MS = 24 * 60 * 60 * 1000
+
+export function getDailyCloudSyncDueAt(
+  settings: Pick<CloudSyncSettings, 'lastSuccessfulSyncAt' | 'lastSyncedAt' | 'nextSyncAt'>,
+  currentTime = Date.now(),
+) {
+  const lastSuccess = Date.parse(settings.lastSuccessfulSyncAt || settings.lastSyncedAt || '')
+  if (Number.isFinite(lastSuccess)) return lastSuccess + DAILY_CLOUD_SYNC_INTERVAL_MS
+  const configuredNextRun = Date.parse(settings.nextSyncAt || '')
+  return Number.isFinite(configuredNextRun) ? configuredNextRun : currentTime
+}
+
+export function isDailyCloudSyncDue(
+  settings: Pick<CloudSyncSettings, 'lastSuccessfulSyncAt' | 'lastSyncedAt' | 'nextSyncAt'>,
+  currentTime = Date.now(),
+) {
+  return getDailyCloudSyncDueAt(settings, currentTime) <= currentTime
+}
+
 export type BillingSnapshot = {
+  snapshotKind?: 'operational' | 'full'
+  snapshotSchemaVersion?: number
   outlet: OutletSettings
   printSettings: PrintSettings
   cloudSync?: CloudSyncSettings
@@ -55,6 +76,74 @@ export type BillingSnapshot = {
   payments: Payment[]
   auditLogs: AuditLog[]
   savedCarts?: Record<string, CartItem[]>
+}
+
+export function isClosedSnapshotOrder(order: Order) {
+  return order.isClosed === true || Boolean(order.closedAt) || ['paid', 'cancelled', 'void'].includes(order.status)
+}
+
+function withoutCloudSecret(snapshot: BillingSnapshot): BillingSnapshot {
+  if (!snapshot.cloudSync) return snapshot
+  return {
+    ...snapshot,
+    cloudSync: {
+      ...snapshot.cloudSync,
+      accountSecret: '',
+      lastSyncedAt: undefined,
+      lastCloudUploadedAt: undefined,
+      lastCloudDownloadedAt: undefined,
+    },
+  }
+}
+
+/** Build the small cloud bootstrap while leaving the caller's full local
+ * snapshot untouched. Closed order history remains in local SQLite and D1. */
+export function createOperationalSnapshot(snapshot: BillingSnapshot): BillingSnapshot {
+  const activeOrders = snapshot.orders.filter((order) => !isClosedSnapshotOrder(order))
+  const activeOrderIds = new Set(activeOrders.map((order) => order.id))
+  const tables = snapshot.tables.map((table) => {
+    if (!table.activeOrderId || activeOrderIds.has(table.activeOrderId)) return table
+    return { ...table, status: table.status === 'dirty' ? 'dirty' as const : 'available' as const, activeOrderId: undefined }
+  })
+  const activeTableIds = new Set(tables
+    .filter((table) => table.activeOrderId && activeOrderIds.has(table.activeOrderId))
+    .map((table) => table.id))
+  const savedCarts = Object.fromEntries(Object.entries(snapshot.savedCarts ?? {})
+    .filter(([key]) => activeTableIds.has(key) || activeOrderIds.has(key)))
+
+  return withoutCloudSecret({
+    ...snapshot,
+    snapshotKind: 'operational',
+    snapshotSchemaVersion: 3,
+    orders: activeOrders,
+    orderItems: snapshot.orderItems.filter((item) => activeOrderIds.has(item.orderId)),
+    kots: snapshot.kots.filter((kot) => activeOrderIds.has(kot.orderId)),
+    payments: snapshot.payments.filter((payment) => activeOrderIds.has(payment.orderId)),
+    tables,
+    savedCarts,
+    purchaseEntries: [],
+    auditLogs: [],
+  })
+}
+
+/** Merge a compact cloud bootstrap into a desktop without deleting its local
+ * closed-order, purchase, or audit history. */
+export function mergeOperationalSnapshot(local: BillingSnapshot, cloud: BillingSnapshot): BillingSnapshot {
+  if (cloud.snapshotKind !== 'operational') return cloud
+  const localClosedOrders = local.orders.filter(isClosedSnapshotOrder)
+  const localClosedIds = new Set(localClosedOrders.map((order) => order.id))
+  const cloudOrderIds = new Set(cloud.orders.map((order) => order.id))
+  return {
+    ...cloud,
+    cloudSync: local.cloudSync,
+    appUpdate: local.appUpdate,
+    purchaseEntries: local.purchaseEntries ?? [],
+    auditLogs: local.auditLogs,
+    orders: [...cloud.orders, ...localClosedOrders.filter((order) => !cloudOrderIds.has(order.id))],
+    orderItems: [...cloud.orderItems, ...local.orderItems.filter((item) => localClosedIds.has(item.orderId) && !cloudOrderIds.has(item.orderId))],
+    kots: [...cloud.kots, ...local.kots.filter((kot) => localClosedIds.has(kot.orderId) && !cloudOrderIds.has(kot.orderId))],
+    payments: [...cloud.payments, ...local.payments.filter((payment) => localClosedIds.has(payment.orderId) && !cloudOrderIds.has(payment.orderId))],
+  }
 }
 
 export type CloudStateResponse =
@@ -243,6 +332,34 @@ function mergeCloudCollection(primary: unknown, secondary: unknown) {
   return Array.from(byId.values())
 }
 
+type CloudOrderHistory = Pick<BillingSnapshot, 'orders' | 'orderItems' | 'kots' | 'payments'>
+
+export async function fetchCloudOrderHistory(
+  outletId: string,
+  serverUrl = 'https://bhojpatra-cloud.yash-v-shinde.workers.dev',
+  auth?: CloudAuth,
+): Promise<CloudOrderHistory> {
+  const history: CloudOrderHistory = { orders: [], orderItems: [], kots: [], payments: [] }
+  let cursor = 0
+  let hasMore = true
+  while (hasMore) {
+    const response = await fetch(`${cleanBaseUrl(serverUrl)}/api/v1/state/${encodeURIComponent(outletId)}/history?cursor=${cursor}&limit=200`, {
+      headers: { Accept: 'application/json', ...authHeaders(auth) },
+      credentials: 'include',
+    })
+    if (!response.ok) throw new Error(`Cloud order-history fetch failed with ${response.status}`)
+    const page = await response.json() as CloudOrderHistory & { cursor: number; hasMore: boolean }
+    history.orders.push(...page.orders)
+    history.orderItems.push(...page.orderItems)
+    history.kots.push(...page.kots)
+    history.payments.push(...page.payments)
+    if (page.hasMore && page.cursor <= cursor) throw new Error('Cloud order-history cursor did not advance')
+    cursor = page.cursor
+    hasMore = page.hasMore
+  }
+  return history
+}
+
 /**
  * Fetch the complete restaurant dataset. The saved app snapshot contains
  * setup data, while initial-state also projects all relational orders,
@@ -254,14 +371,15 @@ export async function fetchCompleteCloudSnapshot(
   serverUrl = 'https://bhojpatra-cloud.yash-v-shinde.workers.dev',
   auth?: CloudAuth,
 ): Promise<CloudStateResponse> {
-  const [savedState, initialState] = await Promise.all([
+  const [savedState, initialState, history] = await Promise.all([
     fetchCloudSnapshot(outletId, serverUrl, auth),
     fetchInitialState(outletId, serverUrl, auth),
+    fetchCloudOrderHistory(outletId, serverUrl, auth),
   ])
 
   const savedPayload = savedState.exists ? savedState.payload : null
   const initialPayload = initialState.exists ? initialState.payload : null
-  if (!savedPayload && !initialPayload) return savedState
+  if (!savedPayload && !initialPayload && history.orders.length === 0) return savedState
 
   const merged = {
     ...(initialPayload ?? {}),
@@ -273,6 +391,12 @@ export async function fetchCompleteCloudSnapshot(
       initialPayload?.[key],
     )
   })
+  merged.orders = mergeCloudCollection(merged.orders, history.orders) as Order[]
+  merged.orderItems = mergeCloudCollection(merged.orderItems, history.orderItems) as OrderItem[]
+  merged.kots = mergeCloudCollection(merged.kots, history.kots) as KOT[]
+  merged.payments = mergeCloudCollection(merged.payments, history.payments) as Payment[]
+  merged.snapshotKind = 'full'
+  merged.snapshotSchemaVersion = 1
   merged.savedCarts = {
     ...(initialPayload?.savedCarts ?? {}),
     ...(savedPayload?.savedCarts ?? {}),
@@ -295,18 +419,7 @@ export async function saveCloudSnapshot(
   serverUrl = 'https://bhojpatra-cloud.yash-v-shinde.workers.dev',
   auth?: CloudAuth
 ): Promise<{ ok: true; outletId: string; updatedAt: string; skipped?: boolean; payload?: BillingSnapshot }> {
-  const safePayload: BillingSnapshot = payload.cloudSync
-    ? {
-        ...payload,
-        cloudSync: {
-          ...payload.cloudSync,
-          accountSecret: '',
-          lastSyncedAt: undefined,
-          lastCloudUploadedAt: undefined,
-          lastCloudDownloadedAt: undefined,
-        },
-      }
-    : payload
+  const safePayload = createOperationalSnapshot(payload)
   const response = await fetch(`${cleanBaseUrl(serverUrl)}/api/v1/outlets/${encodeURIComponent(outletId)}/state`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json', Accept: 'application/json', ...authHeaders(auth) },
@@ -315,6 +428,30 @@ export async function saveCloudSnapshot(
   })
   if (!response.ok) throw new Error(`Cloud sync save failed with ${response.status}`)
   return response.json() as Promise<{ ok: true; outletId: string; updatedAt: string; skipped?: boolean; payload?: BillingSnapshot }>
+}
+
+export async function saveCloudDailyBackup(
+  outletId: string,
+  tenantId: string,
+  payload: BillingSnapshot,
+  clientId?: string,
+  serverUrl = 'https://bhojpatra-cloud.yash-v-shinde.workers.dev',
+  auth?: CloudAuth,
+): Promise<{ ok: true; backupId: string; objectKey: string; createdAt: string; compressedBytes: number }> {
+  const fullBackup = withoutCloudSecret({
+    ...payload,
+    snapshotKind: 'full',
+    snapshotSchemaVersion: 1,
+  })
+  const response = await fetch(`${cleanBaseUrl(serverUrl)}/api/v1/outlets/${encodeURIComponent(outletId)}/backups/daily`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Accept: 'application/json', ...authHeaders(auth) },
+    credentials: 'include',
+    body: JSON.stringify({ tenantId, payload: fullBackup, clientId, createdAt: now() }),
+  })
+  const body = await response.json().catch(() => null) as { error?: string } | null
+  if (!response.ok) throw new Error(body?.error || `Cloud backup failed with ${response.status}`)
+  return body as { ok: true; backupId: string; objectKey: string; createdAt: string; compressedBytes: number }
 }
 
 export async function fetchInitialState(

@@ -24,6 +24,15 @@ export type DesktopSyncMetadata = {
   conflicts: unknown[]
 }
 
+export type LocalBackupResult = {
+  date: string
+  fileName: string
+  created: boolean
+  sizeBytes: number
+  paths: string[]
+  errors: string[]
+}
+
 export function isTauriDesktop() {
   if (typeof window === 'undefined') return false
   return '__TAURI_INTERNALS__' in window || '__TAURI__' in window || '__TAURI_METADATA__' in window
@@ -37,6 +46,11 @@ export async function loadDesktopState() {
 export async function saveDesktopState(snapshot: BillingSnapshot, staff: StaffAccount[]) {
   if (!isTauriDesktop()) return
   await invoke('save_local_state', { snapshot, staff })
+}
+
+export async function createDailyLocalBackup(force = false) {
+  if (!isTauriDesktop()) return null
+  return invoke<LocalBackupResult>('create_daily_local_backup', { force })
 }
 
 export async function loadDesktopSyncMetadata() {
