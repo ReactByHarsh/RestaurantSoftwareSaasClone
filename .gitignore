@@ -8,7 +8,6 @@ dist-ssr
 # Tauri / Rust
 apps/web/src-tauri/target
 apps/web/src-tauri/gen
-apps/web/src-tauri/icons
 
 # Cargo lock (for libraries/apps, keep Cargo.lock; but target is already ignored)
 
