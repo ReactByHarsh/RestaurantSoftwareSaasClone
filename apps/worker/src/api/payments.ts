@@ -1,6 +1,7 @@
 import { Hono } from 'hono'
 import { z } from 'zod'
 import { getCookie } from 'hono/cookie'
+import { applyLegacyOrderMutation } from '../sync'
 
 export const paymentsRouter = new Hono<{ Bindings: { DB: any; REALTIME_HUB: any; SESSION_SECRET?: string } }>()
 
@@ -30,6 +31,29 @@ async function verifySecret(storedValue: string | undefined | null, candidate: s
   return stored === candidate
 }
 
+function parseDateBoundary(value: string | undefined | null, boundary: 'start' | 'end' = 'end') {
+  if (!value) return null
+  const match = value.match(/^(\d{4})-(\d{2})-(\d{2})$/)
+  if (!match) {
+    const parsed = new Date(value)
+    return Number.isNaN(parsed.getTime()) ? null : parsed.getTime()
+  }
+  return boundary === 'start'
+    ? new Date(Number(match[1]), Number(match[2]) - 1, Number(match[3]), 0, 0, 0, 0).getTime()
+    : new Date(Number(match[1]), Number(match[2]) - 1, Number(match[3]), 23, 59, 59, 999).getTime()
+}
+
+function getAccessBlockReason(row: any) {
+  const now = Date.now()
+  const startsAt = parseDateBoundary(row.access_starts_at, 'start')
+  if (startsAt !== null && startsAt > now) return 'Access not started'
+  const renewalDate = parseDateBoundary(row.renewal_date, 'end')
+  if (renewalDate !== null && renewalDate < now) return 'Renewal expired'
+  const endsAt = parseDateBoundary(row.access_ends_at, 'end')
+  if (endsAt !== null && endsAt < now) return 'Access expired'
+  return null
+}
+
 async function authMiddleware(c: any, next: any) {
   if (!c.env.DB) return c.json({ error: 'Database binding not configured' }, 500)
   
@@ -42,15 +66,14 @@ async function authMiddleware(c: any, next: any) {
         const login = decoded.slice(0, separator).trim().toLowerCase()
         const password = decoded.slice(separator + 1)
         const row = await c.env.DB.prepare(
-          'SELECT id, tenant_id, password_hash, pin_hash, name, email, phone, role, status, access_starts_at, access_ends_at FROM users WHERE lower(email) = ? OR lower(phone) = ? LIMIT 1'
+          'SELECT id, tenant_id, password_hash, pin_hash, name, email, phone, role, status, access_starts_at, access_ends_at, renewal_date FROM users WHERE lower(email) = ? OR lower(phone) = ? LIMIT 1'
         ).bind(login, login).first()
         if (row && row.status === 'active') {
           const pwOk = await verifySecret(row.password_hash, password)
           const pinOk = await verifySecret(row.pin_hash, password)
           if (pwOk || pinOk) {
-            const now = Date.now()
-            if (row.access_starts_at && new Date(row.access_starts_at).getTime() > now) return c.json({ error: 'Access not started' }, 403)
-            if (row.access_ends_at && new Date(row.access_ends_at).getTime() < now) return c.json({ error: 'Access expired' }, 403)
+            const blocked = getAccessBlockReason(row)
+            if (blocked) return c.json({ error: blocked }, 403)
             c.set('user', row)
             return next()
           }
@@ -65,9 +88,11 @@ async function authMiddleware(c: any, next: any) {
     const userId = await verifySessionToken(sessionToken, secret)
     if (userId) {
       const row = await c.env.DB.prepare(
-        'SELECT id, tenant_id, name, email, phone, role, status FROM users WHERE id = ? LIMIT 1'
+        'SELECT id, tenant_id, name, email, phone, role, status, access_starts_at, access_ends_at, renewal_date FROM users WHERE id = ? LIMIT 1'
       ).bind(userId).first()
       if (row && row.status === 'active') {
+        const blocked = getAccessBlockReason(row)
+        if (blocked) return c.json({ error: blocked }, 403)
         c.set('user', row)
         return next()
       }
@@ -108,16 +133,34 @@ function tenantIdFromOutlet(outletId: string) {
   return outletId.startsWith('out_') ? outletId.slice(4) : outletId
 }
 
+function routeLegacyThroughV2() { return true }
+
 paymentsRouter.post('/:outletId', async (c) => {
   const db = c.env.DB
   if (!db) return c.json({ error: 'DB not configured' }, 500)
   
   const outletId = c.req.param('outletId')
+  const user = (c as any).get('user')
+  if (user?.tenant_id !== 'platform' && outletId !== `out_${user?.tenant_id}`) {
+    return c.json({ error: 'Forbidden' }, 403)
+  }
   const body = paymentSchema.safeParse(await c.req.json())
   if (!body.success) return c.json({ error: 'Invalid Payment' }, 400)
   
   const payment = body.data
   const tenantId = tenantIdFromOutlet(outletId)
+  if (routeLegacyThroughV2()) {
+  const syncResult = await applyLegacyOrderMutation(db, outletId, tenantId, payment.orderId, {
+    payment,
+    deviceId: `legacy_payments_${user?.id || 'unknown'}`,
+  })
+  if (syncResult.status !== 200) return c.json(syncResult.body, syncResult.status as 404 | 409 | 500)
+  if ('conflicts' in syncResult.body && syncResult.body.conflicts.length > 0) {
+    return c.json({ error: 'Payment sync conflict', conflicts: syncResult.body.conflicts }, 409)
+  }
+  c.executionCtx.waitUntil(broadcast(c.env, outletId, 'SYNC_DELTA_AVAILABLE', { orderUuid: payment.orderId }))
+  return c.json({ ok: true, payment })
+  }
   
   try {
     await db.prepare(`

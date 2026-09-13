@@ -19,14 +19,25 @@ class BhojPatraMobileApp extends StatelessWidget {
       debugShowCheckedModeBanner: false,
       theme: ThemeData(
         colorScheme: ColorScheme.fromSeed(
-          seedColor: const Color(0xff0f6b47),
+          seedColor: const Color(0xfff36b21),
           brightness: Brightness.light,
         ),
-        scaffoldBackgroundColor: const Color(0xfff5f7f4),
+        scaffoldBackgroundColor: const Color(0xfffff8f3),
         useMaterial3: true,
+        appBarTheme: const AppBarTheme(
+          backgroundColor: Color(0xfffff8f3),
+          foregroundColor: Color(0xff3b1d0b),
+          surfaceTintColor: Colors.transparent,
+        ),
+        filledButtonTheme: FilledButtonThemeData(
+          style: FilledButton.styleFrom(
+            backgroundColor: const Color(0xfff36b21),
+            foregroundColor: Colors.white,
+          ),
+        ),
         cardTheme: CardThemeData(
           elevation: 0,
-          color: Colors.white,
+          color: const Color(0xfffffdfb),
           shape: RoundedRectangleBorder(
             borderRadius: BorderRadius.circular(22),
           ),

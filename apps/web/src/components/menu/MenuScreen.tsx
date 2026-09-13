@@ -5,7 +5,7 @@ import { formatPaise } from '../../lib/money'
 import { useUIStore } from '../../store/uiStore'
 import { useBillingStore } from '../../store/billingStore'
 import { clsx } from 'clsx'
-import { exportProducts, generateTemplate, parseCsvRows } from '../../lib/csv'
+import { convertRecipeQuantity, exportProducts, generateTemplate, parseCsvRows, parseRecipeField } from '../../lib/csv'
 
 const PAGE_SIZE = 25
 const UNITS: StockUnit[] = ['kg', 'g', 'l', 'ml', 'pcs', 'nos', 'plate', 'portion']
@@ -395,15 +395,25 @@ export default function MenuScreen() {
       const favoriteIdx = headers.findIndex(h => h.includes('favorite'))
       const descriptionIdx = headers.findIndex(h => h === 'description')
       const toppingsIdx = headers.findIndex(h => h.includes('toppings') || h.includes('extras') || h.includes('modifiers'))
+      const recipeIdx = headers.findIndex(h => h === 'recipe' || h === 'recipeitems' || h === 'ingredients')
 
       let addedCount = 0
       let updatedCount = 0
+      let createdIngredientCount = 0
+      let importedRecipeCount = 0
+      let skippedExampleCount = 0
+      let invalidRowCount = 0
+      let recipeErrorCount = 0
 
       for (let i = 1; i < rows.length; i++) {
         const cols = rows[i]
-        if (nameIdx < 0 || priceIdx < 0 || cols.length < Math.max(nameIdx, priceIdx) + 1) continue
+        if (nameIdx < 0 || priceIdx < 0 || cols.length < Math.max(nameIdx, priceIdx) + 1) { invalidRowCount++; continue }
 
         const shortCode = shortCodeIdx >= 0 ? cols[shortCodeIdx] : ''
+        if (shortCode.trim().startsWith('#')) {
+          skippedExampleCount++
+          continue
+        }
         const barcode = barcodeIdx >= 0 ? cols[barcodeIdx] : ''
         const name = nameIdx >= 0 ? cols[nameIdx] : ''
         const catName = catIdx >= 0 ? cols[catIdx] : 'Uncategorized'
@@ -437,7 +447,8 @@ export default function MenuScreen() {
         const favoriteRaw = favoriteIdx >= 0 ? cols[favoriteIdx].toLowerCase() : 'no'
         const descriptionRaw = descriptionIdx >= 0 ? cols[descriptionIdx] : ''
         const toppingsRaw = toppingsIdx >= 0 ? cols[toppingsIdx] : ''
-        if (!name) continue
+        const recipeRaw = recipeIdx >= 0 ? cols[recipeIdx] : ''
+        if (!name) { invalidRowCount++; continue }
 
         let state = useBillingStore.getState()
         let category = state.menuCategories.find(c => !c.parentId && c.name.trim().toLowerCase() === catName.trim().toLowerCase())
@@ -516,6 +527,43 @@ export default function MenuScreen() {
           })
           .filter(modifier => modifier.name)
 
+        let importedRecipe = existingItem?.recipeItems ?? []
+        if (recipeIdx >= 0) {
+          importedRecipe = []
+          const parsedRecipe = parseRecipeField(recipeRaw)
+          recipeErrorCount += parsedRecipe.errors.length
+          let recipeState = useBillingStore.getState()
+          for (const line of parsedRecipe.items) {
+            let ingredient = recipeState.inventoryItems.find(item => item.name.trim().toLowerCase() === line.name.trim().toLowerCase())
+            if (!ingredient) {
+              addInventoryItem({
+                name: line.name.trim(),
+                unit: line.unit,
+                currentStock: 0,
+                minimumStock: 0,
+                costPerUnit: 0,
+                supplier: 'Created from menu import',
+              })
+              createdIngredientCount++
+              recipeState = useBillingStore.getState()
+              ingredient = recipeState.inventoryItems.find(item => item.name.trim().toLowerCase() === line.name.trim().toLowerCase())
+            }
+            if (!ingredient) {
+              recipeErrorCount++
+              continue
+            }
+            const quantity = convertRecipeQuantity(line.quantity, line.unit, ingredient.unit)
+            if (quantity === null) {
+              recipeErrorCount++
+              continue
+            }
+            const existingRecipeLine = importedRecipe.find(recipeLine => recipeLine.inventoryItemId === ingredient.id)
+            if (existingRecipeLine) existingRecipeLine.quantity += quantity
+            else importedRecipe.push({ inventoryItemId: ingredient.id, name: ingredient.name, quantity, unit: ingredient.unit })
+          }
+          if (importedRecipe.length > 0) importedRecipeCount++
+        }
+
         const newItem: MenuItem = {
           id: existingItem?.id || '',
           outletId: state.outlet.id,
@@ -548,7 +596,7 @@ export default function MenuScreen() {
           isFavorite,
           activeOnApp,
           recommended,
-          recipeItems: existingItem?.recipeItems ?? [],
+          recipeItems: importedRecipe,
           modifierGroups: modifiers.length
             ? [{ id: `${existingItem?.id || 'import'}_toppings`, name: 'Toppings & Extras', minSelect: 0, maxSelect: modifiers.length, modifiers }]
             : existingItem?.modifierGroups ?? [],
@@ -564,7 +612,7 @@ export default function MenuScreen() {
         }
       }
 
-      addToast('success', `Import complete! Added ${addedCount}, Updated ${updatedCount}`)
+      addToast('success', `Import complete! Added ${addedCount}, Updated ${updatedCount}, Recipes ${importedRecipeCount}, Ingredients ${createdIngredientCount}, Skipped examples ${skippedExampleCount}${recipeErrorCount ? `, Recipe errors ${recipeErrorCount}` : ''}${invalidRowCount ? `, Invalid rows ${invalidRowCount}` : ''}`)
     } catch {
       addToast('error', 'Failed to parse CSV file')
     }

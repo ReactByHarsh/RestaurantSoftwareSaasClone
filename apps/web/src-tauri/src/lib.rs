@@ -22,11 +22,29 @@ use image::GenericImageView;
 use local_ip_address::{list_afinet_netifas, local_ip};
 
 #[cfg(windows)]
-use std::os::windows::process::CommandExt;
+use std::{
+    ffi::OsStr,
+    os::windows::{ffi::OsStrExt, process::CommandExt},
+    ptr,
+};
+
+#[cfg(windows)]
+use windows_sys::Win32::{
+    Foundation::HANDLE,
+    Graphics::Printing::{
+        ClosePrinter, EndDocPrinter, EndPagePrinter, EnumPrintersW, GetDefaultPrinterW,
+        OpenPrinterW, StartDocPrinterW, StartPagePrinter, WritePrinter, DOC_INFO_1W,
+        PRINTER_ATTRIBUTE_DEFAULT, PRINTER_ATTRIBUTE_WORK_OFFLINE, PRINTER_ENUM_CONNECTIONS,
+        PRINTER_ENUM_LOCAL, PRINTER_INFO_5W,
+    },
+    Storage::FileSystem::{GetDriveTypeW, GetLogicalDrives},
+    System::WindowsProgramming::DRIVE_FIXED,
+};
 
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::{
     net::{TcpListener, UdpSocket},
@@ -34,13 +52,21 @@ use tokio::{
 };
 use tower_http::cors::CorsLayer;
 
-mod license;
-use license::{require_license, LicenseGuard, LicenseManager};
-
 #[derive(Debug, Serialize)]
 struct LocalStatePayload {
     snapshot: Option<Value>,
     staff: Option<Value>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LocalBackupResult {
+    date: String,
+    file_name: String,
+    created: bool,
+    size_bytes: u64,
+    paths: Vec<String>,
+    errors: Vec<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -81,9 +107,11 @@ struct NativePrintPayload {
 #[derive(Clone)]
 struct LanServerState {
     app: AppHandle,
-    license_guard: LicenseGuard,
     broadcaster: broadcast::Sender<String>,
 }
+
+#[derive(Clone, Default)]
+struct DesktopStateWriteLock(Arc<Mutex<()>>);
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -110,6 +138,7 @@ struct LanSaveStatePayload {
     tenant_id: String,
     payload: Value,
     client_id: Option<String>,
+    expected_updated_at: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -133,7 +162,6 @@ struct LanHelloPayload {
     discovery_port: u16,
     primary_url: Option<String>,
     ip_address: Option<String>,
-    licensed: bool,
     outlet: Option<LanOutlet>,
 }
 
@@ -204,10 +232,181 @@ fn open_database(app: &AppHandle) -> Result<Connection, String> {
           value TEXT NOT NULL,
           updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         );
+        CREATE TABLE IF NOT EXISTS app_state_history (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          key TEXT NOT NULL,
+          value TEXT NOT NULL,
+          archived_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE INDEX IF NOT EXISTS idx_app_state_history_key_id
+          ON app_state_history(key, id DESC);
+        CREATE TABLE IF NOT EXISTS sync_records (
+          key TEXT PRIMARY KEY,
+          entity_type TEXT NOT NULL,
+          entity_id TEXT NOT NULL,
+          order_uuid TEXT,
+          version INTEGER NOT NULL,
+          base_version INTEGER NOT NULL,
+          payload_hash TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          synced_at TEXT,
+          conflict_state TEXT,
+          row_json TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS sync_outbox (
+          key TEXT PRIMARY KEY,
+          entity_type TEXT NOT NULL,
+          entity_id TEXT NOT NULL,
+          order_uuid TEXT,
+          version INTEGER NOT NULL,
+          base_version INTEGER NOT NULL,
+          payload_hash TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          batch_id TEXT NOT NULL,
+          retry_count INTEGER NOT NULL DEFAULT 0,
+          row_json TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_sync_outbox_pending
+          ON sync_outbox(updated_at, retry_count);
+        CREATE TABLE IF NOT EXISTS sync_state (
+          key TEXT PRIMARY KEY,
+          value TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS sync_conflicts (
+          key TEXT PRIMARY KEY,
+          entity_id TEXT NOT NULL,
+          order_uuid TEXT,
+          code TEXT NOT NULL,
+          created_at TEXT NOT NULL,
+          row_json TEXT NOT NULL
+        );
       ",
         )
         .map_err(to_error)?;
     Ok(connection)
+}
+
+fn local_backup_file_name(date: &str) -> String {
+    format!("BhojPatra-Backup-{date}.sqlite")
+}
+
+#[cfg(windows)]
+fn fixed_drive_roots() -> Vec<PathBuf> {
+    let mask = unsafe { GetLogicalDrives() };
+    (0..26)
+        .filter_map(|index| {
+            if mask & (1 << index) == 0 {
+                return None;
+            }
+            let letter = (b'A' + index as u8) as char;
+            let root = format!("{letter}:\\");
+            let wide = OsStr::new(&root)
+                .encode_wide()
+                .chain(std::iter::once(0))
+                .collect::<Vec<_>>();
+            (unsafe { GetDriveTypeW(wide.as_ptr()) } == DRIVE_FIXED).then(|| PathBuf::from(root))
+        })
+        .collect()
+}
+
+#[cfg(not(windows))]
+fn fixed_drive_roots() -> Vec<PathBuf> {
+    Vec::new()
+}
+
+fn copy_backup_file(
+    source: &PathBuf,
+    directory: &PathBuf,
+    file_name: &str,
+    force: bool,
+) -> Result<PathBuf, String> {
+    fs::create_dir_all(directory).map_err(to_error)?;
+    let destination = directory.join(file_name);
+    if destination.exists() && !force {
+        return Ok(destination);
+    }
+    let temporary = directory.join(format!(".{file_name}.tmp"));
+    if temporary.exists() {
+        let _ = fs::remove_file(&temporary);
+    }
+    if let Err(error) = fs::copy(source, &temporary) {
+        let _ = fs::remove_file(&temporary);
+        return Err(to_error(error));
+    }
+    if destination.exists() {
+        fs::remove_file(&destination).map_err(to_error)?;
+    }
+    if let Err(error) = fs::rename(&temporary, &destination) {
+        let _ = fs::remove_file(&temporary);
+        return Err(to_error(error));
+    }
+    Ok(destination)
+}
+
+fn create_local_backup(app: &AppHandle, force: bool) -> Result<LocalBackupResult, String> {
+    let date = chrono::Local::now().format("%Y-%m-%d").to_string();
+    let file_name = local_backup_file_name(&date);
+    let protected_directory = app.path().app_data_dir().map_err(to_error)?.join("backups");
+    fs::create_dir_all(&protected_directory).map_err(to_error)?;
+    let protected_file = protected_directory.join(&file_name);
+    let created = force || !protected_file.exists();
+
+    if created {
+        let temporary = protected_directory.join(format!(".{file_name}.tmp"));
+        if temporary.exists() {
+            let _ = fs::remove_file(&temporary);
+        }
+        let connection = open_database(app)?;
+        connection
+            .execute_batch("PRAGMA wal_checkpoint(FULL);")
+            .map_err(to_error)?;
+        connection
+            .execute("VACUUM INTO ?1", [temporary.to_string_lossy().as_ref()])
+            .map_err(to_error)?;
+        drop(connection);
+
+        let verification = Connection::open(&temporary).map_err(to_error)?;
+        let integrity: String = verification
+            .query_row("PRAGMA integrity_check", [], |row| row.get(0))
+            .map_err(to_error)?;
+        drop(verification);
+        if integrity != "ok" {
+            let _ = fs::remove_file(&temporary);
+            return Err(format!("Backup integrity check failed: {integrity}"));
+        }
+        if protected_file.exists() {
+            fs::remove_file(&protected_file).map_err(to_error)?;
+        }
+        fs::rename(&temporary, &protected_file).map_err(to_error)?;
+    }
+
+    let mut paths = vec![protected_file.to_string_lossy().to_string()];
+    let mut errors = Vec::new();
+    for root in fixed_drive_roots() {
+        let directory = root.join("BhojPatra Backups");
+        if directory == protected_directory {
+            continue;
+        }
+        match copy_backup_file(&protected_file, &directory, &file_name, force) {
+            Ok(path) => {
+                let value = path.to_string_lossy().to_string();
+                if !paths.contains(&value) {
+                    paths.push(value);
+                }
+            }
+            Err(error) => errors.push(format!("{}: {error}", directory.display())),
+        }
+    }
+
+    let size_bytes = fs::metadata(&protected_file).map_err(to_error)?.len();
+    Ok(LocalBackupResult {
+        date,
+        file_name,
+        created,
+        size_bytes,
+        paths,
+        errors,
+    })
 }
 
 fn remove_web_cache_dirs(root: PathBuf, depth: usize) {
@@ -272,16 +471,35 @@ fn ensure_windows_firewall_rules() {
     ];
 
     for (name, protocol, port, description) in rules {
-        let delete_script = format!(
-            "netsh advfirewall firewall delete rule name=\"{}\" | Out-Null",
-            name
-        );
-        let add_script = format!(
-            "netsh advfirewall firewall add rule name=\"{}\" dir=in action=allow protocol={} localport={} profile=private,domain description=\"{}\" | Out-Null",
-            name, protocol, port, description
-        );
-        let _ = powershell_command(&delete_script).output();
-        let _ = powershell_command(&add_script).output();
+        let mut delete = Command::new("netsh.exe");
+        delete
+            .args([
+                "advfirewall",
+                "firewall",
+                "delete",
+                "rule",
+                &format!("name={name}"),
+            ])
+            .creation_flags(CREATE_NO_WINDOW);
+        let _ = delete.output();
+
+        let mut add = Command::new("netsh.exe");
+        add.args([
+            "advfirewall",
+            "firewall",
+            "add",
+            "rule",
+            &format!("name={name}"),
+            "dir=in",
+            "action=allow",
+            &format!("protocol={protocol}"),
+            &format!("localport={port}"),
+            "profile=any",
+            "edge=yes",
+            &format!("description={description}"),
+        ])
+        .creation_flags(CREATE_NO_WINDOW);
+        let _ = add.output();
     }
 }
 
@@ -289,20 +507,42 @@ fn ensure_windows_firewall_rules() {
 fn ensure_windows_firewall_rules() {}
 
 fn read_json(connection: &Connection, key: &str) -> Result<Option<Value>, String> {
-    let stored = connection
+    let mut candidates = Vec::new();
+    if let Some(stored) = connection
         .query_row("SELECT value FROM app_state WHERE key = ?1", [key], |row| {
             row.get::<_, String>(0)
         })
         .optional()
+        .map_err(to_error)?
+    {
+        candidates.push(stored);
+    }
+    let mut statement = connection
+        .prepare("SELECT value FROM app_state_history WHERE key = ?1 ORDER BY id DESC LIMIT 20")
         .map_err(to_error)?;
-
-    stored
-        .map(|payload| serde_json::from_str(&payload).map_err(to_error))
-        .transpose()
+    let history = statement
+        .query_map([key], |row| row.get::<_, String>(0))
+        .map_err(to_error)?;
+    for value in history.flatten() {
+        candidates.push(value);
+    }
+    for payload in candidates {
+        if let Ok(value) = serde_json::from_str(&payload) {
+            return Ok(Some(value));
+        }
+    }
+    Ok(None)
 }
 
 fn write_json(connection: &Connection, key: &str, value: &Value) -> Result<(), String> {
     let payload = serde_json::to_string(value).map_err(to_error)?;
+    connection
+        .execute(
+            "INSERT INTO app_state_history (key, value)
+             SELECT key, value FROM app_state WHERE key = ?1 AND value <> ?2",
+            params![key, payload],
+        )
+        .map_err(to_error)?;
     connection
         .execute(
             "
@@ -315,7 +555,27 @@ fn write_json(connection: &Connection, key: &str, value: &Value) -> Result<(), S
             params![key, payload],
         )
         .map_err(to_error)?;
+    connection
+        .execute(
+            "DELETE FROM app_state_history
+             WHERE key = ?1 AND id NOT IN (
+               SELECT id FROM app_state_history WHERE key = ?1 ORDER BY id DESC LIMIT 20
+             )",
+            [key],
+        )
+        .map_err(to_error)?;
     Ok(())
+}
+
+fn state_updated_at(connection: &Connection, key: &str) -> Result<Option<String>, String> {
+    connection
+        .query_row(
+            "SELECT updated_at FROM app_state WHERE key = ?1",
+            [key],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(to_error)
 }
 
 fn normalize_login(value: &str) -> String {
@@ -328,8 +588,159 @@ fn parse_staff_accounts(value: Option<Value>) -> Vec<LanStaffAccount> {
         .unwrap_or_default()
 }
 
+fn is_open_order_value(order: &Value) -> bool {
+    let status = order
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    !order
+        .get("isClosed")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+        && order.get("closedAt").is_none()
+        && !matches!(status, "paid" | "cancelled" | "void")
+}
+
+fn snapshot_has_active_table_without_items(snapshot: &Value) -> bool {
+    let Some(payload) = snapshot.as_object() else {
+        return false;
+    };
+    let tables = payload
+        .get("tables")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let orders = payload
+        .get("orders")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let order_items = payload
+        .get("orderItems")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let saved_carts = payload.get("savedCarts").and_then(Value::as_object);
+
+    tables.iter().any(|table| {
+        let Some(table_id) = table.get("id").and_then(Value::as_str) else {
+            return false;
+        };
+        let Some(order_id) = table.get("activeOrderId").and_then(Value::as_str) else {
+            return false;
+        };
+        let Some(order) = orders
+            .iter()
+            .find(|candidate| candidate.get("id").and_then(Value::as_str) == Some(order_id))
+        else {
+            return false;
+        };
+        if !is_open_order_value(order) {
+            return false;
+        }
+        let has_items = order_items.iter().any(|item| {
+            item.get("orderId").and_then(Value::as_str) == Some(order_id)
+                && item.get("status").and_then(Value::as_str) != Some("cancelled")
+        });
+        let has_cart = saved_carts
+            .and_then(|carts| carts.get(table_id))
+            .and_then(Value::as_array)
+            .is_some_and(|cart| !cart.is_empty());
+        !has_items && !has_cart
+    })
+}
+
+fn snapshot_restores_active_table_cart(current: &Value, candidate: &Value) -> bool {
+    let Some(current_payload) = current.as_object() else {
+        return false;
+    };
+    let Some(candidate_payload) = candidate.as_object() else {
+        return false;
+    };
+    let current_tables = current_payload
+        .get("tables")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let candidate_tables = candidate_payload
+        .get("tables")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let candidate_orders = candidate_payload
+        .get("orders")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let candidate_carts = candidate_payload
+        .get("savedCarts")
+        .and_then(Value::as_object);
+
+    current_tables.iter().any(|current_table| {
+        let Some(table_id) = current_table.get("id").and_then(Value::as_str) else {
+            return false;
+        };
+        let Some(order_id) = current_table.get("activeOrderId").and_then(Value::as_str) else {
+            return false;
+        };
+        let Some(cart) = candidate_carts
+            .and_then(|carts| carts.get(table_id))
+            .and_then(Value::as_array)
+        else {
+            return false;
+        };
+        if cart.is_empty() {
+            return false;
+        }
+        let candidate_table_matches = candidate_tables.iter().any(|candidate_table| {
+            candidate_table.get("id").and_then(Value::as_str) == Some(table_id)
+                && candidate_table.get("activeOrderId").and_then(Value::as_str) == Some(order_id)
+        });
+        let candidate_order_open = candidate_orders.iter().any(|candidate_order| {
+            candidate_order.get("id").and_then(Value::as_str) == Some(order_id)
+                && is_open_order_value(candidate_order)
+        });
+        candidate_table_matches && candidate_order_open
+    })
+}
+
 fn read_snapshot(connection: &Connection) -> Result<Option<Value>, String> {
-    read_json(connection, "snapshot")
+    let current_raw = connection
+        .query_row(
+            "SELECT value FROM app_state WHERE key = ?1",
+            ["snapshot"],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(to_error)?;
+
+    let Some(current_raw) = current_raw else {
+        return read_json(connection, "snapshot");
+    };
+    let Ok(current) = serde_json::from_str::<Value>(&current_raw) else {
+        return read_json(connection, "snapshot");
+    };
+    if !snapshot_has_active_table_without_items(&current) {
+        return Ok(Some(current));
+    }
+
+    // A previous build could save the table/order link but omit the parked
+    // cart during shutdown. Recover the most recent history entry that still
+    // contains the matching cart before exposing the local state to the UI.
+    let mut statement = connection
+        .prepare("SELECT value FROM app_state_history WHERE key = ?1 ORDER BY id DESC LIMIT 20")
+        .map_err(to_error)?;
+    let history = statement
+        .query_map(["snapshot"], |row| row.get::<_, String>(0))
+        .map_err(to_error)?;
+    for raw in history.flatten() {
+        if let Ok(candidate) = serde_json::from_str::<Value>(&raw) {
+            if snapshot_restores_active_table_cart(&current, &candidate) {
+                return Ok(Some(candidate));
+            }
+        }
+    }
+    Ok(Some(current))
 }
 
 fn read_staff_accounts(connection: &Connection) -> Result<Vec<LanStaffAccount>, String> {
@@ -447,12 +858,6 @@ fn authenticate_basic(
     headers: &HeaderMap,
     state: &LanServerState,
 ) -> Result<LanStaffAccount, (StatusCode, Json<Value>)> {
-    if !state.license_guard.is_valid() {
-        return Err((
-            StatusCode::FORBIDDEN,
-            Json(json!({ "error": "Valid license required to use BhojPatra Desk" })),
-        ));
-    }
     let auth_header = headers
         .get(header::AUTHORIZATION)
         .and_then(|value| value.to_str().ok())
@@ -483,12 +888,6 @@ fn authenticate_credentials(
     secret: &str,
     state: &LanServerState,
 ) -> Result<LanStaffAccount, (StatusCode, Json<Value>)> {
-    if !state.license_guard.is_valid() {
-        return Err((
-            StatusCode::FORBIDDEN,
-            Json(json!({ "error": "Valid license required to use BhojPatra Desk" })),
-        ));
-    }
     let connection = open_database(&state.app).map_err(|error| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -520,12 +919,16 @@ fn authenticate_credentials(
     }
     verify_account_access_window(&account)
         .map_err(|error| (StatusCode::FORBIDDEN, Json(json!({ "error": error }))))?;
+    let matches_secret = |stored: &str| {
+        if let Some(expected) = stored.strip_prefix("sha256$") {
+            let actual = hex::encode(Sha256::digest(secret.as_bytes()));
+            expected.eq_ignore_ascii_case(&actual)
+        } else {
+            stored == secret
+        }
+    };
     let valid_passwords = [Some(account.password.as_str()), account.pin.as_deref()];
-    if !valid_passwords
-        .into_iter()
-        .flatten()
-        .any(|value| value == secret)
-    {
+    if !valid_passwords.into_iter().flatten().any(matches_secret) {
         return Err((
             StatusCode::UNAUTHORIZED,
             Json(json!({ "error": "Invalid credentials" })),
@@ -569,6 +972,80 @@ fn snapshot_score(snapshot: Option<&Value>) -> usize {
     ]
     .into_iter()
     .sum()
+}
+
+fn would_erase_core_restaurant_data(existing: Option<&Value>, incoming: &Value) -> bool {
+    let Some(existing) = existing.and_then(Value::as_object) else {
+        return false;
+    };
+    let Some(incoming) = incoming.as_object() else {
+        return true;
+    };
+    ["tables", "floors", "menuItems", "menuCategories"]
+        .iter()
+        .any(|key| {
+            let current_count = existing
+                .get(*key)
+                .and_then(Value::as_array)
+                .map_or(0, Vec::len);
+            let next_count = incoming
+                .get(*key)
+                .and_then(Value::as_array)
+                .map_or(0, Vec::len);
+            current_count > 0 && next_count == 0
+        })
+}
+
+fn preserves_role_restricted_collections(existing: Option<&Value>, incoming: &Value) -> bool {
+    let Some(existing) = existing.and_then(Value::as_object) else {
+        return true;
+    };
+    let Some(incoming) = incoming.as_object() else {
+        return false;
+    };
+    [
+        "outlet",
+        "printSettings",
+        "appUpdate",
+        "menuCategories",
+        "menuItems",
+        "floors",
+        "stations",
+        "inventoryItems",
+        "purchaseEntries",
+        "payments",
+    ]
+    .iter()
+    .all(|key| existing.get(*key) == incoming.get(*key))
+}
+
+fn sanitize_snapshot_for_lan(snapshot: &Value) -> Value {
+    let mut sanitized = snapshot.clone();
+    if let Some(cloud) = sanitized
+        .get_mut("cloudSync")
+        .and_then(Value::as_object_mut)
+    {
+        cloud.insert("accountSecret".to_string(), Value::String(String::new()));
+    }
+    sanitized
+}
+
+fn preserve_cloud_secret(existing: Option<&Value>, incoming: &Value) -> Value {
+    let mut merged = incoming.clone();
+    let existing_secret = existing
+        .and_then(|value| value.get("cloudSync"))
+        .and_then(|value| value.get("accountSecret"))
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    if !existing_secret.is_empty() {
+        if let Some(cloud) = merged.get_mut("cloudSync").and_then(Value::as_object_mut) {
+            cloud.insert(
+                "accountSecret".to_string(),
+                Value::String(existing_secret.to_string()),
+            );
+        }
+    }
+    merged
 }
 
 fn is_private_ipv4(address: Ipv4Addr) -> bool {
@@ -726,10 +1203,9 @@ fn logo_to_esc_pos_raster(data_url: &str) -> Vec<u8> {
         Ok(img) => img,
         Err(_) => return vec![],
     };
-    // Keep restaurant logos small on thermal paper. The old 384px limit filled
-    // most of an 80mm receipt and made uploaded logos print like a banner.
-    const MAX_WIDTH: u32 = 72;
-    const MAX_HEIGHT: u32 = 48;
+    // Keep logos readable without turning them into a full-width banner.
+    const MAX_WIDTH: u32 = 120;
+    const MAX_HEIGHT: u32 = 80;
     let (orig_w, orig_h) = img.dimensions();
     let scale = (MAX_WIDTH as f64 / orig_w.max(1) as f64)
         .min(MAX_HEIGHT as f64 / orig_h.max(1) as f64)
@@ -771,13 +1247,12 @@ fn logo_to_esc_pos_raster(data_url: &str) -> Vec<u8> {
     let y_l = (height % 256) as u8;
     let y_h = (height / 256) as u8;
     let mut out: Vec<u8> = Vec::new();
-    // Left align so the logo remains a small mark, not a centered masthead.
-    out.extend_from_slice(&[0x1b, 0x61, 0x00]);
+    out.extend_from_slice(&[0x1b, 0x61, 0x01]);
     // GS v 0 header
     out.extend_from_slice(&[0x1d, 0x76, 0x30, 0x00, x_l, x_h, y_l, y_h]);
     // Bitmap data
     out.extend_from_slice(&bitmap);
-    // Newline + left align
+    // Newline + left align for the receipt text that follows.
     out.extend_from_slice(&[0x0a, 0x1b, 0x61, 0x00]);
     out
 }
@@ -852,7 +1327,11 @@ fn network_target(raw: &str) -> Option<(String, u16)> {
 }
 
 fn print_tcp(target: (String, u16), bytes: &[u8]) -> Result<(), String> {
-    let address = format!("{}:{}", target.0, target.1);
+    let address = if target.0.contains(':') {
+        format!("[{}]:{}", target.0, target.1)
+    } else {
+        format!("{}:{}", target.0, target.1)
+    };
     let socket_address = address
         .parse()
         .map_err(|_| format!("Invalid LAN printer address: {address}"))?;
@@ -865,148 +1344,166 @@ fn print_tcp(target: (String, u16), bytes: &[u8]) -> Result<(), String> {
 const CREATE_NO_WINDOW: u32 = 0x08000000;
 
 #[cfg(windows)]
-fn powershell_command(script: &str) -> Command {
-    let mut command = Command::new("powershell.exe");
-    command
-        .args([
-            "-NoProfile",
-            "-NonInteractive",
-            "-ExecutionPolicy",
-            "Bypass",
-            "-Command",
-            script,
-        ])
-        .creation_flags(CREATE_NO_WINDOW);
-    command
-}
+fn print_windows_queue(printer: &str, job_name: &str, bytes: &[u8]) -> Result<(), String> {
+    let mut printer_name = OsStr::new(printer)
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>();
+    let mut document_name = OsStr::new(job_name)
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>();
+    let mut data_type = OsStr::new("RAW")
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>();
+    let mut handle: HANDLE = ptr::null_mut();
 
-#[cfg(windows)]
-fn print_windows_queue(
-    app: &AppHandle,
-    printer: &str,
-    job_name: &str,
-    bytes: &[u8],
-) -> Result<(), String> {
-    let directory = app.path().app_cache_dir().map_err(to_error)?;
-    fs::create_dir_all(&directory).map_err(to_error)?;
-    let file = directory.join("bhojpatra-print-job.bin");
-    fs::write(&file, bytes).map_err(to_error)?;
-    let script = r#"
-Add-Type -TypeDefinition @"
-using System;
-using System.ComponentModel;
-using System.Runtime.InteropServices;
-public static class RawPrinterHelper {
-  [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
-  public class DOCINFO {
-    [MarshalAs(UnmanagedType.LPWStr)] public string pDocName;
-    [MarshalAs(UnmanagedType.LPWStr)] public string pOutputFile;
-    [MarshalAs(UnmanagedType.LPWStr)] public string pDataType;
-  }
-  [DllImport("winspool.Drv", EntryPoint = "OpenPrinterW", SetLastError = true, CharSet = CharSet.Unicode)]
-  public static extern bool OpenPrinter(string printerName, out IntPtr hPrinter, IntPtr defaults);
-  [DllImport("winspool.Drv", SetLastError = true)] public static extern bool ClosePrinter(IntPtr hPrinter);
-  [DllImport("winspool.Drv", EntryPoint = "StartDocPrinterW", SetLastError = true, CharSet = CharSet.Unicode)]
-  public static extern int StartDocPrinter(IntPtr hPrinter, int level, [In] DOCINFO docInfo);
-  [DllImport("winspool.Drv", SetLastError = true)] public static extern bool EndDocPrinter(IntPtr hPrinter);
-  [DllImport("winspool.Drv", SetLastError = true)] public static extern bool StartPagePrinter(IntPtr hPrinter);
-  [DllImport("winspool.Drv", SetLastError = true)] public static extern bool EndPagePrinter(IntPtr hPrinter);
-  [DllImport("winspool.Drv", SetLastError = true)] public static extern bool WritePrinter(IntPtr hPrinter, byte[] bytes, int count, out int written);
-  public static void Send(string printerName, byte[] bytes, string jobName) {
-    IntPtr hPrinter;
-    if (!OpenPrinter(printerName, out hPrinter, IntPtr.Zero)) throw new Win32Exception(Marshal.GetLastWin32Error());
-    try {
-      DOCINFO docInfo = new DOCINFO();
-      docInfo.pDocName = jobName;
-      docInfo.pDataType = "RAW";
-      if (StartDocPrinter(hPrinter, 1, docInfo) == 0) throw new Win32Exception(Marshal.GetLastWin32Error());
-      try {
-        if (!StartPagePrinter(hPrinter)) throw new Win32Exception(Marshal.GetLastWin32Error());
-        try {
-          int written;
-          if (!WritePrinter(hPrinter, bytes, bytes.Length, out written)) throw new Win32Exception(Marshal.GetLastWin32Error());
-          if (written != bytes.Length) throw new Exception("Only " + written + " of " + bytes.Length + " bytes were written.");
-        } finally { EndPagePrinter(hPrinter); }
-      } finally { EndDocPrinter(hPrinter); }
-    } finally { ClosePrinter(hPrinter); }
-  }
-}
-"@
-$bytes = [System.IO.File]::ReadAllBytes($env:BP_PRINT_FILE)
-[RawPrinterHelper]::Send($env:BP_PRINTER_NAME, $bytes, $env:BP_JOB_NAME)
-"#;
-    let output = powershell_command(script)
-        .env("BP_PRINT_FILE", file)
-        .env("BP_PRINTER_NAME", printer)
-        .env("BP_JOB_NAME", job_name)
-        .output()
-        .map_err(to_error)?;
-    if output.status.success() {
-        Ok(())
-    } else {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        Err(if stderr.is_empty() {
-            "Windows printer write failed.".to_string()
-        } else {
-            stderr
-        })
+    unsafe {
+        if OpenPrinterW(printer_name.as_mut_ptr(), &mut handle, ptr::null()) == 0 {
+            return Err(format!(
+                "Could not open Windows printer '{printer}': {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+
+        let document = DOC_INFO_1W {
+            pDocName: document_name.as_mut_ptr(),
+            pOutputFile: ptr::null_mut(),
+            pDatatype: data_type.as_mut_ptr(),
+        };
+        if StartDocPrinterW(handle, 1, &document) == 0 {
+            let error = std::io::Error::last_os_error();
+            ClosePrinter(handle);
+            return Err(format!("Could not start printer job: {error}"));
+        }
+        if StartPagePrinter(handle) == 0 {
+            let error = std::io::Error::last_os_error();
+            EndDocPrinter(handle);
+            ClosePrinter(handle);
+            return Err(format!("Could not start printer page: {error}"));
+        }
+
+        let mut offset = 0usize;
+        while offset < bytes.len() {
+            let count = (bytes.len() - offset).min(u32::MAX as usize) as u32;
+            let mut written = 0u32;
+            if WritePrinter(handle, bytes[offset..].as_ptr().cast(), count, &mut written) == 0 {
+                let error = std::io::Error::last_os_error();
+                EndPagePrinter(handle);
+                EndDocPrinter(handle);
+                ClosePrinter(handle);
+                return Err(format!("Windows printer write failed: {error}"));
+            }
+            if written == 0 {
+                EndPagePrinter(handle);
+                EndDocPrinter(handle);
+                ClosePrinter(handle);
+                return Err("Windows printer accepted no receipt data.".to_string());
+            }
+            offset += written as usize;
+        }
+
+        let page_ended = EndPagePrinter(handle) != 0;
+        let document_ended = EndDocPrinter(handle) != 0;
+        ClosePrinter(handle);
+        if !page_ended || !document_ended {
+            return Err("Windows did not finish the printer job cleanly.".to_string());
+        }
     }
+    Ok(())
 }
 
 #[cfg(windows)]
 fn query_windows_printers() -> Result<Vec<NativePrinter>, String> {
-    let script = r#"
-$printers = @()
-try { $printers = @(Get-CimInstance Win32_Printer -ErrorAction Stop) } catch { $printers = @(Get-WmiObject Win32_Printer -ErrorAction SilentlyContinue) }
-$printers |
-  Where-Object { $_.Name } |
-  Select-Object Name, DriverName, PortName, WorkOffline, Default |
-  ConvertTo-Json -Compress -Depth 3
-"#;
-    let output = powershell_command(script).output().map_err(to_error)?;
-    if !output.status.success() {
-        return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
+    unsafe fn wide_string(pointer: *const u16) -> String {
+        if pointer.is_null() {
+            return String::new();
+        }
+        let mut length = 0usize;
+        while *pointer.add(length) != 0 {
+            length += 1;
+        }
+        String::from_utf16_lossy(std::slice::from_raw_parts(pointer, length))
     }
-    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if stdout.is_empty() {
-        return Ok(vec![]);
+
+    let flags = PRINTER_ENUM_LOCAL | PRINTER_ENUM_CONNECTIONS;
+    let mut needed = 0u32;
+    let mut returned = 0u32;
+    unsafe {
+        EnumPrintersW(
+            flags,
+            ptr::null(),
+            5,
+            ptr::null_mut(),
+            0,
+            &mut needed,
+            &mut returned,
+        );
     }
-    let parsed: Value = serde_json::from_str(&stdout).map_err(to_error)?;
-    let rows = match parsed {
-        Value::Array(rows) => rows,
-        row => vec![row],
+    if needed == 0 {
+        return Ok(Vec::new());
+    }
+    let words = (needed as usize + std::mem::size_of::<usize>() - 1) / std::mem::size_of::<usize>();
+    let mut buffer = vec![0usize; words];
+    let ok = unsafe {
+        EnumPrintersW(
+            flags,
+            ptr::null(),
+            5,
+            buffer.as_mut_ptr().cast(),
+            needed,
+            &mut needed,
+            &mut returned,
+        )
+    };
+    if ok == 0 {
+        return Err(format!(
+            "Could not enumerate Windows printers: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+
+    let mut default_length = 0u32;
+    unsafe { GetDefaultPrinterW(ptr::null_mut(), &mut default_length) };
+    let default_name = if default_length > 0 {
+        let mut value = vec![0u16; default_length as usize];
+        if unsafe { GetDefaultPrinterW(value.as_mut_ptr(), &mut default_length) } != 0 {
+            String::from_utf16_lossy(
+                &value[..value.iter().position(|ch| *ch == 0).unwrap_or(value.len())],
+            )
+        } else {
+            String::new()
+        }
+    } else {
+        String::new()
+    };
+
+    let rows = unsafe {
+        std::slice::from_raw_parts(buffer.as_ptr().cast::<PRINTER_INFO_5W>(), returned as usize)
     };
     let mut printers = rows
-        .into_iter()
+        .iter()
         .filter_map(|row| {
-            let name = row.get("Name")?.as_str()?.to_string();
-            let port_name = row
-                .get("PortName")
-                .and_then(Value::as_str)
-                .unwrap_or("")
-                .to_string();
-            let driver_name = row
-                .get("DriverName")
-                .and_then(Value::as_str)
-                .unwrap_or("")
-                .to_string();
-            let is_default = row.get("Default").and_then(Value::as_bool).unwrap_or(false);
-            let offline = row
-                .get("WorkOffline")
-                .and_then(Value::as_bool)
-                .unwrap_or(false);
-            let label = [name.as_str(), port_name.as_str(), driver_name.as_str()]
+            let name = unsafe { wide_string(row.pPrinterName) };
+            if name.trim().is_empty() {
+                return None;
+            }
+            let port_name = unsafe { wide_string(row.pPortName) };
+            let label = [name.as_str(), port_name.as_str()]
                 .into_iter()
                 .filter(|part| !part.trim().is_empty())
                 .collect::<Vec<_>>()
                 .join(" - ");
+            let offline = row.Attributes & PRINTER_ATTRIBUTE_WORK_OFFLINE != 0;
             Some(NativePrinter {
+                is_default: name.eq_ignore_ascii_case(&default_name)
+                    || row.Attributes & PRINTER_ATTRIBUTE_DEFAULT != 0,
                 name,
                 label,
                 port_name,
-                driver_name,
-                status: if offline { "offline" } else { "online" }.to_string(),
-                is_default,
+                driver_name: String::new(),
+                status: if offline { "offline" } else { "ready" }.to_string(),
             })
         })
         .collect::<Vec<_>>();
@@ -1039,11 +1536,7 @@ $printers |
 }
 
 #[tauri::command]
-fn load_local_state(
-    app: AppHandle,
-    guard: State<'_, LicenseGuard>,
-) -> Result<LocalStatePayload, String> {
-    require_license(&guard)?;
+fn load_local_state(app: AppHandle) -> Result<LocalStatePayload, String> {
     let connection = open_database(&app)?;
     Ok(LocalStatePayload {
         snapshot: read_json(&connection, "snapshot")?,
@@ -1054,13 +1547,24 @@ fn load_local_state(
 #[tauri::command]
 fn save_local_state(
     app: AppHandle,
-    guard: State<'_, LicenseGuard>,
+    write_lock: State<'_, DesktopStateWriteLock>,
     broadcaster: State<'_, broadcast::Sender<String>>,
     snapshot: Value,
     staff: Value,
 ) -> Result<(), String> {
-    require_license(&guard)?;
+    let _write_guard = write_lock
+        .0
+        .lock()
+        .map_err(|_| "Desktop state save lock was poisoned".to_string())?;
     let connection = open_database(&app)?;
+    let existing = read_snapshot(&connection)?;
+    if (snapshot_score(Some(&snapshot)) == 0 && snapshot_score(existing.as_ref()) > 0)
+        || would_erase_core_restaurant_data(existing.as_ref(), &snapshot)
+    {
+        return Err(
+            "Refused to replace existing restaurant setup with an incomplete snapshot".to_string(),
+        );
+    }
     write_json(&connection, "snapshot", &snapshot)?;
     write_json(&connection, "staff", &staff)?;
     let outlet_id = snapshot_outlet(&snapshot).id;
@@ -1076,38 +1580,113 @@ fn save_local_state(
 }
 
 #[tauri::command]
-async fn activate_license(
-    manager: State<'_, LicenseManager>,
-    guard: State<'_, LicenseGuard>,
-    key: String,
-) -> Result<Value, String> {
-    match manager.activate(key).await {
-        Ok(message) => {
-            guard.set_valid(true);
-            Ok(serde_json::json!({ "success": true, "message": message }))
+fn create_daily_local_backup(
+    app: AppHandle,
+    write_lock: State<'_, DesktopStateWriteLock>,
+    force: bool,
+) -> Result<LocalBackupResult, String> {
+    let _write_guard = write_lock
+        .0
+        .lock()
+        .map_err(|_| "Desktop state backup lock was poisoned".to_string())?;
+    create_local_backup(&app, force)
+}
+
+fn read_sync_rows(connection: &Connection, table: &str) -> Result<Vec<Value>, String> {
+    let statement = format!("SELECT row_json FROM {table} ORDER BY rowid ASC");
+    let mut query = connection.prepare(&statement).map_err(to_error)?;
+    let rows = query
+        .query_map([], |row| row.get::<_, String>(0))
+        .map_err(to_error)?;
+    let mut values = Vec::new();
+    for row in rows {
+        let raw = row.map_err(to_error)?;
+        if let Ok(value) = serde_json::from_str::<Value>(&raw) {
+            values.push(value);
         }
-        Err(message) => Ok(serde_json::json!({ "success": false, "message": message })),
     }
+    Ok(values)
 }
 
 #[tauri::command]
-async fn check_license(
-    manager: State<'_, LicenseManager>,
-    guard: State<'_, LicenseGuard>,
-) -> Result<bool, String> {
-    let valid = manager.check_license().await;
-    guard.set_valid(valid);
-    Ok(valid)
+fn load_sync_metadata(app: AppHandle) -> Result<Value, String> {
+    let connection = open_database(&app)?;
+    let mut state_statement = connection
+        .prepare("SELECT key, value FROM sync_state")
+        .map_err(to_error)?;
+    let state_rows = state_statement
+        .query_map([], |row| {
+            Ok(json!({ "key": row.get::<_, String>(0)?, "value": row.get::<_, String>(1)? }))
+        })
+        .map_err(to_error)?;
+    let mut sync_state = Vec::new();
+    for row in state_rows {
+        sync_state.push(row.map_err(to_error)?);
+    }
+    Ok(json!({
+        "records": read_sync_rows(&connection, "sync_records")?,
+        "outbox": read_sync_rows(&connection, "sync_outbox")?,
+        "state": sync_state,
+        "conflicts": read_sync_rows(&connection, "sync_conflicts")?,
+    }))
 }
 
 #[tauri::command]
-fn get_license_status(manager: State<'_, LicenseManager>) -> Result<license::LicenseData, String> {
-    Ok(manager.get_status())
+fn save_sync_metadata(
+    app: AppHandle,
+    records: Vec<Value>,
+    outbox: Vec<Value>,
+    sync_state: Vec<Value>,
+    conflicts: Vec<Value>,
+) -> Result<(), String> {
+    let mut connection = open_database(&app)?;
+    let transaction = connection.transaction().map_err(to_error)?;
+    transaction
+        .execute("DELETE FROM sync_records", [])
+        .map_err(to_error)?;
+    transaction
+        .execute("DELETE FROM sync_outbox", [])
+        .map_err(to_error)?;
+    transaction
+        .execute("DELETE FROM sync_state", [])
+        .map_err(to_error)?;
+    transaction
+        .execute("DELETE FROM sync_conflicts", [])
+        .map_err(to_error)?;
+
+    for row in records {
+        transaction.execute(
+            "INSERT INTO sync_records (key, entity_type, entity_id, order_uuid, version, base_version, payload_hash, updated_at, synced_at, conflict_state, row_json)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+            params![row["key"].as_str(), row["entityType"].as_str(), row["entityId"].as_str(), row["orderUuid"].as_str(), row["version"].as_i64(), row["baseVersion"].as_i64(), row["payloadHash"].as_str(), row["updatedAt"].as_str(), row["syncedAt"].as_str(), row["conflictState"].as_str(), row.to_string()],
+        ).map_err(to_error)?;
+    }
+    for row in outbox {
+        transaction.execute(
+            "INSERT INTO sync_outbox (key, entity_type, entity_id, order_uuid, version, base_version, payload_hash, updated_at, batch_id, retry_count, row_json)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+            params![row["key"].as_str(), row["entityType"].as_str(), row["entityId"].as_str(), row["orderUuid"].as_str(), row["version"].as_i64(), row["baseVersion"].as_i64(), row["payloadHash"].as_str(), row["updatedAt"].as_str(), row["batchId"].as_str(), row["retryCount"].as_i64().unwrap_or(0), row.to_string()],
+        ).map_err(to_error)?;
+    }
+    for row in sync_state {
+        transaction
+            .execute(
+                "INSERT INTO sync_state (key, value) VALUES (?1, ?2)",
+                params![row["key"].as_str(), row["value"].as_str()],
+            )
+            .map_err(to_error)?;
+    }
+    for row in conflicts {
+        transaction.execute(
+            "INSERT INTO sync_conflicts (key, entity_id, order_uuid, code, created_at, row_json) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![row["key"].as_str(), row["entityId"].as_str(), row["orderUuid"].as_str(), row["code"].as_str(), row["createdAt"].as_str(), row.to_string()],
+        ).map_err(to_error)?;
+    }
+    transaction.commit().map_err(to_error)
 }
 
 #[tauri::command]
-fn list_native_printers(guard: State<'_, LicenseGuard>) -> Result<Vec<NativePrinter>, String> {
-    require_license(&guard)?;
+fn list_native_printers() -> Result<Vec<NativePrinter>, String> {
     #[cfg(windows)]
     {
         query_windows_printers()
@@ -1119,12 +1698,7 @@ fn list_native_printers(guard: State<'_, LicenseGuard>) -> Result<Vec<NativePrin
 }
 
 #[tauri::command]
-fn print_native(
-    app: AppHandle,
-    guard: State<'_, LicenseGuard>,
-    payload: NativePrintPayload,
-) -> Result<(), String> {
-    require_license(&guard)?;
+fn print_native(payload: NativePrintPayload) -> Result<(), String> {
     let printer = payload.printer.trim();
     if printer.is_empty() {
         return Err("Select a printer before printing.".to_string());
@@ -1135,7 +1709,7 @@ fn print_native(
     }
     #[cfg(windows)]
     {
-        print_windows_queue(&app, printer, &payload.job_name, &bytes)
+        print_windows_queue(printer, &payload.job_name, &bytes)
     }
     #[cfg(not(windows))]
     {
@@ -1181,7 +1755,6 @@ fn lan_hello_payload(
         discovery_port: 3001,
         primary_url,
         ip_address: reachable_ip.or(status.ip_address),
-        licensed: state.license_guard.is_valid(),
         outlet,
     }
 }
@@ -1237,6 +1810,12 @@ async fn lan_get_state(
             Json(json!({ "error": error })),
         )
     })?;
+    let stored_updated_at = state_updated_at(&connection, "snapshot").map_err(|error| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": error })),
+        )
+    })?;
     let mut response_headers = HeaderMap::new();
     response_headers.insert(
         header::CACHE_CONTROL,
@@ -1244,12 +1823,13 @@ async fn lan_get_state(
     );
     let body = if let Some(payload) = snapshot {
         let outlet = snapshot_outlet(&payload);
+        let safe_payload = sanitize_snapshot_for_lan(&payload);
         json!({
           "exists": true,
           "outletId": outlet.id,
           "tenantId": outlet.tenant_id,
-          "updatedAt": chrono::Utc::now().to_rfc3339(),
-          "payload": payload,
+          "updatedAt": stored_updated_at.unwrap_or_else(|| chrono::Utc::now().to_rfc3339()),
+          "payload": safe_payload,
         })
     } else {
         json!({
@@ -1290,35 +1870,79 @@ async fn lan_put_state(
             Json(json!({ "error": error })),
         )
     })?;
+    if !["owner", "admin", "manager", "captain", "kitchen"].contains(&account.role.as_str()) {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(json!({ "error": "This role cannot update restaurant state" })),
+        ));
+    }
+    if ["captain", "kitchen"].contains(&account.role.as_str())
+        && !preserves_role_restricted_collections(existing.as_ref(), &body.payload)
+    {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(
+                json!({ "error": "This role can only update tables, orders, and kitchen workflow" }),
+            ),
+        ));
+    }
+    let existing_updated_at = state_updated_at(&connection, "snapshot").map_err(|error| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": error })),
+        )
+    })?;
+    if let (Some(expected), Some(actual)) = (&body.expected_updated_at, &existing_updated_at) {
+        if expected != actual {
+            return Err((
+                StatusCode::CONFLICT,
+                Json(json!({
+                  "error": "Restaurant data changed on another device. Refresh and retry.",
+                  "updatedAt": actual,
+                  "payload": existing.as_ref().map(sanitize_snapshot_for_lan),
+                })),
+            ));
+        }
+    }
     let incoming_score = snapshot_score(Some(&body.payload));
     let existing_score = snapshot_score(existing.as_ref());
-    if incoming_score == 0 && existing_score > 0 {
+    if (incoming_score == 0 && existing_score > 0)
+        || would_erase_core_restaurant_data(existing.as_ref(), &body.payload)
+    {
         return Ok(Json(json!({
           "ok": true,
           "outletId": outlet_id,
-          "updatedAt": chrono::Utc::now().to_rfc3339(),
+          "updatedAt": existing_updated_at.unwrap_or_else(|| chrono::Utc::now().to_rfc3339()),
           "skipped": true,
-          "reason": "Ignored empty snapshot over existing restaurant data",
-          "payload": existing,
+          "reason": "Ignored a snapshot that would erase existing restaurant setup data",
+          "payload": existing.as_ref().map(sanitize_snapshot_for_lan),
         })));
     }
 
-    write_json(&connection, "snapshot", &body.payload).map_err(|error| {
+    let mut stored_payload = preserve_cloud_secret(existing.as_ref(), &body.payload);
+    if ["captain", "kitchen"].contains(&account.role.as_str()) {
+        if let Some(existing_cloud) = existing.as_ref().and_then(|value| value.get("cloudSync")) {
+            if let Some(root) = stored_payload.as_object_mut() {
+                root.insert("cloudSync".to_string(), existing_cloud.clone());
+            }
+        }
+    }
+    write_json(&connection, "snapshot", &stored_payload).map_err(|error| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({ "error": error })),
         )
     })?;
     let updated_at = chrono::Utc::now().to_rfc3339();
-    let event = json!({
+    let public_event = json!({
       "type": "STATE_UPDATED",
       "outletId": outlet_id,
-      "payload": body.payload,
+      "payload": sanitize_snapshot_for_lan(&stored_payload),
       "timestamp": updated_at,
       "clientId": body.client_id,
     });
-    let _ = state.broadcaster.send(event.to_string());
-    let _ = state.app.emit("lan_state_updated", &event["payload"]);
+    let _ = state.broadcaster.send(public_event.to_string());
+    let _ = state.app.emit("lan_state_updated", &stored_payload);
 
     Ok(Json(json!({
       "ok": true,
@@ -1368,19 +1992,19 @@ async fn handle_lan_socket(
             let Some(Ok(message)) = message else { break; };
             match message {
               Message::Text(text) => {
+                if text.as_str() == "ping" {
+                  let _ = sender.send(Message::Text("pong".into())).await;
+                  continue;
+                }
                 let event = match serde_json::from_str::<Value>(&text) {
                   Ok(value) => value,
                   Err(_) => continue,
                 };
-                if event.get("type").and_then(Value::as_str) == Some("STATE_UPDATED") {
-                  if let Some(payload) = event.get("payload") {
-                    if let Ok(connection) = open_database(&state.app) {
-                      let _ = write_json(&connection, "snapshot", payload);
-                    }
-                    let _ = state.app.emit("lan_state_updated", payload);
-                  }
+                // State writes must go through the authenticated HTTP endpoint so
+                // empty-snapshot and optimistic-concurrency guards cannot be bypassed.
+                if event.get("type").and_then(Value::as_str) != Some("STATE_UPDATED") {
+                  let _ = state.broadcaster.send(event.to_string());
                 }
-                let _ = state.broadcaster.send(event.to_string());
               }
               Message::Ping(payload) => {
                 let _ = sender.send(Message::Pong(payload)).await;
@@ -1399,7 +2023,7 @@ async fn handle_lan_socket(
     }
 }
 
-fn spawn_lan_discovery_responder(app: AppHandle, license_guard: LicenseGuard) {
+fn spawn_lan_discovery_responder(app: AppHandle) {
     tauri::async_runtime::spawn(async move {
         let socket = match UdpSocket::bind(SocketAddr::from(([0, 0, 0, 0], 3001))).await {
             Ok(socket) => socket,
@@ -1410,7 +2034,6 @@ fn spawn_lan_discovery_responder(app: AppHandle, license_guard: LicenseGuard) {
         };
         let state = LanServerState {
             app,
-            license_guard,
             broadcaster: broadcast::channel::<String>(1).0,
         };
         let mut buffer = [0u8; 512];
@@ -1440,14 +2063,12 @@ fn spawn_lan_discovery_responder(app: AppHandle, license_guard: LicenseGuard) {
 
 fn spawn_lan_server(
     app: AppHandle,
-    license_guard: LicenseGuard,
     status: Arc<Mutex<LanServerStatusPayload>>,
     broadcaster: broadcast::Sender<String>,
 ) {
     let port = status.lock().map(|value| value.port).unwrap_or(3000);
     let shared_state = LanServerState {
         app: app.clone(),
-        license_guard,
         broadcaster,
     };
     tauri::async_runtime::spawn(async move {
@@ -1502,18 +2123,15 @@ pub fn run() {
             #[cfg(desktop)]
             app.handle()
                 .plugin(tauri_plugin_updater::Builder::new().build())?;
-            app.manage(LicenseManager::new(app.handle()));
-            let license_guard = LicenseGuard::new();
+            app.manage(DesktopStateWriteLock::default());
             let lan_status = Arc::new(Mutex::new(lan_status_snapshot(3000, false, None)));
             let (lan_broadcaster, _) = broadcast::channel::<String>(128);
             spawn_lan_server(
                 app.handle().clone(),
-                license_guard.clone(),
                 lan_status.clone(),
                 lan_broadcaster.clone(),
             );
-            spawn_lan_discovery_responder(app.handle().clone(), license_guard.clone());
-            app.manage(license_guard);
+            spawn_lan_discovery_responder(app.handle().clone());
             app.manage(lan_status);
             app.manage(lan_broadcaster);
             #[cfg(desktop)]
@@ -1525,13 +2143,55 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             load_local_state,
             save_local_state,
-            activate_license,
-            check_license,
-            get_license_status,
+            load_sync_metadata,
+            save_sync_metadata,
+            create_daily_local_backup,
             get_lan_server_status,
             list_native_printers,
             print_native
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_ipv4_and_ipv6_raw_printer_targets() {
+        assert_eq!(
+            network_target("tcp://192.168.1.50:9100"),
+            Some(("192.168.1.50".to_string(), 9100))
+        );
+        assert_eq!(
+            network_target("[::1]:9100"),
+            Some(("::1".to_string(), 9100))
+        );
+    }
+
+    #[test]
+    fn builds_esc_pos_job_with_qr_and_cut() {
+        let payload = NativePrintPayload {
+            printer: "POS-80".to_string(),
+            job_name: "Test receipt".to_string(),
+            text: "BHOJPATRA\n".to_string(),
+            auto_cut: true,
+            open_cash_drawer: true,
+            qr_codes: vec![NativeQrCode {
+                data: "upi://pay?pa=test".to_string(),
+                label: Some("Scan".to_string()),
+            }],
+            logo_data_url: None,
+        };
+        let bytes = esc_pos_bytes(&payload);
+        assert!(bytes.starts_with(&[0x1b, 0x40, 0x1b, 0x70]));
+        assert!(bytes
+            .windows(b"BHOJPATRA".len())
+            .any(|window| window == b"BHOJPATRA"));
+        assert!(bytes
+            .windows(b"upi://pay?pa=test".len())
+            .any(|window| window == b"upi://pay?pa=test"));
+        assert!(bytes.ends_with(&[0x0a, 0x0a, 0x0a, 0x1d, 0x56, 0x00]));
+    }
 }

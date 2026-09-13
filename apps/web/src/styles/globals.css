@@ -91,8 +91,7 @@ button, a, [role="button"] { min-height: 32px; }
   --thermal-qty-col: 20px;
   --thermal-rate-col: 42px;
   --thermal-amount-col: 50px;
-  --thermal-logo-column: 34px;
-  --thermal-logo-size: 28px;
+  --thermal-logo-size: 42px;
   --thermal-upi-size: 112px;
   min-height: 100%;
   background: #f8fafc;
@@ -105,11 +104,10 @@ button, a, [role="button"] { min-height: 32px; }
   --thermal-heading-base: 11.5px;
   --thermal-total-base: 10.75px;
   --thermal-line-height: 1.14;
-  --thermal-qty-col: 16px;
-  --thermal-rate-col: 34px;
-  --thermal-amount-col: 40px;
-  --thermal-logo-column: 28px;
-  --thermal-logo-size: 22px;
+  --thermal-qty-col: 18px;
+  --thermal-rate-col: 48px;
+  --thermal-amount-col: 54px;
+  --thermal-logo-size: 32px;
   --thermal-upi-size: 90px;
 }
 
@@ -118,11 +116,10 @@ button, a, [role="button"] { min-height: 32px; }
   --thermal-heading-base: 12.5px;
   --thermal-total-base: 11.5px;
   --thermal-line-height: 1.16;
-  --thermal-qty-col: 18px;
-  --thermal-rate-col: 38px;
-  --thermal-amount-col: 46px;
-  --thermal-logo-column: 30px;
-  --thermal-logo-size: 24px;
+  --thermal-qty-col: 20px;
+  --thermal-rate-col: 52px;
+  --thermal-amount-col: 58px;
+  --thermal-logo-size: 38px;
   --thermal-upi-size: 100px;
 }
 
@@ -156,6 +153,9 @@ button, a, [role="button"] { min-height: 32px; }
   box-shadow: 0 8px 24px rgba(15, 23, 42, 0.12);
   page-break-after: always;
   break-after: page;
+  page-break-inside: avoid;
+  break-inside: avoid;
+  overflow: visible;
 }
 
 .thermal-slip:last-child {
@@ -192,17 +192,17 @@ button, a, [role="button"] { min-height: 32px; }
 }
 
 .thermal-header-with-logo {
-  display: grid;
-  grid-template-columns: var(--thermal-logo-column) minmax(0, 1fr);
-  align-items: start;
-  gap: 6px;
-  text-align: left;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 3px;
+  text-align: center;
 }
 
 .thermal-logo-box {
   display: flex;
-  align-items: flex-start;
-  justify-content: flex-start;
+  align-items: center;
+  justify-content: center;
   min-width: 0;
 }
 
@@ -212,16 +212,19 @@ button, a, [role="button"] { min-height: 32px; }
   max-width: var(--thermal-logo-size);
   max-height: var(--thermal-logo-size);
   object-fit: contain;
-  margin: 0;
+  margin: 0 auto 1px;
 }
 
 .thermal-header-details {
   min-width: 0;
   text-align: center;
+  width: 100%;
 }
 
-.thermal-header-with-logo .thermal-header-details {
-  text-align: right;
+.thermal-header-details p {
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  word-break: normal;
 }
 
 .thermal-upi img {
@@ -269,6 +272,7 @@ button, a, [role="button"] { min-height: 32px; }
   text-align: left;
   border-bottom: 1px dashed #0f172a;
   padding-bottom: 2px;
+  white-space: nowrap;
 }
 
 .thermal-table td {
@@ -276,6 +280,24 @@ button, a, [role="button"] { min-height: 32px; }
   vertical-align: top;
   overflow-wrap: anywhere;
 }
+
+.thermal-table td:first-child,
+.thermal-table th:first-child {
+  min-width: 0;
+}
+
+.thermal-table th:not(:first-child),
+.thermal-table td:not(:first-child) {
+  white-space: nowrap;
+  overflow-wrap: normal;
+  word-break: normal;
+  font-variant-numeric: tabular-nums;
+}
+
+.thermal-table col.thermal-item-col { width: auto; }
+.thermal-table col.thermal-qty-col { width: var(--thermal-qty-col); }
+.thermal-table col.thermal-rate-col { width: var(--thermal-rate-col); }
+.thermal-table col.thermal-amount-col { width: var(--thermal-amount-col); }
 
 .thermal-table th:nth-child(2),
 .thermal-table td:nth-child(2) {
@@ -295,15 +317,79 @@ button, a, [role="button"] { min-height: 32px; }
   width: var(--thermal-rate-col);
 }
 
-.kot-item {
+.thermal-table-wide th:nth-child(2),
+.thermal-table-wide td:nth-child(2) {
+  padding-left: 2px;
+  padding-right: 2px;
+}
+
+.thermal-table-wide th:nth-child(3),
+.thermal-table-wide td:nth-child(3),
+.thermal-table-wide th:nth-child(4),
+.thermal-table-wide td:nth-child(4) {
+  padding-left: 2px;
+  padding-right: 0;
+}
+
+.kot-slip {
+  --thermal-heading-base: 15px;
+  --thermal-total-base: 13px;
+}
+
+.kot-token {
+  display: inline-block;
+  margin: 4px auto 1px;
+  padding: 3px 8px;
+  border: 2px solid #0f172a;
+  font-size: calc(var(--thermal-heading-base) + 5px);
+  line-height: 1;
+  font-weight: 900;
+}
+
+.kot-meta-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 3px;
+  margin: 5px 0;
+}
+
+.kot-meta-box {
+  border: 1px solid #0f172a;
+  padding: 3px;
+  text-align: center;
+}
+
+.kot-meta-box span {
+  display: block;
+  font-size: 9px;
+  text-transform: uppercase;
+}
+
+.kot-meta-box strong {
+  display: block;
   font-size: 14px;
-  padding: 6px 0;
-  border-bottom: 1px dashed #cbd5e1;
+}
+
+.kot-item {
+  font-size: 15px;
+  padding: 7px 0;
+  border-bottom: 1px dashed #0f172a;
 }
 
 .kot-note {
-  font-size: 11px;
+  font-size: 12px;
   margin-top: 2px;
+  font-weight: 700;
+}
+
+.kot-total {
+  margin-top: 6px;
+  padding: 4px 0;
+  border-top: 2px solid #0f172a;
+  border-bottom: 2px solid #0f172a;
+  text-align: center;
+  font-size: 13px;
+  font-weight: 900;
 }
 
 .print-button {
@@ -339,14 +425,17 @@ button, a, [role="button"] { min-height: 32px; }
     max-width: var(--receipt-width, 80mm);
     box-shadow: none;
     margin: 0;
-    padding: 1mm 1.5mm 1mm 1mm;
+    padding: 1mm 1.5mm 6mm 1mm;
     font-size: calc(var(--thermal-font-base) + var(--thermal-font-adjust));
     line-height: var(--thermal-line-height);
+    page-break-inside: avoid;
+    break-inside: avoid;
+    overflow: visible;
   }
 
   .thermal-slip h1 { font-size: calc(var(--thermal-heading-base) + var(--thermal-heading-adjust)); }
-  .thermal-header-with-logo { grid-template-columns: max(7mm, var(--thermal-logo-column)) minmax(0, 1fr); gap: 1.5mm; }
-  .thermal-logo-box img { width: max(6mm, var(--thermal-logo-size)); max-width: max(6mm, var(--thermal-logo-size)); max-height: max(6mm, var(--thermal-logo-size)); }
+  .thermal-header-with-logo { gap: 1mm; }
+  .thermal-logo-box img { width: var(--thermal-logo-size); max-width: var(--thermal-logo-size); max-height: var(--thermal-logo-size); }
   .thermal-total { font-size: calc(var(--thermal-total-base) + var(--thermal-total-adjust)); }
   .thermal-rule { margin: 3px 0; }
   .thermal-table td { padding: 1px 1px 1px 0; }
@@ -362,6 +451,16 @@ button, a, [role="button"] { min-height: 32px; }
    The main-content has md:pl-14 applied in AppShell. */
 .main-content {
   overflow-x: hidden;
+}
+
+/* Table cards must size from the available panel width. Fixed responsive column
+   counts overflow when the active-KOT panel or a narrow desktop window is open. */
+.tables-grid {
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 150px), 1fr));
+}
+
+.tables-grid-compact {
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 108px), 1fr));
 }
 
 /* Scrollbar hide utility */

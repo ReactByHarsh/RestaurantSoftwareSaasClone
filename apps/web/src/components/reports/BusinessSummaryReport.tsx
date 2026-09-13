@@ -1,6 +1,9 @@
-import { useMemo } from 'react'
+import { useMemo, useState } from 'react'
 import { useBillingStore } from '../../store/billingStore'
 import { Printer, Download } from 'lucide-react'
+import { useUIStore } from '../../store/uiStore'
+import { describePrinterError, sendPrintJob } from '../../lib/printer'
+import { buildBusinessSummaryPrintText } from '../../lib/businessSummaryPrint'
 
 interface Props {
   fromDate: string
@@ -8,13 +11,17 @@ interface Props {
 }
 
 export default function BusinessSummaryReport({ fromDate, toDate }: Props) {
-  const { orders, orderItems, kots, menuItems, menuCategories, tables, floors, payments } = useBillingStore()
+  const { outlet, printSettings, orders, orderItems, kots, menuItems, menuCategories, tables, floors, payments } = useBillingStore()
+  const { addToast } = useUIStore()
+  const [showCategorySales, setShowCategorySales] = useState(true)
+  const [showSubcategorySales, setShowSubcategorySales] = useState(true)
+  const [printBusy, setPrintBusy] = useState(false)
 
   const reportData = useMemo(() => {
     // 1. Filter orders by date range
     // The dates are in YYYY-MM-DD. order.businessDate is also YYYY-MM-DD.
     const filteredOrders = orders.filter(
-      o => o.businessDate >= fromDate && o.businessDate <= toDate && o.paymentStatus === 'paid' && o.status !== 'cancelled'
+      o => o.businessDate >= fromDate && o.businessDate <= toDate && o.paymentStatus === 'paid' && !['cancelled', 'void'].includes(o.status) && o.totalPaise > 0
     )
     const orderIds = new Set(filteredOrders.map(o => o.id))
 
@@ -38,13 +45,34 @@ export default function BusinessSummaryReport({ fromDate, toDate }: Props) {
     const discountOnBills = filteredOrders.reduce((sum, order) => sum + order.discountPaise, 0)
     const totalDiscount = discountOnItems + discountOnBills
 
-    // Category wise sales
+    // Category and subcategory wise sales. Menu items can be assigned to a
+    // subcategory, so category sales must always roll up to the top-level
+    // parent category instead of mixing parent and child names together.
     const categorySales: Record<string, number> = {}
+    const subcategorySales: Record<string, number> = {}
+    const categoryById = new Map(menuCategories.map(category => [category.id, category]))
+
     filteredItems.forEach(item => {
       const mi = menuItems.find(m => m.id === item.menuItemId)
-      const cat = mi ? menuCategories.find(c => c.id === mi.categoryId)?.name : 'Unknown'
-      const key = cat || 'Unknown'
-      categorySales[key] = (categorySales[key] || 0) + (item.unitPricePaise * item.quantity)
+      const assignedCategory = mi ? categoryById.get(mi.categoryId) : undefined
+      const amount = item.unitPricePaise * item.quantity
+
+      let rootCategory = assignedCategory
+      const visited = new Set<string>()
+      while (rootCategory?.parentId && !visited.has(rootCategory.id)) {
+        visited.add(rootCategory.id)
+        const parentCategory = categoryById.get(rootCategory.parentId)
+        if (!parentCategory) break
+        rootCategory = parentCategory
+      }
+
+      const categoryName = rootCategory?.name || 'Unknown'
+      categorySales[categoryName] = (categorySales[categoryName] || 0) + amount
+
+      if (assignedCategory?.parentId) {
+        const subcategoryName = assignedCategory.name || 'Unknown'
+        subcategorySales[subcategoryName] = (subcategorySales[subcategoryName] || 0) + amount
+      }
     })
 
     // Kitchen wise sales
@@ -127,7 +155,7 @@ export default function BusinessSummaryReport({ fromDate, toDate }: Props) {
     const itemsReturned = 0
     const amtReturned = 0
     const duplicatePrints = 0
-    const allOrdersInRange = orders.filter(o => o.businessDate >= fromDate && o.businessDate <= toDate && o.status !== 'cancelled')
+    const allOrdersInRange = orders.filter(o => o.businessDate >= fromDate && o.businessDate <= toDate && !['cancelled', 'void'].includes(o.status) && o.totalPaise > 0)
     const duePayments = allOrdersInRange.filter(o => o.paymentStatus !== 'paid').reduce((sum, o) => sum + o.totalPaise, 0)
 
     // Customer summary
@@ -138,6 +166,7 @@ export default function BusinessSummaryReport({ fromDate, toDate }: Props) {
       sales: { totalBills, itemsSold, netSalesAmount },
       discount: { billsWithDiscount, discountOnItems, discountOnBills, totalDiscount },
       categorySales,
+      subcategorySales,
       kitchenSales,
       sectionSales,
       counterTypeSales,
@@ -148,6 +177,30 @@ export default function BusinessSummaryReport({ fromDate, toDate }: Props) {
       customer: { customerCount, walletBalance: 0 },
     }
   }, [orders, orderItems, kots, menuItems, menuCategories, tables, floors, payments, fromDate, toDate])
+
+  const handlePrint = async () => {
+    if (printBusy) return
+    setPrintBusy(true)
+    try {
+      const result = await sendPrintJob(printSettings, {
+        jobName: `BhojPatra Business Summary ${fromDate} to ${toDate}`,
+        text: buildBusinessSummaryPrintText(reportData, fromDate, toDate, {
+          name: outlet.name,
+          businessName: printSettings.businessName || outlet.name,
+          address: outlet.address,
+          phone: outlet.phone,
+          gstin: outlet.gstin,
+          receiptWidth: printSettings.receiptWidth,
+          showGstin: printSettings.showGstin,
+        }),
+      })
+      addToast('success', result === 'direct' ? 'Business summary sent directly to the printer' : 'Business summary opened in the system print dialog', 'Business Summary Print')
+    } catch (error) {
+      addToast('error', describePrinterError(error), 'Business Summary Print')
+    } finally {
+      setPrintBusy(false)
+    }
+  }
 
   const renderSection = (title: string, data: Record<string, number | string>, isCurrency = true) => {
     const entries = Object.entries(data)
@@ -179,11 +232,21 @@ export default function BusinessSummaryReport({ fromDate, toDate }: Props) {
       <div className="p-4 border-b border-slate-100 bg-slate-50 flex flex-wrap items-center justify-between gap-4">
         <div className="flex gap-4">
           <label className="flex items-center gap-2 cursor-pointer">
-            <input type="checkbox" defaultChecked className="rounded text-primary focus:ring-primary" />
+            <input
+              type="checkbox"
+              checked={showCategorySales}
+              onChange={(event) => setShowCategorySales(event.target.checked)}
+              className="rounded text-primary focus:ring-primary"
+            />
             <span className="text-xs font-bold text-slate-600">Category wise Sales</span>
           </label>
           <label className="flex items-center gap-2 cursor-pointer">
-            <input type="checkbox" className="rounded text-primary focus:ring-primary" />
+            <input
+              type="checkbox"
+              checked={showSubcategorySales}
+              onChange={(event) => setShowSubcategorySales(event.target.checked)}
+              className="rounded text-primary focus:ring-primary"
+            />
             <span className="text-xs font-bold text-slate-600">Subcat. wise Sales</span>
           </label>
           <label className="flex items-center gap-2 cursor-pointer">
@@ -206,8 +269,8 @@ export default function BusinessSummaryReport({ fromDate, toDate }: Props) {
           <button className="flex items-center gap-1.5 px-4 py-2 bg-[#FFC107] hover:bg-amber-500 text-amber-900 text-xs font-black rounded-lg transition-colors shadow-sm">
             <Download size={14} /> Csv
           </button>
-          <button className="flex items-center gap-1.5 px-4 py-2 bg-[#FFC107] hover:bg-amber-500 text-amber-900 text-xs font-black rounded-lg transition-colors shadow-sm">
-            <Printer size={14} /> Prnt
+          <button onClick={handlePrint} disabled={printBusy} className="flex items-center gap-1.5 px-4 py-2 bg-[#FFC107] hover:bg-amber-500 disabled:cursor-wait disabled:opacity-60 text-amber-900 text-xs font-black rounded-lg transition-colors shadow-sm">
+            <Printer size={14} /> {printBusy ? 'Printing...' : 'Prnt'}
           </button>
         </div>
       </div>
@@ -236,7 +299,8 @@ export default function BusinessSummaryReport({ fromDate, toDate }: Props) {
               'Total Discount (A+B)': reportData.discount.totalDiscount,
             })}
 
-            {renderSection('Category wise sales', reportData.categorySales)}
+            {showCategorySales && renderSection('Category wise sales', reportData.categorySales)}
+            {showSubcategorySales && renderSection('Subcategory wise sales', reportData.subcategorySales)}
             {renderSection('Kitchen wise sales', reportData.kitchenSales)}
             {renderSection('Section wise sales', reportData.sectionSales)}
             {renderSection('Counter type wise sales', reportData.counterTypeSales)}

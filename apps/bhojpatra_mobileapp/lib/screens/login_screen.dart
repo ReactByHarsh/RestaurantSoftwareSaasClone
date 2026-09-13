@@ -152,16 +152,16 @@ class _LoginScreenState extends State<LoginScreen> {
                                 label: Text('LAN Restaurant'),
                               ),
                               ButtonSegment(
-                                value: 'cloud_owner',
+                                value: 'cloud_live',
                                 icon: Icon(Icons.cloud_queue),
-                                label: Text('Cloud Owner'),
+                                label: Text('Cloud Live'),
                               ),
                             ],
                             selected: {_mode},
                             onSelectionChanged: (selection) {
                               final next = selection.first;
                               setState(() => _mode = next);
-                              if (next == 'cloud_owner' &&
+                              if (next == 'cloud_live' &&
                                   (_server.text.trim().isEmpty ||
                                       _server.text == defaultLanServerUrl ||
                                       _server.text.contains('192.168.'))) {
@@ -294,7 +294,7 @@ class _LoginScreenState extends State<LoginScreen> {
                   Text(
                     _mode == 'lan'
                         ? 'Keep BhojPatra Desk open on the same Wi-Fi/hotspot. The app will find it automatically; use the URL field only if Windows Firewall blocks discovery.'
-                        : 'Cloud Owner shows the last daily desktop snapshot and does not edit restaurant orders.',
+                        : 'Cloud Live uses the same realtime restaurant data and automatically opens the correct owner, captain, or kitchen workspace.',
                     textAlign: TextAlign.center,
                     style: theme.textTheme.bodySmall?.copyWith(
                       color: Colors.black54,

@@ -9,6 +9,7 @@ type RealtimeConnectOptions = {
 }
 
 const CHANNEL_NAME = 'bhojpatra-outlet-out_local'
+const WEB_CLIENT_ID = `web_${crypto.randomUUID()}`
 
 type RealtimeHandler = (event: RealtimeEvent) => void
 
@@ -22,7 +23,7 @@ function websocketUrl(options: RealtimeConnectOptions) {
   if (!base) return null
   const url = new URL(`${base}/api/v1/outlets/${encodeURIComponent(options.outletId)}/realtime`)
   url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:'
-  url.searchParams.set('clientId', options.clientId || `client_${crypto.randomUUID()}`)
+  url.searchParams.set('clientId', options.clientId || WEB_CLIENT_ID)
   if (options.accountLogin) url.searchParams.set('login', options.accountLogin)
   if (options.accountSecret) url.searchParams.set('secret', options.accountSecret)
   return url.toString()
@@ -72,11 +73,13 @@ class RealtimeClient {
         if (typeof message.data !== 'string' || message.data === 'pong') return
         try {
           const raw = JSON.parse(message.data) as Partial<RealtimeEvent> & { payload?: unknown }
+          if (raw.clientId === WEB_CLIENT_ID) return
           const event: RealtimeEvent = {
             type: (raw.type || 'STATE_UPDATED') as RealtimeEventType,
             outletId: raw.outletId || this.options.outletId || 'out_local',
             payload: (raw.payload && typeof raw.payload === 'object' ? raw.payload : raw) as Record<string, unknown>,
             timestamp: raw.timestamp || new Date().toISOString(),
+            clientId: raw.clientId,
           }
           this.handlers.forEach(h => h(event))
         } catch {
@@ -128,6 +131,10 @@ class RealtimeClient {
 
   isConnected() {
     return this.connected
+  }
+
+  getClientId() {
+    return WEB_CLIENT_ID
   }
 }
 

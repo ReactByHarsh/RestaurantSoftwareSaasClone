@@ -8,7 +8,8 @@ dist-ssr
 # Tauri / Rust
 apps/web/src-tauri/target
 apps/web/src-tauri/gen
-apps/web/src-tauri/icons
+apps/web/src-tauri/icons/*
+!apps/web/src-tauri/icons/icon.ico
 
 # Cargo lock (for libraries/apps, keep Cargo.lock; but target is already ignored)
 
@@ -24,6 +25,7 @@ worker-configuration.d.ts
 apps/worker/out_*.json
 
 # Sensitive / debug files
+backups/
 cookiejar.txt
 headers.txt
 response.json
@@ -40,6 +42,7 @@ lerna-debug.log*
 .vscode/*
 !.vscode/extensions.json
 .idea
+.commandcode/
 .DS_Store
 *.suo
 *.ntvs*

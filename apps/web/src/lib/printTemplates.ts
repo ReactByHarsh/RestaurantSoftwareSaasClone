@@ -14,6 +14,7 @@ type ReceiptPrintInfo = {
   showGstinOnSecondBill?: boolean
   showKotToken: boolean
   showTaxInvoiceLabel?: boolean
+  showBillPartLabel?: boolean
   upiId?: string
   showUpiQrOnBill?: boolean
   showUpiIdOnBill?: boolean
@@ -36,6 +37,8 @@ export interface ReceiptPrintPart {
   foodNetPaise?: number
   previousPartsNetPaise?: number
   combinedNetPaise?: number
+  /** Amount encoded in the UPI QR, which may be only one part of a split payment. */
+  upiAmountPaise?: number
   showPaymentDetails: boolean
   showGstin: boolean
   documentLabel: string
@@ -49,6 +52,29 @@ const widths = { '58mm': 30, '72mm': 38, '80mm': 46 } as const
 function center(value: string, width: number) {
   const text = value.slice(0, width)
   return `${' '.repeat(Math.max(0, Math.floor((width - text.length) / 2)))}${text}`
+}
+
+function wrappedCentered(value: string, width: number) {
+  const words = value.trim().split(/\s+/).filter(Boolean)
+  if (!words.length) return []
+  const lines: string[] = []
+  let line = ''
+  words.forEach((word) => {
+    // Keep unusually long address tokens printable without overflowing the paper.
+    const chunks = word.match(new RegExp(`.{1,${Math.max(1, width)}}`, 'g')) ?? [word]
+    chunks.forEach((chunk) => {
+      if (!line) {
+        line = chunk
+      } else if (line.length + 1 + chunk.length <= width) {
+        line += ` ${chunk}`
+      } else {
+        lines.push(center(line, width))
+        line = chunk
+      }
+    })
+  })
+  if (line) lines.push(center(line, width))
+  return lines
 }
 
 function rule(width: number, char = '-') {
@@ -99,6 +125,20 @@ function paymentSummaryLines(order: Order, payments: Payment[], width: number) {
       .map(([method, amount]) => columns(method.toUpperCase(), money(amount), width)),
     columns('Pending', money(pendingPaise), width),
   ]
+}
+
+function receiptUpiAmountPaise(order: Order, payments: Payment[]) {
+  const successfulPayments = payments.filter((payment) => payment.status === 'success')
+  // Once a bill has been settled, encode only the amount actually assigned to UPI.
+  // This prevents a cash + UPI split from generating a QR for the full bill again.
+  if (successfulPayments.length > 0) {
+    return successfulPayments
+      .filter((payment) => payment.method === 'upi')
+      .reduce((sum, payment) => sum + payment.amountPaise, 0)
+  }
+  // Draft/proforma receipts have no payment rows yet, so the full payable amount is
+  // the amount the customer should be invited to pay by UPI.
+  return Math.max(0, order.totalPaise)
 }
 
 function upiPaymentLines(order: Order, settings: ReceiptPrintInfo, amountPaise: number, width: number) {
@@ -211,23 +251,30 @@ function partTotals(items: OrderItem[]) {
 
 export function buildKotPrintText(kot: KOT, outlet: OutletPrintInfo, settings: ReceiptPrintInfo) {
   const width = widths[settings.receiptWidth]
-  const lines = [center('KITCHEN ORDER', width), center(outlet.name, width)]
-  if (settings.showKotToken) lines.push(center(kot.kotNo, width))
+  const itemCount = kot.items.reduce((sum, item) => sum + item.quantity, 0)
+  const lines = [
+    rule(width, '='),
+    center('KITCHEN ORDER TICKET', width),
+    center(outlet.name, width),
+  ]
+  if (settings.showKotToken) {
+    lines.push(center(kot.kotNo, width))
+  }
   lines.push(
-    rule(width),
+    rule(width, '='),
     columns('Order', kot.orderNo, width),
     ...(kot.tableName ? [columns('Table', kot.tableName, width)] : []),
     columns('Type', kot.orderType.replace(/_/g, ' '), width),
-    columns('Time', new Date(kot.createdAt).toLocaleTimeString('en-IN'), width),
+    columns('Time', new Date(kot.createdAt).toLocaleString('en-IN'), width),
     rule(width),
   )
   kot.items.forEach(item => {
-    lines.push(`${item.quantity} x ${item.name}`)
-    if (item.modifiers?.length) lines.push(`  + ${item.modifiers.join(', ')}`)
-    if (item.note) lines.push(`  NOTE: ${item.note}`)
-    lines.push('')
+    lines.push(`${String(item.quantity).padStart(2)} x ${item.name}`.slice(0, width))
+    if (item.modifiers?.length) lines.push(`   + ${item.modifiers.join(', ')}`.slice(0, width))
+    if (item.note) lines.push(`   NOTE: ${item.note}`.slice(0, width))
+    lines.push(rule(width, '.'))
   })
-  lines.push(rule(width), center(`Items: ${kot.items.reduce((sum, item) => sum + item.quantity, 0)}`, width))
+  lines.push(center(`TOTAL ITEMS: ${itemCount}`, width), rule(width, '='))
   return lines.join('\n')
 }
 
@@ -242,7 +289,7 @@ export function buildReceiptPrintText(
   const width = widths[settings.receiptWidth]
   const lines = [
     center(settings.businessName || outlet.name, width),
-    ...(outlet.address ? [center(outlet.address, width)] : []),
+    ...(outlet.address ? wrappedCentered(outlet.address, width) : []),
     ...(outlet.phone ? [center(`Ph: ${outlet.phone}`, width)] : []),
     ...(outlet.gstin && shouldShowGstin(settings) ? [center(`GSTIN: ${outlet.gstin}`, width)] : []),
     center(type === 'proforma' ? 'PROFORMA / ESTIMATE' : settings.headerText, width),
@@ -273,7 +320,7 @@ export function buildReceiptPrintText(
     lines.push(columns('Paid', money(order.paidPaise), width))
     payments.forEach(payment => lines.push(columns(payment.method.toUpperCase(), money(payment.amountPaise), width)))
   }
-  lines.push(...upiPaymentLines(order, settings, order.totalPaise, width))
+  lines.push(...upiPaymentLines(order, settings, receiptUpiAmountPaise(order, payments), width))
   lines.push(rule(width), center(settings.footerText, width))
   return lines.join('\n')
 }
@@ -306,10 +353,10 @@ export function buildReceiptPrintParts(
     const printItems = section.printItems
     const totals = section.totals
     const previousPartsNetPaise = partCount > 1 && partIndex === partCount ? Math.max(0, grandTotalPaise - totals.netPaise) : undefined
-    const paymentAmountPaise = previousPartsNetPaise !== undefined ? grandTotalPaise : totals.netPaise
+    const paymentAmountPaise = receiptUpiAmountPaise(order, payments)
     const lines = [
       center(settings.businessName || outlet.name, width),
-      ...(outlet.address ? [center(outlet.address, width)] : []),
+      ...(outlet.address ? wrappedCentered(outlet.address, width) : []),
       ...(outlet.phone ? [center(`Ph: ${outlet.phone}`, width)] : []),
       ...(outlet.gstin && shouldShowGstin(settings, partIndex, partCount) ? [center(`GSTIN: ${outlet.gstin}`, width)] : []),
       ...(type === 'proforma'
@@ -349,7 +396,9 @@ export function buildReceiptPrintParts(
     const upiPaymentUrl = buildReceiptUpiPaymentUrl(order, settings, paymentAmountPaise)
     if (showPaymentDetails) lines.push(...paymentSummaryLines(order, payments, width))
     lines.push(...upiPaymentLines(order, settings, paymentAmountPaise, width))
-    lines.push(rule(width), center(`BILL PART ${partIndex} OF ${partCount}`, width), center(settings.footerText || 'Thank you. Please visit again.', width))
+    lines.push(rule(width))
+    if (settings.showBillPartLabel !== false) lines.push(center(`BILL PART ${partIndex} OF ${partCount}`, width))
+    lines.push(center(settings.footerText || 'Thank you. Please visit again.', width))
 
     return {
       section: section.section,
@@ -360,6 +409,7 @@ export function buildReceiptPrintParts(
       ...totals,
       previousPartsNetPaise,
       combinedNetPaise: previousPartsNetPaise !== undefined ? grandTotalPaise : undefined,
+      upiAmountPaise: paymentAmountPaise,
       showPaymentDetails,
       showGstin: shouldShowGstin(settings, partIndex, partCount),
       documentLabel,

@@ -10,6 +10,6 @@ void main() {
 
     expect(find.text('Bhojpatra'), findsOneWidget);
     expect(find.text('LAN Restaurant'), findsOneWidget);
-    expect(find.text('Cloud Owner'), findsOneWidget);
+    expect(find.text('Cloud Live'), findsOneWidget);
   });
 }

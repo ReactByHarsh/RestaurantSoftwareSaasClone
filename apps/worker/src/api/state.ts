@@ -29,7 +29,31 @@ async function verifySecret(storedValue: string | undefined | null, candidate: s
   return stored === candidate
 }
 
+function parseDateBoundary(value: string | undefined | null, boundary: 'start' | 'end' = 'end') {
+  if (!value) return null
+  const match = value.match(/^(\d{4})-(\d{2})-(\d{2})$/)
+  if (!match) {
+    const parsed = new Date(value)
+    return Number.isNaN(parsed.getTime()) ? null : parsed.getTime()
+  }
+  return boundary === 'start'
+    ? new Date(Number(match[1]), Number(match[2]) - 1, Number(match[3]), 0, 0, 0, 0).getTime()
+    : new Date(Number(match[1]), Number(match[2]) - 1, Number(match[3]), 23, 59, 59, 999).getTime()
+}
+
+function getAccessBlockReason(row: any) {
+  const now = Date.now()
+  const startsAt = parseDateBoundary(row.access_starts_at, 'start')
+  if (startsAt !== null && startsAt > now) return 'Access not started'
+  const renewalDate = parseDateBoundary(row.renewal_date, 'end')
+  if (renewalDate !== null && renewalDate < now) return 'Renewal expired'
+  const endsAt = parseDateBoundary(row.access_ends_at, 'end')
+  if (endsAt !== null && endsAt < now) return 'Access expired'
+  return null
+}
+
 async function authMiddleware(c: any, next: any) {
+  if (c.get('user')) return next()
   if (!c.env.DB) return c.json({ error: 'Database binding not configured' }, 500)
   
   const authorization = c.req.header('Authorization') ?? c.req.raw?.headers?.get?.('Authorization')
@@ -41,15 +65,14 @@ async function authMiddleware(c: any, next: any) {
         const login = decoded.slice(0, separator).trim().toLowerCase()
         const password = decoded.slice(separator + 1)
         const row = await c.env.DB.prepare(
-          'SELECT id, tenant_id, password_hash, pin_hash, name, email, phone, role, status, access_starts_at, access_ends_at FROM users WHERE lower(email) = ? OR lower(phone) = ? LIMIT 1'
+          'SELECT id, tenant_id, password_hash, pin_hash, name, email, phone, role, status, access_starts_at, access_ends_at, renewal_date FROM users WHERE lower(email) = ? OR lower(phone) = ? LIMIT 1'
         ).bind(login, login).first()
         if (row && row.status === 'active') {
           const pwOk = await verifySecret(row.password_hash, password)
           const pinOk = await verifySecret(row.pin_hash, password)
           if (pwOk || pinOk) {
-            const now = Date.now()
-            if (row.access_starts_at && new Date(row.access_starts_at).getTime() > now) return c.json({ error: 'Access not started' }, 403)
-            if (row.access_ends_at && new Date(row.access_ends_at).getTime() < now) return c.json({ error: 'Access expired' }, 403)
+            const blocked = getAccessBlockReason(row)
+            if (blocked) return c.json({ error: blocked }, 403)
             c.set('user', row)
             return next()
           }
@@ -64,9 +87,11 @@ async function authMiddleware(c: any, next: any) {
     const userId = await verifySessionToken(sessionToken, secret)
     if (userId) {
       const row = await c.env.DB.prepare(
-        'SELECT id, tenant_id, name, email, phone, role, status FROM users WHERE id = ? LIMIT 1'
+        'SELECT id, tenant_id, name, email, phone, role, status, access_starts_at, access_ends_at, renewal_date FROM users WHERE id = ? LIMIT 1'
       ).bind(userId).first()
       if (row && row.status === 'active') {
+        const blocked = getAccessBlockReason(row)
+        if (blocked) return c.json({ error: blocked }, 403)
         c.set('user', row)
         return next()
       }
@@ -77,6 +102,25 @@ async function authMiddleware(c: any, next: any) {
 }
 
 stateRouter.use('*', authMiddleware)
+
+function toCamel(obj: Record<string, unknown> | null | undefined) {
+  if (!obj) return obj
+  const converted: Record<string, unknown> = typeof obj.metadata_json === 'string' ? JSON.parse(obj.metadata_json) : {}
+  for (const [key, value] of Object.entries(obj)) {
+    if (key === 'metadata_json') continue
+    const camelKey = key === 'modifiers_json'
+      ? 'modifiers'
+      : key.replace(/_([a-z])/g, (_match, letter: string) => letter.toUpperCase())
+    if ((key === 'modifiers' || key === 'modifiers_json') && typeof value === 'string') {
+      try { converted[camelKey] = JSON.parse(value) } catch { converted[camelKey] = value }
+    } else if (key === 'is_closed') {
+      converted[camelKey] = Boolean(value)
+    } else {
+      converted[camelKey] = value
+    }
+  }
+  return converted
+}
 
 stateRouter.get('/:outletId/initial-state', async (c) => {
   const db = c.env.DB
@@ -116,42 +160,83 @@ stateRouter.get('/:outletId/initial-state', async (c) => {
     const [
       orders, orderItems, kots, kotItems, payments
     ] = await Promise.all([
-      db.prepare('SELECT * FROM orders WHERE outlet_id = ?').bind(outletId).all(),
-      db.prepare('SELECT oi.* FROM order_items oi JOIN orders o ON oi.order_id = o.id WHERE o.outlet_id = ?').bind(outletId).all(),
-      db.prepare('SELECT k.* FROM kots k JOIN orders o ON k.order_id = o.id WHERE o.outlet_id = ?').bind(outletId).all(),
-      db.prepare('SELECT ki.* FROM kot_items ki JOIN kots k ON ki.kot_id = k.id JOIN orders o ON k.order_id = o.id WHERE o.outlet_id = ?').bind(outletId).all(),
-      db.prepare('SELECT p.* FROM payments p JOIN orders o ON p.order_id = o.id WHERE o.outlet_id = ?').bind(outletId).all(),
+      db.prepare('SELECT * FROM orders WHERE outlet_id = ? AND is_closed = 0').bind(outletId).all(),
+      db.prepare('SELECT oi.* FROM order_items oi JOIN orders o ON oi.order_id = o.id WHERE o.outlet_id = ? AND o.is_closed = 0').bind(outletId).all(),
+      db.prepare('SELECT k.* FROM kots k JOIN orders o ON k.order_id = o.id WHERE o.outlet_id = ? AND o.is_closed = 0').bind(outletId).all(),
+      db.prepare('SELECT ki.* FROM kot_items ki JOIN kots k ON ki.kot_id = k.id JOIN orders o ON k.order_id = o.id WHERE o.outlet_id = ? AND o.is_closed = 0').bind(outletId).all(),
+      db.prepare('SELECT p.* FROM payments p JOIN orders o ON p.order_id = o.id WHERE o.outlet_id = ? AND o.is_closed = 0').bind(outletId).all(),
     ])
-
-    // Convert snake_case DB rows back to camelCase frontend objects
-    const toCamel = (obj: any) => {
-      if (!obj) return obj
-      const newObj: any = {}
-      for (const key in obj) {
-        const camelKey = key === 'modifiers_json'
-          ? 'modifiers'
-          : key.replace(/_([a-z])/g, (g) => g[1].toUpperCase())
-        if ((key === 'modifiers' || key === 'modifiers_json') && obj[key]) {
-          try { newObj[camelKey] = JSON.parse(obj[key]) } catch { newObj[camelKey] = obj[key] }
-        } else {
-          newObj[camelKey] = obj[key]
-        }
-      }
-      return newObj
-    }
 
     const snapshot = {
       ...baseSnapshot,
+      snapshotKind: 'operational',
+      snapshotSchemaVersion: 3,
       orders: orders.results.map(toCamel),
       orderItems: orderItems.results.map(toCamel),
       kots: kots.results.map(toCamel).map((k: any) => ({
         ...k,
-        items: kotItems.results.filter((ki: any) => ki.kot_id === k.id).map(toCamel)
+        items: [...kotItems.results.filter((ki: any) => ki.kot_id === k.id).map(toCamel), ...(k.orphanedItems ?? [])]
       })),
       payments: payments.results.map(toCamel)
     }
 
     return c.json({ exists: true, payload: snapshot, updatedAt: row?.updated_at || new Date().toISOString() })
+  } catch (error) {
+    return c.json({ error: error instanceof Error ? error.message : 'DB error' }, 500)
+  }
+})
+
+stateRouter.get('/:outletId/history', async (c) => {
+  const db = c.env.DB
+  if (!db) return c.json({ error: 'DB not configured' }, 500)
+  const outletId = c.req.param('outletId')
+  const user = (c as any).get('user')
+  if (user && user.tenant_id !== 'platform' && outletId !== `out_${user.tenant_id}`) {
+    return c.json({ error: 'Forbidden' }, 403)
+  }
+  const cursor = Math.max(0, Number.parseInt(c.req.query('cursor') ?? '0', 10) || 0)
+  const limit = Math.min(200, Math.max(1, Number.parseInt(c.req.query('limit') ?? '100', 10) || 100))
+  try {
+    const ordersPage = await db.prepare(`
+      SELECT rowid AS history_cursor, * FROM orders
+      WHERE outlet_id = ? AND is_closed = 1 AND rowid > ?
+      ORDER BY rowid ASC
+      LIMIT ?
+    `).bind(outletId, cursor, limit + 1).all<Record<string, unknown> & { history_cursor: number; id: string }>()
+    const hasMore = ordersPage.results.length > limit
+    const selectedOrders = ordersPage.results.slice(0, limit)
+    const orderIds = selectedOrders.map((order) => order.id)
+    if (orderIds.length === 0) {
+      return c.json({ ok: true, outletId, orders: [], orderItems: [], kots: [], payments: [], cursor, hasMore: false })
+    }
+    const orderIdsJson = JSON.stringify(orderIds)
+    const [orderItems, kots, kotItems, payments] = await Promise.all([
+      db.prepare('SELECT * FROM order_items WHERE outlet_id = ? AND order_id IN (SELECT value FROM json_each(?))')
+        .bind(outletId, orderIdsJson).all<Record<string, unknown>>(),
+      db.prepare('SELECT * FROM kots WHERE outlet_id = ? AND order_id IN (SELECT value FROM json_each(?))')
+        .bind(outletId, orderIdsJson).all<Record<string, unknown> & { id: string }>(),
+      db.prepare(`
+        SELECT ki.* FROM kot_items ki
+        JOIN kots k ON k.id = ki.kot_id
+        WHERE ki.outlet_id = ? AND k.order_id IN (SELECT value FROM json_each(?))
+      `).bind(outletId, orderIdsJson).all<Record<string, unknown> & { kot_id: string }>(),
+      db.prepare('SELECT * FROM payments WHERE outlet_id = ? AND order_id IN (SELECT value FROM json_each(?))')
+        .bind(outletId, orderIdsJson).all<Record<string, unknown>>(),
+    ])
+    const nextCursor = selectedOrders.at(-1)?.history_cursor ?? cursor
+    return c.json({
+      ok: true,
+      outletId,
+      orders: selectedOrders.map(({ history_cursor: _cursor, ...order }) => toCamel(order)),
+      orderItems: orderItems.results.map(toCamel),
+      kots: kots.results.map((kot) => ({
+        ...toCamel(kot),
+        items: [...kotItems.results.filter((item) => item.kot_id === kot.id).map(toCamel), ...((toCamel(kot)?.orphanedItems as unknown[]) ?? [])],
+      })),
+      payments: payments.results.map(toCamel),
+      cursor: nextCursor,
+      hasMore,
+    })
   } catch (error) {
     return c.json({ error: error instanceof Error ? error.message : 'DB error' }, 500)
   }

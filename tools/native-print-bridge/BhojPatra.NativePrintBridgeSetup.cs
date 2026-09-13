@@ -3,18 +3,29 @@ using System.Diagnostics;
 using System.IO;
 using System.Net;
 using System.Reflection;
+using System.Security;
+using System.Security.Principal;
 using System.Text;
 using System.Threading;
 using System.Windows.Forms;
+using Microsoft.Win32;
+
+[assembly: AssemblyTitle("BhojPatra Native Print Bridge Setup")]
+[assembly: AssemblyDescription("BhojPatra local printing and restaurant LAN bridge installer")]
+[assembly: AssemblyCompany("BhojPatra")]
+[assembly: AssemblyProduct("BhojPatra Desk")]
+[assembly: AssemblyVersion("0.1.19.0")]
+[assembly: AssemblyFileVersion("0.1.19.0")]
 
 namespace BhojPatra.NativePrintBridgeSetup
 {
     internal static class Program
     {
-        private const string AppName = "BhojPatra Native Print Bridge";
+        private const string AppName = "BhojPatra All-in-One Bridge";
         private const string BridgeResourceName = "BhojPatra.NativePrintBridge.exe";
         private const string BridgeExeName = "bhojpatra-native-bridge.exe";
         private const string TaskName = "BhojPatra Native Print Bridge";
+        private const string RunValueName = "BhojPatra Printer Bridge";
         private const string BridgeUrl = "http://127.0.0.1:8181";
 
         [STAThread]
@@ -34,13 +45,30 @@ namespace BhojPatra.NativePrintBridgeSetup
 
                 var bridgePath = Path.Combine(installDir, BridgeExeName);
                 WriteEmbeddedBridge(bridgePath);
+                CopyRepairSetup(installDir);
                 WriteReadme(installDir);
                 WriteUninstaller(installDir);
-                CreateStartupFallback(bridgePath);
-                TryCreateScheduledTask(bridgePath);
+                var scheduledTaskInstalled = false;
+                try
+                {
+                    CreateResilientScheduledTask(bridgePath);
+                    scheduledTaskInstalled = true;
+                    DeleteRunFallback();
+                }
+                catch (Exception taskError)
+                {
+                    File.AppendAllText(
+                        Path.Combine(installDir, "native-print-bridge-setup.log"),
+                        DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss") + " Scheduled task fallback: " + taskError.Message + Environment.NewLine,
+                        Encoding.UTF8);
+                    // Use one fallback only. Starting from Task Scheduler, Registry Run and the
+                    // Startup folder at the same time caused duplicate processes and restart loops.
+                    RegisterRunFallback(bridgePath);
+                }
                 CreateStartMenuShortcuts(installDir, bridgePath);
+                EnsureLanFirewallRules();
 
-                StartBridge(bridgePath);
+                StartBridge(bridgePath, scheduledTaskInstalled);
                 var health = WaitForHealth();
 
                 if (!quiet)
@@ -50,7 +78,8 @@ namespace BhojPatra.NativePrintBridgeSetup
                         AppName + " installed successfully.\r\n\r\n" +
                         "Bridge URL: " + BridgeUrl + "\r\n" +
                         "Health: " + health + "\r\n\r\n" +
-                        "Now select USB / LAN / Bluetooth in BhojPatra printing settings.",
+                        "Offline LAN server: port 3000 (discovery 3001)\r\n\r\n" +
+                        "Printing and captain/kitchen Wi-Fi connectivity will now start automatically with Windows.",
                         AppName,
                         MessageBoxButtons.OK,
                         MessageBoxIcon.Information);
@@ -100,6 +129,16 @@ namespace BhojPatra.NativePrintBridgeSetup
             }
         }
 
+        private static void CopyRepairSetup(string installDir)
+        {
+            var currentSetup = Assembly.GetExecutingAssembly().Location;
+            var repairSetup = Path.Combine(installDir, "BhojPatra-Printer-Bridge-Setup.exe");
+            if (!String.Equals(currentSetup, repairSetup, StringComparison.OrdinalIgnoreCase))
+            {
+                File.Copy(currentSetup, repairSetup, true);
+            }
+        }
+
         private static void StopOldBridgeProcesses()
         {
             var currentId = Process.GetCurrentProcess().Id;
@@ -129,9 +168,67 @@ namespace BhojPatra.NativePrintBridgeSetup
             RunHidden("schtasks.exe", "/Delete /TN \"" + taskName + "\" /F", true);
         }
 
-        private static void TryCreateScheduledTask(string bridgePath)
+        private static void CreateResilientScheduledTask(string bridgePath)
         {
-            RunHidden("schtasks.exe", "/Create /SC ONLOGON /TN \"" + TaskName + "\" /TR \"\\\"" + bridgePath + "\\\"\" /F", true);
+            var sid = WindowsIdentity.GetCurrent().User.Value;
+            var taskXmlPath = Path.Combine(Path.GetTempPath(), "bhojpatra-print-bridge-task-" + Guid.NewGuid().ToString("N") + ".xml");
+            var command = SecurityElement.Escape(bridgePath);
+            var workingDirectory = SecurityElement.Escape(Path.GetDirectoryName(bridgePath));
+            var userId = SecurityElement.Escape(sid);
+            var xml =
+                "<?xml version=\"1.0\" encoding=\"UTF-16\"?>\r\n" +
+                "<Task version=\"1.4\" xmlns=\"http://schemas.microsoft.com/windows/2004/02/mit/task\">\r\n" +
+                "  <RegistrationInfo><Description>Keeps the BhojPatra local printer bridge available after every Windows sign-in.</Description></RegistrationInfo>\r\n" +
+                "  <Triggers><LogonTrigger><Enabled>true</Enabled><Delay>PT10S</Delay><UserId>" + userId + "</UserId></LogonTrigger></Triggers>\r\n" +
+                "  <Principals><Principal id=\"Author\"><UserId>" + userId + "</UserId><LogonType>InteractiveToken</LogonType><RunLevel>LeastPrivilege</RunLevel></Principal></Principals>\r\n" +
+                "  <Settings>\r\n" +
+                "    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy><DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>\r\n" +
+                "    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries><AllowHardTerminate>true</AllowHardTerminate><StartWhenAvailable>true</StartWhenAvailable>\r\n" +
+                "    <RunOnlyIfNetworkAvailable>false</RunOnlyIfNetworkAvailable><AllowStartOnDemand>true</AllowStartOnDemand><Enabled>true</Enabled>\r\n" +
+                "    <Hidden>false</Hidden><RunOnlyIfIdle>false</RunOnlyIfIdle><WakeToRun>false</WakeToRun><ExecutionTimeLimit>PT0S</ExecutionTimeLimit>\r\n" +
+                "    <RestartOnFailure><Interval>PT1M</Interval><Count>999</Count></RestartOnFailure><Priority>7</Priority>\r\n" +
+                "  </Settings>\r\n" +
+                "  <Actions Context=\"Author\"><Exec><Command>" + command + "</Command><WorkingDirectory>" + workingDirectory + "</WorkingDirectory></Exec></Actions>\r\n" +
+                "</Task>\r\n";
+
+            try
+            {
+                File.WriteAllText(taskXmlPath, xml, Encoding.Unicode);
+                var exitCode = RunHidden("schtasks.exe", "/Create /TN \"" + TaskName + "\" /XML \"" + taskXmlPath + "\" /F", false);
+                if (exitCode != 0) throw new InvalidOperationException("Windows Task Scheduler returned exit code " + exitCode + ".");
+                exitCode = RunHidden("schtasks.exe", "/Query /TN \"" + TaskName + "\"", false);
+                if (exitCode != 0) throw new InvalidOperationException("The printer bridge startup task could not be verified.");
+            }
+            finally
+            {
+                DeleteFile(taskXmlPath);
+            }
+        }
+
+        private static void RegisterRunFallback(string bridgePath)
+        {
+            using (var key = Registry.CurrentUser.CreateSubKey(@"Software\Microsoft\Windows\CurrentVersion\Run"))
+            {
+                if (key == null) throw new InvalidOperationException("Could not register the printer bridge for Windows sign-in.");
+                key.DeleteValue("BhojPatra", false);
+                key.DeleteValue("BhojPatra Print Bridge", false);
+                key.DeleteValue("BhojPatra Native Print Bridge", false);
+                key.SetValue(RunValueName, "\"" + bridgePath + "\"", RegistryValueKind.String);
+            }
+        }
+
+        private static void DeleteRunFallback()
+        {
+            using (var key = Registry.CurrentUser.OpenSubKey(@"Software\Microsoft\Windows\CurrentVersion\Run", true))
+            {
+                if (key != null)
+                {
+                    key.DeleteValue("BhojPatra", false);
+                    key.DeleteValue("BhojPatra Print Bridge", false);
+                    key.DeleteValue("BhojPatra Native Print Bridge", false);
+                    key.DeleteValue(RunValueName, false);
+                }
+            }
         }
 
         private static void DeleteOldStartupFiles()
@@ -167,20 +264,34 @@ namespace BhojPatra.NativePrintBridgeSetup
                 "@echo off\r\nstart \"\" \"" + bridgePath + "\"\r\n",
                 Encoding.ASCII);
             File.WriteAllText(
+                Path.Combine(menuDir, "Repair Printer Bridge.cmd"),
+                "@echo off\r\nstart \"\" \"" + Path.Combine(installDir, "BhojPatra-Printer-Bridge-Setup.exe") + "\"\r\n",
+                Encoding.ASCII);
+            File.WriteAllText(
                 Path.Combine(menuDir, "Uninstall Native Print Bridge.cmd"),
                 "@echo off\r\ncall \"" + Path.Combine(installDir, "Uninstall-BhojPatra-Native-Print-Bridge.cmd") + "\"\r\n",
                 Encoding.ASCII);
+        }
+
+        private static void EnsureLanFirewallRules()
+        {
+            RunHidden("netsh.exe", "advfirewall firewall delete rule name=\"BhojPatra Offline LAN TCP\"", true);
+            RunHidden("netsh.exe", "advfirewall firewall delete rule name=\"BhojPatra Offline Discovery UDP\"", true);
+            var tcp = RunHidden("netsh.exe", "advfirewall firewall add rule name=\"BhojPatra Offline LAN TCP\" dir=in action=allow protocol=TCP localport=3000 profile=any", false);
+            var udp = RunHidden("netsh.exe", "advfirewall firewall add rule name=\"BhojPatra Offline Discovery UDP\" dir=in action=allow protocol=UDP localport=3001 profile=any", false);
+            if (tcp != 0 || udp != 0) throw new InvalidOperationException("Windows Firewall rules for phone connectivity could not be installed.");
         }
 
         private static void WriteReadme(string installDir)
         {
             File.WriteAllText(
                 Path.Combine(installDir, "README-BhojPatra-Native-Print-Bridge.txt"),
-                "BhojPatra Native Print Bridge\r\n" +
-                "=============================\r\n\r\n" +
+                "BhojPatra All-in-One Bridge\r\n" +
+                "============================\r\n\r\n" +
                 "Bridge URL: " + BridgeUrl + "\r\n" +
                 "Health: " + BridgeUrl + "/health\r\n" +
                 "Diagnostics: " + BridgeUrl + "/diagnostics\r\n\r\n" +
+                "Phone LAN API: port 3000\r\nDiscovery: UDP port 3001\r\n\r\n" +
                 "In BhojPatra Cloud, choose Settings > Printing & Receipt > USB / LAN / Bluetooth.\r\n" +
                 "Do not use Chrome USB for Windows-installed POS80 printers.\r\n",
                 Encoding.UTF8);
@@ -196,18 +307,26 @@ namespace BhojPatra.NativePrintBridgeSetup
                 uninstallPath,
                 "@echo off\r\n" +
                 "schtasks /Delete /TN \"BhojPatra Native Print Bridge\" /F >nul 2>nul\r\n" +
+                "reg delete \"HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run\" /v \"BhojPatra Printer Bridge\" /f >nul 2>nul\r\n" +
                 "taskkill /IM bhojpatra-native-bridge.exe /F >nul 2>nul\r\n" +
                 "del \"" + Path.Combine(startup, "BhojPatra Native Print Bridge.vbs") + "\" /f /q >nul 2>nul\r\n" +
                 "rmdir \"" + menuDir + "\" /s /q >nul 2>nul\r\n" +
                 "del \"" + Path.Combine(installDir, BridgeExeName) + "\" /f /q >nul 2>nul\r\n" +
                 "del \"" + Path.Combine(installDir, "README-BhojPatra-Native-Print-Bridge.txt") + "\" /f /q >nul 2>nul\r\n" +
+                "del \"" + Path.Combine(installDir, "BhojPatra-Printer-Bridge-Setup.exe") + "\" /f /q >nul 2>nul\r\n" +
                 "echo BhojPatra Native Print Bridge removed.\r\n" +
                 "pause\r\n",
                 Encoding.ASCII);
         }
 
-        private static void StartBridge(string bridgePath)
+        private static void StartBridge(string bridgePath, bool scheduledTaskInstalled)
         {
+            if (scheduledTaskInstalled)
+            {
+                var taskStart = RunHidden("schtasks.exe", "/Run /TN \"" + TaskName + "\"", true);
+                if (taskStart == 0) return;
+            }
+
             Process.Start(new ProcessStartInfo
             {
                 FileName = bridgePath,
@@ -238,7 +357,7 @@ namespace BhojPatra.NativePrintBridgeSetup
             throw new InvalidOperationException("The bridge was installed but did not respond at " + BridgeUrl + "/health.", last);
         }
 
-        private static void RunHidden(string fileName, string arguments, bool ignoreErrors)
+        private static int RunHidden(string fileName, string arguments, bool ignoreErrors)
         {
             try
             {
@@ -250,11 +369,14 @@ namespace BhojPatra.NativePrintBridgeSetup
                     CreateNoWindow = true,
                     WindowStyle = ProcessWindowStyle.Hidden
                 });
-                if (process != null) process.WaitForExit(15000);
+                if (process == null) return -1;
+                process.WaitForExit(15000);
+                return process.HasExited ? process.ExitCode : -1;
             }
             catch
             {
                 if (!ignoreErrors) throw;
+                return -1;
             }
         }
 

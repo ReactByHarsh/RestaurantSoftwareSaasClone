@@ -1,12 +1,13 @@
 import { useEffect, useState, useRef } from 'react'
 import {
-  Users, Clock, PlayCircle, ReceiptText, Printer, CheckCircle,
+  Users, PlayCircle, ReceiptText, Printer, CheckCircle,
   HandPlatter, Pencil, ArrowRightLeft, GitMerge, MoreVertical, LayoutGrid, X
 } from 'lucide-react'
 import type { RestaurantTable, Order } from '../../lib/types'
 import { clsx } from 'clsx'
 import { useBillingStore } from '../../store/billingStore'
 import { useNavigate } from 'react-router-dom'
+import { calculateTax, formatPaise, formatPaiseShort } from '../../lib/money'
 
 interface Props {
   table: RestaurantTable
@@ -47,7 +48,7 @@ function formatElapsed(ms: number) {
 
 export default function TableCard({ table, activeOrder, compact = false, canManage = false, floorColor, floorBadge, floorName, onEdit, onTransfer, onMerge, onShare, onRemove, onClick }: Props) {
   const navigate = useNavigate()
-  const { selectTable, updateTableStatus } = useBillingStore()
+  const { selectTable, updateTableStatus, savedCarts } = useBillingStore()
   const config = STATUS_CONFIG[table.status] || STATUS_CONFIG.available
   const [now, setNow] = useState(Date.now())
   const [showPopover, setShowPopover] = useState(false)
@@ -72,6 +73,14 @@ export default function TableCard({ table, activeOrder, compact = false, canMana
   const orderStartedAt = activeOrder ? new Date(activeOrder.createdAt) : null
   const elapsedLabel = orderStartedAt ? formatElapsed(now - orderStartedAt.getTime()) : '0m 00s'
   const orderTimeLabel = orderStartedAt?.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' })
+  const pendingTotalPaise = (savedCarts[table.id] ?? []).reduce((sum, item) => {
+    const subtotal = item.unitPricePaise * item.quantity
+    const discount = item.discountPaise ?? 0
+    const taxableAmount = Math.max(0, subtotal - discount)
+    const tax = item.taxType === 'None' ? 0 : calculateTax(taxableAmount, item.taxPercent)
+    return sum + taxableAmount + tax
+  }, 0)
+  const visibleOrderTotalPaise = (activeOrder?.totalPaise ?? 0) + pendingTotalPaise
 
   const handleBodyClick = (e: React.MouseEvent) => {
     e.stopPropagation()
@@ -152,9 +161,9 @@ export default function TableCard({ table, activeOrder, compact = false, canMana
       role="button"
       tabIndex={0}
       className={clsx(
-        'group relative flex flex-col border-2 text-left transition-all hover:-translate-y-0.5 hover:shadow-lg cursor-pointer',
+        'group relative min-w-0 flex flex-col overflow-visible border-2 text-left transition-all hover:-translate-y-0.5 hover:shadow-lg cursor-pointer',
         showPopover ? 'z-50' : 'z-0 hover:z-40',
-        compact ? 'rounded-md min-h-[68px]' : 'rounded-xl min-h-[124px]',
+        compact ? 'h-[96px] rounded-md' : 'h-[160px] rounded-xl',
         floorColor || config.border, config.bg
       )}
     >
@@ -163,7 +172,7 @@ export default function TableCard({ table, activeOrder, compact = false, canMana
         onClick={handleHeaderClick}
         className={clsx(
           'flex items-center justify-between w-full z-10 border-b hover:opacity-90 transition-opacity',
-          compact ? 'rounded-t-md px-1.5 py-1' : 'rounded-t-xl px-2.5 py-1.5',
+          compact ? 'rounded-t-md px-1.5 py-0.5' : 'rounded-t-xl px-2.5 py-1.5',
           table.status === 'available' ? "bg-slate-50 border-slate-200" : "bg-white border-black/10"
         )}
       >
@@ -224,55 +233,46 @@ export default function TableCard({ table, activeOrder, compact = false, canMana
       )}
 
       {/* Card Body */}
-      <div className={clsx('flex-1 flex flex-col', compact ? 'px-1.5 py-1' : 'p-2.5 pt-1.5')}>
-        <div className={clsx('flex flex-wrap z-0 mb-auto', compact ? 'gap-1' : 'gap-1.5')}>
+      <div className={clsx('flex-1 flex flex-col', compact ? 'px-1.5 py-0.5' : 'p-2.5 pt-1.5')}>
+        <div className={clsx('min-w-0 z-0', compact ? 'space-y-0' : 'space-y-1')}>
           {floorName && floorBadge && (
-            <span className={clsx('inline-flex items-center rounded border font-black uppercase', compact ? 'px-1 py-0 text-[7px]' : 'px-1.5 py-0.5 text-[9px] tracking-wider', floorBadge)}>
-              {floorName}
-            </span>
+            <div>
+              <span title={floorName} className={clsx('inline-flex max-w-full items-center truncate rounded border font-black uppercase', compact ? 'px-1 py-0 text-[7px]' : 'px-1.5 py-0.5 text-[8px] tracking-wide', floorBadge)}>
+                {floorName}
+              </span>
+            </div>
           )}
-          <span className={clsx('inline-flex items-center rounded border font-black uppercase', compact ? 'px-1 py-0 text-[7px]' : 'px-1.5 py-0.5 text-[9px] tracking-wider', config.pill)}>
-            {table.status.replace(/_/g, ' ')}
-          </span>
-          {activeOrder && (
-            <span className={clsx('inline-flex items-center rounded border border-white/70 bg-white/70 font-black text-slate-600', compact ? 'px-1 py-0 text-[7px]' : 'px-1.5 py-0.5 text-[9px]')}>
-              {activeOrder.orderNo}
+          <div className="flex min-w-0 items-center gap-1">
+            <span title={table.status.replace(/_/g, ' ')} className={clsx('inline-flex min-w-0 shrink-0 items-center truncate rounded border font-black uppercase', compact ? 'px-1 py-0 text-[7px]' : 'px-1 py-0.5 text-[8px] tracking-wide', config.pill)}>
+              {table.status.replace(/_/g, ' ')}
             </span>
-          )}
+            {activeOrder && (
+              <span title={activeOrder.orderNo} className={clsx('inline-flex min-w-0 items-center truncate rounded border border-white/70 bg-white/70 font-black text-slate-600', compact ? 'px-1 py-0 text-[7px]' : 'px-1 py-0.5 text-[8px]')}>
+                {activeOrder.orderNo}
+              </span>
+            )}
+          </div>
         </div>
 
-        {activeOrder && !compact && (
-          <div className="mt-2 grid grid-cols-2 gap-1.5 z-0">
-            <div className="rounded-lg bg-white/70 border border-white/70 px-2 py-1.5">
-              <p className="text-[8px] font-black uppercase tracking-widest text-slate-400">Order Time</p>
-              <p className={clsx('text-xs font-black mt-0.5', config.text)}>{orderTimeLabel}</p>
-            </div>
-            <div className="rounded-lg bg-white/70 border border-white/70 px-2 py-1.5">
-              <p className="text-[8px] font-black uppercase tracking-widest text-slate-400">Waiting</p>
-              <p className={clsx('text-xs font-black mt-0.5', config.text)}>{elapsedLabel}</p>
-            </div>
+        {activeOrder && (
+          <div className={clsx('mt-0.5 min-w-0 space-y-0 leading-[9px]', compact ? 'text-[7px]' : 'text-[10px] leading-normal')}>
+            <p className={clsx('whitespace-nowrap font-black', config.text)} title={`Order time ${orderTimeLabel}`}>
+              Time: {orderTimeLabel}
+            </p>
+            <p className={clsx('whitespace-nowrap font-black', config.text)} title={`Waiting ${elapsedLabel}`}>
+              Waiting: {elapsedLabel}
+            </p>
+            <p className={clsx('whitespace-nowrap font-black', config.text)} title={`Order total ${formatPaise(visibleOrderTotalPaise)}`}>
+              Total: {compact ? formatPaiseShort(visibleOrderTotalPaise) : formatPaise(visibleOrderTotalPaise)}
+            </p>
           </div>
         )}
 
-        <div className={clsx('flex items-end justify-between w-full z-0', compact ? 'mt-1' : 'mt-2')}>
-          <div className="space-y-0.5 min-w-0">
-            {activeOrder && (
-              <div className="flex flex-col gap-0.5">
-                <div className={clsx('flex items-center gap-0.5 font-semibold opacity-80', compact ? 'text-[8px]' : 'text-[11px]', config.text)}>
-                  <Clock size={compact ? 8 : 11} />
-                  <span>{compact ? elapsedLabel : 'Active'}</span>
-                  {!compact && <span className="ml-1 px-1.5 py-0.5 bg-white/50 rounded-md text-[10px] border border-white/40">{activeOrder.orderNo}</span>}
-                </div>
-                {(activeOrder.captainName || activeOrder.cashierName) && (
-                  <div className={clsx('font-black uppercase opacity-90 truncate', compact ? 'text-[7px] max-w-[58px]' : 'text-[9px] max-w-[90px]', config.text)}>
-                    By {activeOrder.captainName || activeOrder.cashierName}
-                  </div>
-                )}
-              </div>
-            )}
+        {!activeOrder && (
+          <div className={clsx('flex items-end justify-end w-full z-0 mt-auto', compact ? 'text-[8px]' : 'text-[9px]')}>
+            <span className={clsx('font-black shrink-0', config.text)}>{config.action}</span>
           </div>
-          <span className={clsx('font-black shrink-0', compact ? 'text-[8px]' : 'text-[9px]', config.text)}>{config.action}</span>
-        </div>
+        )}
       </div>
     </div>
   )

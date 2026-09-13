@@ -7,7 +7,7 @@
     "dev": "node scripts/dev-tauri.mjs",
     "web:dev": "corepack pnpm --filter web dev:open",
     "build": "corepack pnpm --filter web build",
-    "deploy:web": "corepack pnpm --filter worker exec wrangler pages deploy ../web/dist --project-name bhojpatra-web --branch main --commit-dirty=true",
+    "deploy:web": "node -e \"console.error('Cloudflare Pages deployment is disabled. Ship the Tauri desktop installer instead.'); process.exit(1)\"",
     "preview": "corepack pnpm --filter web preview",
     "desktop:dev": "node scripts/dev-tauri.mjs",
     "desktop:build": "corepack pnpm --filter web tauri:build",

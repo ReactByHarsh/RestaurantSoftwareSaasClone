@@ -2,6 +2,8 @@ $ErrorActionPreference = "Stop"
 
 $root = Split-Path -Parent $PSScriptRoot
 $source = Join-Path $root "tools\native-print-bridge\BhojPatra.NativePrintBridge.cs"
+$manifest = Join-Path $root "tools\native-print-bridge\bridge.manifest"
+$icon = Join-Path $root "release\assets\bhojpatra.ico"
 $releaseDir = Join-Path $root "release"
 $out = Join-Path $releaseDir "bhojpatra-native-bridge.exe"
 
@@ -23,6 +25,8 @@ New-Item -ItemType Directory -Path $releaseDir -Force | Out-Null
   /target:winexe `
   /optimize+ `
   /platform:anycpu `
+  /win32manifest:$manifest `
+  /win32icon:$icon `
   /out:$out `
   /reference:System.dll `
   /reference:System.Core.dll `
@@ -35,5 +39,7 @@ New-Item -ItemType Directory -Path $releaseDir -Force | Out-Null
 if ($LASTEXITCODE -ne 0) {
   throw "Native print bridge compilation failed with exit code $LASTEXITCODE."
 }
+
+& (Join-Path $root "tools\sign-windows-artifacts.ps1") -Path $out
 
 Write-Host "Built $out"

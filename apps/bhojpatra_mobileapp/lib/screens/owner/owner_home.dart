@@ -1,12 +1,23 @@
 import 'package:flutter/material.dart';
 import 'overview_tab.dart';
 import 'tables_tab.dart';
+import '../../models/session.dart';
+import '../captain/captain_workspace.dart';
+import '../kitchen/kitchen_workspace.dart';
 
 class OwnerHome extends StatefulWidget {
-  const OwnerHome({super.key, required this.snapshot, required this.onRefresh});
+  const OwnerHome({
+    super.key,
+    required this.snapshot,
+    required this.session,
+    required this.onRefresh,
+    required this.onSave,
+  });
 
   final Map<String, dynamic> snapshot;
+  final SavedSession session;
   final Future<void> Function() onRefresh;
+  final Future<void> Function(Map<String, dynamic>) onSave;
 
   @override
   State<OwnerHome> createState() => _OwnerHomeState();
@@ -23,6 +34,12 @@ class _OwnerHomeState extends State<OwnerHome> {
         children: [
           OverviewTab(snapshot: widget.snapshot, onRefresh: widget.onRefresh),
           TablesTab(snapshot: widget.snapshot, onRefresh: widget.onRefresh),
+          CaptainWorkspace(
+            snapshot: widget.snapshot,
+            session: widget.session,
+            onSave: widget.onSave,
+          ),
+          KitchenWorkspace(snapshot: widget.snapshot, onSave: widget.onSave),
         ],
       ),
       bottomNavigationBar: NavigationBar(
@@ -38,6 +55,16 @@ class _OwnerHomeState extends State<OwnerHome> {
             icon: Icon(Icons.table_restaurant_outlined),
             selectedIcon: Icon(Icons.table_restaurant),
             label: 'Tables',
+          ),
+          NavigationDestination(
+            icon: Icon(Icons.room_service_outlined),
+            selectedIcon: Icon(Icons.room_service),
+            label: 'Captain',
+          ),
+          NavigationDestination(
+            icon: Icon(Icons.soup_kitchen_outlined),
+            selectedIcon: Icon(Icons.soup_kitchen),
+            label: 'Kitchen',
           ),
         ],
       ),

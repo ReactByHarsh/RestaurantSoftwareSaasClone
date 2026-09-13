@@ -32,16 +32,19 @@ class SavedSession {
   };
 
   factory SavedSession.fromJson(Map<String, dynamic> json) {
+    final storedMode = text(json['mode']);
     return SavedSession(
       serverUrl: text(json['serverUrl']),
       login: text(json['login']),
       password: text(json['password']),
       outletId: text(json['outletId']),
       user: Map<String, dynamic>.from((json['user'] as Map?) ?? const {}),
-      mode: text(
-        json['mode'],
+      mode: storedMode == 'cloud_owner'
+          ? 'cloud_live'
+          : text(
+        storedMode,
         fallback: serverModeLabel(text(json['serverUrl'])) == 'CLOUD'
-            ? 'cloud_owner'
+            ? 'cloud_live'
             : 'lan',
       ),
     );

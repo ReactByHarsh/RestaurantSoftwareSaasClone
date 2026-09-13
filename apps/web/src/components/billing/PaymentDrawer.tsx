@@ -7,6 +7,7 @@ import { clsx } from 'clsx'
 
 interface Props {
   onClose: () => void
+  onSettled: () => void
 }
 
 const TENDER_QUICK_CASH = [100, 500, 1000, 2000]
@@ -31,10 +32,10 @@ const FAST_PAYMENT_MODES = [
   { id: 'account', label: 'Account', className: 'bg-amber-500 hover:bg-amber-600 text-white' },
 ]
 
-export default function PaymentDrawer({ onClose }: Props) {
+export default function PaymentDrawer({ onClose, onSettled }: Props) {
   const { user } = useAuthStore()
   const { addToast } = useUIStore()
-  const { currentOrder, orderItems, cart, getCartTotal, settlePayment } = useBillingStore()
+  const { currentOrder, orderItems, cart, outlet, getCartTotal, settlePayment } = useBillingStore()
 
   const totals = getCartTotal()
   const savedItemCount = currentOrder
@@ -47,6 +48,7 @@ export default function PaymentDrawer({ onClose }: Props) {
 
   const [payments, setPayments] = useState<{ method: string; amount: number; tender: number; returnAmt: number; ref: string }[]>([])
   const [tenderInput, setTenderInput] = useState('')
+  const [isSettling, setIsSettling] = useState(false)
 
   const totalPaid = payments.reduce((sum, p) => sum + p.amount, 0)
   const remainingPayable = Math.max(0, finalTotal - totalPaid)
@@ -81,7 +83,7 @@ export default function PaymentDrawer({ onClose }: Props) {
 
   const isPaid = remainingPayable === 0
 
-  const handleSettle = (printAfter: boolean) => {
+  const handleSettle = async (printAfter: boolean) => {
     if (!isPaid) {
       addToast('error', `Payment short by ₹${remainingPayable.toFixed(2)}`)
       return
@@ -91,16 +93,25 @@ export default function PaymentDrawer({ onClose }: Props) {
       return
     }
 
-    settlePayment(
-      currentOrder ? currentOrder.id : null,
-      payments.map(p => ({ method: p.method, amountPaise: Math.round(p.amount * 100), referenceNo: p.ref || undefined })),
-      0,
-      user.id,
-      user.name,
-      printAfter
-    )
-    addToast('success', `Bill settled! ₹${totalPaid.toFixed(2)} collected`)
-    onClose()
+    setIsSettling(true)
+    try {
+      const settled = await settlePayment(
+        currentOrder ? currentOrder.id : null,
+        payments.map(p => ({ method: p.method, amountPaise: Math.round(p.amount * 100), referenceNo: p.ref || undefined })),
+        0,
+        user.id,
+        user.name,
+        printAfter
+      )
+      if (!settled) {
+        addToast('error', 'Checkout could not be completed. Please verify the order and payment total.')
+        return
+      }
+      addToast('success', `Bill settled! ₹${totalPaid.toFixed(2)} collected`)
+      onSettled()
+    } finally {
+      setIsSettling(false)
+    }
   }
 
   return (
@@ -175,7 +186,7 @@ export default function PaymentDrawer({ onClose }: Props) {
               ))}
             </div>
             <div className="mt-4 grid grid-cols-2 sm:grid-cols-4 gap-2">
-              {FAST_PAYMENT_MODES.map(mode => (
+              {FAST_PAYMENT_MODES.filter(mode => mode.id !== 'account' || outlet.enableCreditAccounts).map(mode => (
                 <button
                   key={mode.id}
                   type="button"
@@ -250,7 +261,14 @@ export default function PaymentDrawer({ onClose }: Props) {
                           value={p.amount || ''}
                           onChange={(e) => {
                             const val = parseFloat(e.target.value) || 0;
-                            setPayments(prev => prev.map((item, i) => i === idx ? { ...item, amount: val, returnAmt: Math.max(0, item.tender - val) } : item))
+                            setPayments(prev => prev.map((item, i) => {
+                              if (i !== idx) return item
+                              // If the row was an exact-tender payment, editing its amount
+                              // means the cashier is changing the tender itself (for example
+                              // Cash remaining -> ₹500), not asking for change.
+                              const tender = item.tender === item.amount ? val : item.tender
+                              return { ...item, amount: val, tender, returnAmt: Math.max(0, tender - val) }
+                            }))
                           }}
                           className="w-full bg-slate-100 border-none rounded py-1.5 px-2 text-sm text-right font-bold text-slate-700 outline-none focus:ring-2 focus:ring-primary/50"
                         />
@@ -293,15 +311,15 @@ export default function PaymentDrawer({ onClose }: Props) {
           <div className="flex gap-3">
             <button 
               onClick={() => handleSettle(false)} 
-              disabled={!hasBillableItems || !isPaid || payments.some(p => !p.method)} 
+              disabled={isSettling || !hasBillableItems || !isPaid || payments.some(p => !p.method)}
               className="px-6 py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-700 font-black rounded-lg disabled:opacity-50 transition-colors flex items-center gap-2"
             >
               <Check size={16} />
-              CHECKOUT
+              {isSettling ? 'SAVING...' : 'CHECKOUT'}
             </button>
             <button 
               onClick={() => handleSettle(true)} 
-              disabled={!hasBillableItems || !isPaid || payments.some(p => !p.method)} 
+              disabled={isSettling || !hasBillableItems || !isPaid || payments.some(p => !p.method)}
               className="px-6 py-2.5 bg-primary hover:bg-primary-dark text-white font-black rounded-lg shadow-sm disabled:opacity-50 transition-colors flex items-center gap-2"
             >
               <Printer size={16} />

@@ -32,7 +32,11 @@ export default function ReportsScreen() {
   ].filter(d => d.value > 0)
 
   const topItems = summary.topItems
-  const recentOrders = orders.filter(order => order.paymentStatus === 'paid').slice(0, 5)
+  const recentOrders = orders.filter(order =>
+    order.paymentStatus === 'paid' &&
+    !['cancelled', 'void'].includes(order.status) &&
+    order.totalPaise > 0
+  ).slice(0, 5)
 
   return (
     <div className="h-full flex flex-col bg-[#F8FAFC] overflow-hidden">

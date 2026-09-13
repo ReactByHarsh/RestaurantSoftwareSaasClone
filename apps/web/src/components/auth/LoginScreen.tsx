@@ -2,12 +2,13 @@ import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { Loader2, ChefHat, Eye, EyeOff, BarChart3, CreditCard, LayoutGrid, ReceiptText } from 'lucide-react'
 import { useAuthStore } from '../../store/authStore'
+import { useBillingStore } from '../../store/billingStore'
 import { getDefaultRoute } from '../../lib/permissions'
 
 export default function LoginScreen() {
   const navigate = useNavigate()
   const { isAuthenticated, user, login } = useAuthStore()
-  const [email, setEmail] = useState('')
+  const [email, setEmail] = useState(() => useBillingStore.getState().cloudSync.accountLogin || '')
   const [password, setPassword] = useState('')
   const [showPass, setShowPass] = useState(false)
   const [loading, setLoading] = useState(false)
@@ -138,7 +139,7 @@ export default function LoginScreen() {
                 Captain phones and owner phones, both on one live restaurant system.
               </h1>
               <p className="mt-5 text-base font-semibold leading-7 text-white/82">
-                Captains can take orders and send KOTs over local Wi-Fi, while owners can view the latest daily cloud snapshot when they are away.
+                Captains, kitchen staff, and owners work on the same realtime restaurant data through local Wi-Fi when Desk is available, with secure live-cloud fallback when it is not.
               </p>
             </div>
           </div>

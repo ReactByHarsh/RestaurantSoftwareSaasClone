@@ -5,6 +5,7 @@ import { formatPaise } from '../../lib/money'
 import { useBillingStore } from '../../store/billingStore'
 import { useUIStore } from '../../store/uiStore'
 import type { PurchaseEntry, StockUnit } from '../../lib/types'
+import { isInventoryMenuItem, normalizeProductType } from '../../lib/productTypes'
 
 type InventoryTab = 'stock' | 'purchase' | 'purchaseReport' | 'stockReport' | 'profitReport'
 type PurchasePaymentMode = 'cash' | 'card' | 'upi'
@@ -76,6 +77,14 @@ function monthKey(value?: string) {
   return dateKey(value).slice(0, 7)
 }
 
+function inventoryProductTypeLabel(value?: string) {
+  const type = normalizeProductType(value)
+  if (type === 'sale_purchase') return 'Sales + Purchase'
+  if (type === 'purchase_only') return 'Purchase only'
+  if (type === 'kitchen_processed') return 'Kitchen processed'
+  return 'Stock item'
+}
+
 export default function InventoryScreen() {
   const { addToast } = useUIStore()
   const {
@@ -104,7 +113,7 @@ export default function InventoryScreen() {
 
   const purchaseProducts = useMemo(() => {
     return menuItems
-      .filter(item => ['sale_purchase', 'purchase_only', 'kitchen_processed'].includes(item.productType ?? 'sale_only'))
+      .filter(isInventoryMenuItem)
       .sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }))
   }, [menuItems])
 
@@ -337,48 +346,47 @@ export default function InventoryScreen() {
         </div>
       </div>
 
-      {(summary.low > 0 || summary.out > 0) && activeTab !== 'purchase' && (
-        <div className="mx-4 mt-3 bg-red-50 border border-red-200 rounded-xl p-2.5 flex items-center gap-3 flex-shrink-0 shadow-sm">
-          <AlertTriangle size={16} className="text-red-500" strokeWidth={2.5} />
-          <p className="text-xs font-bold text-red-700">{summary.out} out of stock. {summary.low} running low.</p>
-        </div>
-      )}
-
       {activeTab !== 'purchase' && (
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-3 p-4 flex-shrink-0">
-          <Stat label="Total Items" value={String(items.length)} />
-          <Stat label="Stock Value" value={formatPaise(summary.total)} tone="primary" />
-          <Stat label="Out Of Stock" value={String(summary.out)} tone="red" />
-          <Stat label="Low Stock" value={String(summary.low)} tone="amber" />
+        <div className="mx-4 mt-3 p-2 bg-white border border-slate-200 rounded-xl shadow-sm flex flex-wrap items-center gap-2 flex-shrink-0">
+          {activeTab === 'stock' && <div className="w-full sm:w-52 shrink-0"><SearchBox value={searchQuery} onChange={setSearchQuery} className="w-full" /></div>}
+          <StripStat label="Total Items" value={String(items.length)} />
+          <StripStat label="Stock Value" value={formatPaise(summary.total)} tone="primary" />
+          <StripStat label="Out Of Stock" value={String(summary.out)} tone="red" />
+          <StripStat label="Low Stock" value={String(summary.low)} tone="amber" />
+          <div className={clsx('flex min-h-12 flex-1 min-w-[220px] items-center gap-2 rounded-lg border px-3 py-1.5', summary.low > 0 || summary.out > 0 ? 'border-red-200 bg-red-50' : 'border-emerald-200 bg-emerald-50')}>
+            <AlertTriangle size={16} className={summary.low > 0 || summary.out > 0 ? 'text-red-500' : 'text-emerald-600'} strokeWidth={2.5} />
+            <p className={clsx('text-xs font-bold', summary.low > 0 || summary.out > 0 ? 'text-red-700' : 'text-emerald-700')}>
+              {summary.low > 0 || summary.out > 0 ? `${summary.out} out of stock. ${summary.low} running low.` : 'Stock levels are healthy.'}
+            </p>
+          </div>
+          {activeTab === 'stock' && <button onClick={handleSaveStockUpdate} className="flex shrink-0 items-center gap-1.5 px-4 py-2 bg-primary text-white text-xs font-black rounded-lg shadow-md shadow-primary/20 hover:bg-primary-dark"><Save size={14} /> SAVE STOCK</button>}
         </div>
       )}
 
       <div className="flex-1 px-4 pb-4 overflow-hidden">
         {activeTab === 'stock' && (
-          <Panel title="Current Stock List" subtitle="Enter actual stock only where there is a mismatch." action={<SearchBox value={searchQuery} onChange={setSearchQuery} />}>
-            <div className="flex-1 overflow-auto">
+          <div className="h-full rounded-xl border border-slate-200 overflow-hidden flex flex-col bg-white">
+            <div className="flex-1 min-h-0 overflow-auto">
               <table className="w-full text-left text-xs">
-                <thead className="bg-blue-100/70 border-b border-blue-200 sticky top-0 z-10">
-                  <tr><Th>Product Name</Th><Th>System Stock</Th><Th>Actual Stock</Th><Th>Alert Level</Th><Th>Edit Reason</Th></tr>
+                <thead className="bg-blue-100 border-b border-blue-200 sticky top-0 z-20">
+                  <tr><Th>Product Name</Th><Th>Product Type</Th><Th>System Stock</Th><Th>Actual Stock</Th><Th>Alert Level</Th><Th>Edit Reason</Th></tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100">
                   {filteredItems.map(item => (
                     <tr key={item.id} className="odd:bg-slate-50/60 hover:bg-primary-50/30">
                       <td className="px-3 py-2 font-bold text-slate-800">{item.name}</td>
+                      <td className="px-3 py-2"><span className="rounded-full border border-slate-200 bg-slate-50 px-2 py-1 text-[10px] font-black text-slate-600">{inventoryProductTypeLabel(menuItems.find(product => product.id === item.menuItemId || product.name.trim().toLowerCase() === item.name.trim().toLowerCase())?.productType)}</span></td>
                       <td className="px-3 py-2 font-black text-slate-700">{item.currentStock} <span className="text-slate-400 font-bold">{item.unit}</span></td>
                       <td className="px-3 py-1.5"><input value={actualStock[item.id] ?? ''} onChange={event => setActualStock(value => ({ ...value, [item.id]: event.target.value }))} type="number" step="0.01" min="0" placeholder="Enter" className="w-24 bg-transparent border-b border-slate-300 px-1 py-1 outline-none focus:border-primary font-bold" /></td>
                       <td className="px-3 py-1.5"><input value={alertLevels[item.id] ?? ''} onChange={event => setAlertLevels(value => ({ ...value, [item.id]: event.target.value }))} type="number" step="0.01" min="0" placeholder={String(item.minimumStock)} className="w-24 bg-transparent border-b border-slate-300 px-1 py-1 outline-none focus:border-primary font-bold" /></td>
                       <td className="px-3 py-1.5"><input value={reasons[item.id] ?? ''} onChange={event => setReasons(value => ({ ...value, [item.id]: event.target.value }))} placeholder="Enter reason" className="w-full max-w-md bg-transparent border-b border-slate-300 px-1 py-1 outline-none focus:border-primary font-bold" /></td>
                     </tr>
                   ))}
-                  {filteredItems.length === 0 && <EmptyRow colSpan={5} />}
+                  {filteredItems.length === 0 && <EmptyRow colSpan={6} />}
                 </tbody>
               </table>
             </div>
-            <div className="p-3 border-t border-slate-100 flex justify-end">
-              <button onClick={handleSaveStockUpdate} className="flex items-center gap-1.5 px-4 py-2 bg-primary text-white text-xs font-black rounded-lg shadow-md shadow-primary/20 hover:bg-primary-dark"><Save size={14} /> SAVE STOCK</button>
-            </div>
-          </Panel>
+          </div>
         )}
 
         {activeTab === 'purchase' && (
@@ -610,12 +618,17 @@ function Stat({ label, value, tone = 'slate' }: { label: string; value: string; 
   return <div className={clsx('bg-white p-2.5 rounded-xl border shadow-sm', toneClass)}><p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1">{label}</p><p className="text-lg font-black tracking-tighter">{value}</p></div>
 }
 
+function StripStat({ label, value, tone = 'slate' }: { label: string; value: string; tone?: 'slate' | 'primary' | 'red' | 'amber' }) {
+  const toneClass = { slate: 'text-slate-800', primary: 'text-primary', red: 'text-red-600', amber: 'text-amber-600' }[tone]
+  return <div className="min-w-[105px] flex-1 border-r border-slate-200 px-2.5 py-1 last:border-r-0"><p className="text-[9px] font-black text-slate-400 uppercase tracking-widest leading-none">{label}</p><p className={clsx('mt-1 text-base font-black tracking-tight leading-none', toneClass)}>{value}</p></div>
+}
+
 function Field({ label, children, className }: { label: string; children: React.ReactNode; className?: string }) {
   return <label className={className}><span className="block text-[10px] font-black text-slate-600 mb-1 uppercase tracking-wider">{label}</span>{children}</label>
 }
 
-function SearchBox({ value, onChange }: { value: string; onChange: (value: string) => void }) {
-  return <div className="flex items-center gap-2 bg-white border border-slate-200 rounded-lg px-2.5 py-1.5 shadow-sm"><Search size={14} className="text-slate-400" /><input value={value} onChange={event => onChange(event.target.value)} placeholder="Search..." className="bg-transparent outline-none text-xs font-bold text-slate-800 placeholder:text-slate-400" /></div>
+function SearchBox({ value, onChange, className }: { value: string; onChange: (value: string) => void; className?: string }) {
+  return <div className={clsx('flex items-center gap-2 bg-white border border-slate-200 rounded-lg px-2.5 py-1.5 shadow-sm', className)}><Search size={14} className="text-slate-400" /><input value={value} onChange={event => onChange(event.target.value)} placeholder="Search..." className="min-w-0 flex-1 bg-transparent outline-none text-xs font-bold text-slate-800 placeholder:text-slate-400" /></div>
 }
 
 function Pager({ page, pageCount, onPage }: { page: number; pageCount: number; onPage: (page: number) => void }) {

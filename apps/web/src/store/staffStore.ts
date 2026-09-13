@@ -36,6 +36,7 @@ interface StaffStore {
   updateStaff: (id: string, input: Partial<StaffInput>) => void
   setStaffStatus: (id: string, status: User['status']) => void
   resetStaffPassword: (id: string, password: string) => void
+  removeStaff: (id: string) => void
   replaceStaff: (staff: StaffAccount[]) => void
 }
 
@@ -52,11 +53,19 @@ function mergeSystemAccounts(staff: StaffAccount[]) {
     normalizeLogin(account.email) !== 'admin@gmail.com' &&
     !['usr_owner', 'usr_admin', 'usr_cashier', 'usr_captain_1', 'usr_captain_2'].includes(account.id)
   )
-  return localStaff.map((account) => ({
+  const normalized = localStaff.map((account) => ({
     ...account,
     tenantId: account.tenantId || LOCAL_TENANT_ID,
     createdAt: account.createdAt || new Date().toISOString(),
   }))
+  const seen = new Set<string>()
+  return normalized.filter((account) => {
+    const login = normalizeLogin(account.email) || normalizeLogin(account.phone) || account.id
+    if (seen.has(account.id) || seen.has(login)) return false
+    seen.add(account.id)
+    seen.add(login)
+    return true
+  })
 }
 
 export function toPublicUser(account: StaffAccount): User {
@@ -136,6 +145,10 @@ export const useStaffStore = create<StaffStore>()(
           staff: state.staff.map((account) => (account.id === id ? { ...account, password } : account)),
         }))
       },
+
+      removeStaff: (id) => set((state) => ({
+        staff: state.staff.filter((account) => account.id !== id),
+      })),
 
       replaceStaff: (staff) => set({ staff: mergeSystemAccounts(staff) }),
     }),

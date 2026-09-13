@@ -23,7 +23,8 @@ export default function SalesSummaryReport({ fromDate, toDate }: Props) {
       order.businessDate >= fromDate &&
       order.businessDate <= toDate &&
       order.paymentStatus === 'paid' &&
-      order.status !== 'cancelled'
+      !['cancelled', 'void'].includes(order.status) &&
+      order.totalPaise > 0
     )
     const paidOrderIds = new Set(paidOrders.map((order) => order.id))
     const orderNoById = new Map(paidOrders.map((order) => [order.id, order.orderNo]))
@@ -82,7 +83,8 @@ export default function SalesSummaryReport({ fromDate, toDate }: Props) {
       order.businessDate >= fromDate &&
       order.businessDate <= toDate &&
       order.paymentStatus === 'paid' &&
-      order.status !== 'cancelled'
+      !['cancelled', 'void'].includes(order.status) &&
+      order.totalPaise > 0
     )
     const paidOrderIds = new Set(paidOrders.map((order) => order.id))
     const categoryById = new Map(menuCategories.map((category) => [category.id, category]))

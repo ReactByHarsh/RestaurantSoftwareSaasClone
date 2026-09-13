@@ -14,7 +14,7 @@ interface Props {
 const CREDIT_PAYMENT_METHODS = new Set<PaymentMethod>(['account', 'due'])
 
 export default function AddPaymentModal({ order, onClose }: Props) {
-  const { addPayment, payments } = useBillingStore()
+  const { addPayment, payments, outlet } = useBillingStore()
   const { user } = useAuthStore()
   const { addToast } = useUIStore()
 
@@ -80,6 +80,7 @@ export default function AddPaymentModal({ order, onClose }: Props) {
               <option value="cash">Cash</option>
               <option value="card">Card</option>
               <option value="upi">UPI</option>
+              {outlet.enableCreditAccounts && <option value="account">Account / Credit</option>}
               <option value="wallet">Wallet</option>
               <option value="paytm">Paytm</option>
               <option value="cheque">Cheque</option>

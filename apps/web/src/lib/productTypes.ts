@@ -14,6 +14,11 @@ export function normalizeProductType(value?: string): ProductUsageType | undefin
   return undefined
 }
 
+export function isInventoryMenuItem(item: Pick<MenuItem, 'productType'>) {
+  const type = normalizeProductType(item.productType)
+  return type === 'sale_purchase' || type === 'purchase_only' || type === 'kitchen_processed'
+}
+
 export function isSaleableMenuItem(item: Pick<MenuItem, 'isAvailable' | 'productType'>) {
   const type = normalizeProductType(item.productType)
   return item.isAvailable && (type === 'sale_only' || type === 'sale_purchase')

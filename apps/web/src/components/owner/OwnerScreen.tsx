@@ -194,12 +194,12 @@ export default function OwnerScreen() {
     try {
       const session = await runCloudLogin(cloudSync.serverUrl, cloudSync.accountLogin, cloudSync.accountSecret)
       const tenantId = session.user.tenantId
-      const outletId = cloudSync.outletId || session.outlets[0]?.id || `out_${tenantId}`
+      const outletId = session.outlets[0]?.id || `out_${tenantId}`
       updateCloudSyncSettings({
         enabled: true,
         tenantId,
         outletId,
-        cloudMode: 'daily_snapshot',
+        cloudMode: 'delta_v2',
         lastCloudDownloadedAt: new Date().toISOString(),
       })
       if (showToast) addToast('success', 'Cloud account verified. Desktop data remains local source of truth.', 'Owner Snapshot')
@@ -240,7 +240,7 @@ export default function OwnerScreen() {
                     Owner dashboard for tables, captain flow, and live sales.
                   </h1>
                   <p className="mt-3 max-w-2xl text-sm font-semibold leading-6 text-white/75">
-                    This desktop view reads local live restaurant data. Cloud is updated as a daily snapshot for the owner when they are away.
+                    This desktop view reads local live restaurant data. Cloud receives versioned order deltas every 24 hours and after checkout.
                   </p>
                 </div>
               </div>
