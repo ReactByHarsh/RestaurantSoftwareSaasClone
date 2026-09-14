@@ -9,7 +9,7 @@ import { useUIStore } from '../../store/uiStore'
 import { useAuthStore } from '../../store/authStore'
 import { hasPermission } from '../../lib/permissions'
 import { getFloorColor } from '../../lib/floorColors'
-import type { RestaurantTable, TableStatus } from '../../lib/types'
+import type { Floor, RestaurantTable, TableStatus } from '../../lib/types'
 import { clsx } from 'clsx'
 import FloorTabs from './FloorTabs'
 import TableCard from './TableCard'
@@ -48,6 +48,7 @@ export default function TableScreen() {
   const [activeFloorId, setActiveFloorId] = useState<string>('all')
   const compactView = tableCompactView
   const [showSectionModal, setShowSectionModal] = useState(false)
+  const [editingFloor, setEditingFloor] = useState<Floor | null>(null)
   const [showTableModal, setShowTableModal] = useState(false)
   const [editingTable, setEditingTable] = useState<RestaurantTable | null>(null)
   const [billingModalTableId, setBillingModalTableId] = useState<string | null>(null)
@@ -68,6 +69,7 @@ export default function TableScreen() {
     if (!editMode) {
       setEditingTable(null)
       setShowSectionModal(false)
+      setEditingFloor(null)
       setShowTableModal(false)
     }
   }, [editMode])
@@ -117,13 +119,22 @@ export default function TableScreen() {
     const fd = new FormData(e.currentTarget)
     const name = String(fd.get('name') ?? '').trim()
     if (!name) return
-    if (floors.some(f => f.name.toLowerCase() === name.toLowerCase())) {
+    if (floors.some(f => f.id !== editingFloor?.id && f.name.toLowerCase() === name.toLowerCase())) {
       addToast('error', 'Section already exists')
       return
     }
-    addFloor(name)
+    const adjustmentType = String(fd.get('adjustmentType') ?? 'percentage') as Floor['priceAdjustmentType']
+    const enteredValue = Math.max(0, Number(fd.get('adjustmentValue') ?? 0) || 0)
+    const adjustmentValue = adjustmentType === 'amount' ? Math.round(enteredValue * 100) : Math.round(enteredValue * 100) / 100
+    if (editingFloor) {
+      updateFloor(editingFloor.id, { name, priceAdjustmentType: adjustmentType, priceAdjustmentValue: adjustmentValue })
+      addToast('success', `${name} section updated`)
+    } else {
+      addFloor(name, { priceAdjustmentType: adjustmentType, priceAdjustmentValue: adjustmentValue })
+      addToast('success', `${name} section created`)
+    }
     setShowSectionModal(false)
-    addToast('success', `${name} section created`)
+    setEditingFloor(null)
   }
 
   const handleCreateTables = (e: React.FormEvent<HTMLFormElement>) => {
@@ -327,7 +338,7 @@ export default function TableScreen() {
               </button>
               {editMode && (
                 <>
-              <button onClick={() => setShowSectionModal(true)} className="flex items-center gap-1.5 px-3 py-2 bg-white text-slate-700 rounded-lg text-xs font-black border border-slate-200 hover:border-primary/30 hover:text-primary hover:bg-primary-50 transition-all active:scale-95">
+              <button onClick={() => { setEditingFloor(null); setShowSectionModal(true) }} className="flex items-center gap-1.5 px-3 py-2 bg-white text-slate-700 rounded-lg text-xs font-black border border-slate-200 hover:border-primary/30 hover:text-primary hover:bg-primary-50 transition-all active:scale-95">
                 <Layers3 size={15} strokeWidth={3} />Section
               </button>
               <button onClick={() => setShowTableModal(true)} className="flex items-center gap-1.5 px-3 py-2 bg-primary text-white rounded-lg text-xs font-black shadow-lg shadow-primary/20 hover:bg-primary-dark transition-all active:scale-95">
@@ -357,6 +368,10 @@ export default function TableScreen() {
         activeFloorId={activeFloorId}
         onSelect={setActiveFloorId}
         onRename={canEditTables ? (id, name) => { updateFloor(id, { name }); addToast('success', 'Section renamed') } : undefined}
+        onEdit={canEditTables ? (id) => {
+          const floor = floors.find((candidate) => candidate.id === id)
+          if (floor) { setEditingFloor(floor); setShowSectionModal(true) }
+        } : undefined}
         onDelete={canEditTables ? handleDeleteSection : undefined}
       />
 
@@ -398,7 +413,7 @@ export default function TableScreen() {
             <LayoutGrid size={40} className="mb-3 opacity-20" />
             <p className="font-medium text-lg text-slate-500">No floors or tables yet</p>
             <p className="text-sm text-slate-400 mt-1">Get started by creating your first dining area.</p>
-            {canManageTables && <button onClick={() => setShowSectionModal(true)} className="mt-4 px-6 py-2.5 bg-primary text-white rounded-xl shadow-sm text-sm font-bold hover:bg-primary-dark transition-colors">Create Section</button>}
+            {canManageTables && <button onClick={() => { setEditingFloor(null); setShowSectionModal(true) }} className="mt-4 px-6 py-2.5 bg-primary text-white rounded-xl shadow-sm text-sm font-bold hover:bg-primary-dark transition-colors">Create Section</button>}
           </div>
         ) : filteredTables.length === 0 && (
           <div className="flex flex-col items-center justify-center h-48 text-slate-400 mt-10">
@@ -550,10 +565,10 @@ export default function TableScreen() {
           <div className="w-full max-w-md bg-white rounded-3xl shadow-2xl border border-slate-100 overflow-hidden">
             <div className="px-6 py-5 border-b border-slate-100 flex items-center justify-between">
               <div>
-                <h2 className="text-lg font-black text-slate-900">Add Dining Section</h2>
-                <p className="text-xs font-bold text-slate-400 uppercase tracking-widest mt-1">AC, Non-AC, Rooftop, Family and more</p>
+                <h2 className="text-lg font-black text-slate-900">{editingFloor ? 'Edit Dining Section' : 'Add Dining Section'}</h2>
+                <p className="text-xs font-bold text-slate-400 uppercase tracking-widest mt-1">Set optional premium pricing for AC, Rooftop, Family and more</p>
               </div>
-              <button onClick={() => setShowSectionModal(false)} className="w-9 h-9 rounded-xl bg-slate-50 text-slate-500 hover:bg-slate-100 flex items-center justify-center"><X size={18} /></button>
+              <button onClick={() => { setShowSectionModal(false); setEditingFloor(null) }} className="w-9 h-9 rounded-xl bg-slate-50 text-slate-500 hover:bg-slate-100 flex items-center justify-center"><X size={18} /></button>
             </div>
             <form onSubmit={handleCreateSection} className="p-6 space-y-5">
               <div>
@@ -568,7 +583,26 @@ export default function TableScreen() {
                   }} className="px-3 py-2 rounded-xl text-xs font-black bg-primary-50 text-primary border border-primary/10 hover:bg-primary hover:text-white transition-colors">{name}</button>
                 ))}
               </div>
-              <button type="submit" className="w-full py-3 bg-primary text-white rounded-2xl font-black hover:bg-primary-dark transition-colors shadow-lg shadow-primary/20">Create Section</button>
+              <div className="rounded-2xl border border-primary/15 bg-primary-50/50 p-4 space-y-3">
+                <div>
+                  <p className="text-xs font-black uppercase tracking-widest text-primary">Section price premium</p>
+                  <p className="text-[11px] font-semibold text-slate-500 mt-1">Applied to new items added at tables in this section. Existing bills keep their saved prices.</p>
+                </div>
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-[11px] font-black uppercase tracking-widest text-slate-400 mb-1.5">Adjustment type</label>
+                    <select name="adjustmentType" defaultValue={editingFloor?.priceAdjustmentType ?? 'percentage'} className="w-full px-3 py-2.5 rounded-xl border border-slate-200 bg-white text-sm font-bold outline-none focus:border-primary/50">
+                      <option value="percentage">Percentage (%)</option>
+                      <option value="amount">Fixed amount (₹)</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block text-[11px] font-black uppercase tracking-widest text-slate-400 mb-1.5">Premium</label>
+                    <input name="adjustmentValue" type="number" min="0" step="0.01" defaultValue={editingFloor?.priceAdjustmentType === 'amount' ? ((editingFloor.priceAdjustmentValue ?? 0) / 100).toFixed(2) : (editingFloor?.priceAdjustmentValue ?? 0)} className="w-full px-3 py-2.5 rounded-xl border border-slate-200 bg-white text-sm font-bold outline-none focus:border-primary/50" />
+                  </div>
+                </div>
+              </div>
+              <button type="submit" className="w-full py-3 bg-primary text-white rounded-2xl font-black hover:bg-primary-dark transition-colors shadow-lg shadow-primary/20">{editingFloor ? 'Save Section' : 'Create Section'}</button>
             </form>
           </div>
         </div>

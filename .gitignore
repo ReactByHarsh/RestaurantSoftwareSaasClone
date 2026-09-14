@@ -9,6 +9,11 @@ dist-ssr
 apps/web/src-tauri/target
 apps/web/src-tauri/gen
 apps/web/src-tauri/icons/*
+!apps/web/src-tauri/icons/32x32.png
+!apps/web/src-tauri/icons/128x128.png
+!apps/web/src-tauri/icons/128x128@2x.png
+!apps/web/src-tauri/icons/icon.png
+!apps/web/src-tauri/icons/icon.icns
 !apps/web/src-tauri/icons/icon.ico
 
 # Cargo lock (for libraries/apps, keep Cargo.lock; but target is already ignored)
@@ -25,6 +30,7 @@ worker-configuration.d.ts
 apps/worker/out_*.json
 
 # Sensitive / debug files
+CREDENTIALS_AND_BUILD_CONFIG_INVENTORY.md
 backups/
 cookiejar.txt
 headers.txt

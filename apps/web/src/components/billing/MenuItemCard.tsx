@@ -7,10 +7,11 @@ interface Props {
   item: MenuItem
   cartQty: number
   isKotItem?: boolean
+  displayPricePaise?: number
   onAdd: () => void
 }
 
-export default function MenuItemCard({ item, cartQty, isKotItem = false, onAdd }: Props) {
+export default function MenuItemCard({ item, cartQty, isKotItem = false, displayPricePaise, onAdd }: Props) {
   const inCart = cartQty > 0
 
   return (
@@ -55,7 +56,7 @@ export default function MenuItemCard({ item, cartQty, isKotItem = false, onAdd }
       {/* Bottom Section */}
       <div className="flex items-end justify-between w-full mt-auto">
         <span className="text-xs font-black tracking-tight text-slate-700">
-          {formatPaise(item.pricePaise)}
+          {formatPaise(displayPricePaise ?? item.pricePaise)}
         </span>
         <div className="w-6 h-6 rounded flex items-center justify-center flex-shrink-0 transition-all shadow-sm bg-slate-50 text-slate-400 group-hover:bg-primary group-hover:text-white border border-slate-200 group-hover:border-primary">
           <Plus size={14} strokeWidth={2.5} />

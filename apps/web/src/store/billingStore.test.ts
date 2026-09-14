@@ -1,9 +1,10 @@
 import 'fake-indexeddb/auto'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import type { Order, OrderItem, RestaurantTable } from '../lib/types'
+import type { MenuItem, Order, OrderItem, RestaurantTable } from '../lib/types'
 import type { BillingSnapshot } from '../lib/cloudSync'
 import {
   resolveRestoredSession,
+  getSectionAdjustedPrice,
   useBillingStore,
   type CartItem,
 } from './billingStore'
@@ -148,6 +149,37 @@ describe('billing session restoration', () => {
     expect(restored.currentOrder).toBeNull()
     expect(restored.cart).toEqual([])
     expect(restored.savedCarts).not.toHaveProperty('table-1')
+  })
+})
+
+describe('section pricing', () => {
+  it('supports percentage and fixed-amount premiums in paise', () => {
+    expect(getSectionAdjustedPrice(10000, { id: 'ac', outletId: 'outlet-1', name: 'AC', sortOrder: 0, isActive: true, priceAdjustmentType: 'percentage', priceAdjustmentValue: 10 })).toBe(11000)
+    expect(getSectionAdjustedPrice(10000, { id: 'roof', outletId: 'outlet-1', name: 'Rooftop', sortOrder: 1, isActive: true, priceAdjustmentType: 'amount', priceAdjustmentValue: 2500 })).toBe(12500)
+    expect(getSectionAdjustedPrice(10000)).toBe(10000)
+  })
+
+  it('uses the selected table section premium when adding a menu item', () => {
+    const menuItem: MenuItem = {
+      id: 'menu-premium', outletId: 'outlet-1', categoryId: 'category-1', name: 'Premium dish',
+      itemType: 'veg', productType: 'sale_only', pricePaise: 10000, taxPercent: 0, isAvailable: true, sortOrder: 0,
+    }
+    useBillingStore.setState({
+      floors: [{ id: 'floor-ac', outletId: 'outlet-1', name: 'AC', priceAdjustmentType: 'percentage', priceAdjustmentValue: 15, sortOrder: 0, isActive: true }],
+      tables: [table()],
+      menuCategories: [{ id: 'category-1', outletId: 'outlet-1', name: 'Food', sortOrder: 0, isActive: true }],
+      menuItems: [menuItem],
+      selectedTableId: 'table-1',
+      activeOrderType: 'dine_in',
+      currentOrder: null,
+      cart: [],
+    })
+    useBillingStore.getState().updateTable('table-1', { floorId: 'floor-ac' })
+    useBillingStore.getState().addToCart(menuItem)
+
+    expect(useBillingStore.getState().cart[0]?.basePricePaise).toBe(11500)
+    expect(useBillingStore.getState().cart[0]?.unitPricePaise).toBe(11500)
+    expect(useBillingStore.getState().getCartTotal().total).toBe(11500)
   })
 })
 
