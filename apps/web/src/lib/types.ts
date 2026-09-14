@@ -154,6 +154,10 @@ export interface Floor {
   id: string
   outletId: string
   name: string
+  /** Optional premium applied to menu base prices for tables in this section. */
+  priceAdjustmentType?: 'percentage' | 'amount'
+  /** Percentage (e.g. 10) or fixed paise amount (e.g. 2000 = ₹20). */
+  priceAdjustmentValue?: number
   sortOrder: number
   isActive: boolean
 }

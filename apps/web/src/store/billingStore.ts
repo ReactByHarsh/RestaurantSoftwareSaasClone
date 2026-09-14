@@ -182,7 +182,7 @@ interface BillingStore {
   updateStation: (id: string, updates: Partial<Station>) => void
   deleteStation: (id: string) => boolean
 
-  addFloor: (name: string) => void
+  addFloor: (name: string, settings?: Pick<Floor, 'priceAdjustmentType' | 'priceAdjustmentValue'>) => void
   updateFloor: (id: string, updates: Partial<Floor>) => void
   deleteFloor: (id: string) => boolean
   addTable: (input: { floorId: string; name: string; seats: number }) => void
@@ -257,6 +257,21 @@ const now = () => new Date().toISOString()
 const newId = (prefix: string) => `${prefix}_${crypto.randomUUID()}`
 const taxablePercent = (item: { taxPercent?: number; taxType?: 'GST' | 'VAT' | 'None' }) =>
   item.taxType === 'None' ? 0 : item.taxPercent ?? 0
+
+export function getSectionAdjustedPrice(basePricePaise: number, floor?: Floor) {
+  if (!floor?.priceAdjustmentValue || floor.priceAdjustmentValue <= 0) return Math.max(0, Math.round(basePricePaise))
+  if (floor.priceAdjustmentType === 'amount') {
+    return Math.max(0, Math.round(basePricePaise + floor.priceAdjustmentValue))
+  }
+  return Math.max(0, Math.round(basePricePaise + (basePricePaise * floor.priceAdjustmentValue) / 100))
+}
+
+function selectedSection(state: Pick<BillingStore, 'floors' | 'tables' | 'selectedTableId' | 'currentOrder' | 'activeOrderType'>) {
+  if (state.currentOrder?.type !== 'dine_in' && state.activeOrderType !== 'dine_in') return undefined
+  const tableId = state.selectedTableId ?? state.currentOrder?.tableId
+  const table = tableId ? state.tables.find((candidate) => candidate.id === tableId) : undefined
+  return table ? state.floors.find((floor) => floor.id === table.floorId) : undefined
+}
 const CREDIT_PAYMENT_METHODS = new Set<PaymentMethod>(['account', 'due'])
 
 function isCollectedPayment(method: string): method is PaymentMethod {
@@ -1221,11 +1236,13 @@ export const useBillingStore = create<BillingStore>()(
         return true
       },
 
-      addFloor: (name) => set((state) => ({
+      addFloor: (name, settings = {}) => set((state) => ({
         floors: [...state.floors, {
           id: newId('fl'),
           outletId: state.outlet.id,
           name,
+          priceAdjustmentType: settings.priceAdjustmentType ?? 'percentage',
+          priceAdjustmentValue: Math.max(0, Math.round(settings.priceAdjustmentValue ?? 0)),
           sortOrder: state.floors.length,
           isActive: true,
         }],
@@ -1713,7 +1730,9 @@ export const useBillingStore = create<BillingStore>()(
           const category = workingState.menuCategories.find((candidate) => candidate.id === item.categoryId)
           const parentCategory = category?.parentId ? workingState.menuCategories.find((candidate) => candidate.id === category.parentId) : undefined
           const categoryDiscountPercent = Math.max(0, categoryRule.discountPercent ?? 0)
-          const unitPricePaise = item.pricePaise + modifierTotal
+          const section = selectedSection(workingState)
+          const adjustedBasePricePaise = getSectionAdjustedPrice(item.pricePaise, section)
+          const unitPricePaise = adjustedBasePricePaise + modifierTotal
           const discountPaise = categoryDiscountPercent > 0 ? Math.round(unitPricePaise * categoryDiscountPercent / 100) : 0
           const newCart = existing
               ? workingState.cart.map((cartItem) => cartItem.menuItemId === item.id ? { ...cartItem, quantity: cartItem.quantity + 1 } : cartItem)
@@ -1723,7 +1742,7 @@ export const useBillingStore = create<BillingStore>()(
                 itemType: item.itemType,
                 isSeparateBill: isSeparateBillCategory(category, parentCategory),
                 quantity: 1,
-                basePricePaise: item.pricePaise,
+                basePricePaise: adjustedBasePricePaise,
                 unitPricePaise,
                 taxPercent: categoryRule.taxPercent ?? item.taxPercent,
                 taxType: categoryRule.taxType ?? item.taxType,

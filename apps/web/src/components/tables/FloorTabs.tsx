@@ -1,16 +1,17 @@
 import { clsx } from 'clsx'
-import { Pencil, Trash2 } from 'lucide-react'
+import { Pencil, Settings2, Trash2 } from 'lucide-react'
 import { FLOOR_COLORS } from '../../lib/floorColors'
 
 interface Props {
-  floors: { id: string; name: string }[]
+  floors: { id: string; name: string; priceAdjustmentType?: 'percentage' | 'amount'; priceAdjustmentValue?: number }[]
   activeFloorId: string
   onSelect: (id: string) => void
   onRename?: (id: string, name: string) => void
+  onEdit?: (id: string) => void
   onDelete?: (id: string) => void
 }
 
-export default function FloorTabs({ floors, activeFloorId, onSelect, onRename, onDelete }: Props) {
+export default function FloorTabs({ floors, activeFloorId, onSelect, onRename, onEdit, onDelete }: Props) {
   return (
     <div className="flex gap-1.5 px-3 py-2 bg-white border-b border-slate-100 overflow-x-auto flex-shrink-0 scrollbar-hide z-10 shadow-[0_4px_12px_rgba(0,0,0,0.02)]">
       <button
@@ -42,8 +43,13 @@ export default function FloorTabs({ floors, activeFloorId, onSelect, onRename, o
               className="px-3 py-1.5 text-xs font-black"
             >
               {floor.name}
+              {Boolean(floor.priceAdjustmentValue && floor.priceAdjustmentValue > 0) && (
+                <span className="ml-1.5 text-[10px] opacity-75">
+                  +{floor.priceAdjustmentType === 'amount' ? `₹${((floor.priceAdjustmentValue ?? 0) / 100).toFixed(2)}` : `${floor.priceAdjustmentValue}%`}
+                </span>
+              )}
             </button>
-            {(onRename || onDelete) && (
+            {(onRename || onEdit || onDelete) && (
               <div className={clsx('flex items-center border-l', selected ? 'border-black/15' : 'border-black/10')}>
                 {onRename && (
                   <button
@@ -55,6 +61,15 @@ export default function FloorTabs({ floors, activeFloorId, onSelect, onRename, o
                     title="Rename section"
                   >
                     <Pencil size={13} />
+                  </button>
+                )}
+                {onEdit && (
+                  <button
+                    onClick={() => onEdit(floor.id)}
+                    className={clsx('w-7 h-8 flex items-center justify-center transition-colors', selected ? 'hover:bg-black/10' : 'hover:bg-black/5')}
+                    title="Section pricing"
+                  >
+                    <Settings2 size={13} />
                   </button>
                 )}
                 {onDelete && (

@@ -6,7 +6,7 @@ import {
   PlayCircle, HandPlatter, Printer, CheckCircle, ArrowRightLeft,
   GitMerge, Users, PanelRightClose, PanelRightOpen, Table2,
 } from 'lucide-react'
-import { useBillingStore } from '../../store/billingStore'
+import { getSectionAdjustedPrice, useBillingStore } from '../../store/billingStore'
 import { useAuthStore } from '../../store/authStore'
 import { useUIStore } from '../../store/uiStore'
 import { hasPermission } from '../../lib/permissions'
@@ -579,6 +579,7 @@ export default function BillingScreen({ isModal = false, modalTableId, onCloseMo
 
   // ── MENU VIEW ─────────────────────────────────────────────────────────────
   const selectedTable    = selectedTableId ? tables.find(t => t.id === selectedTableId) : null
+  const selectedFloor    = activeOrderType === 'dine_in' && selectedTable ? floors.find(floor => floor.id === selectedTable.floorId) : undefined
   const selectedTableCfg = selectedTable ? (STATUS_CFG[selectedTable.status] ?? STATUS_CFG.available) : null
   const totalCartLines   = cart.length
   const cartTotal        = cart.reduce((s, i) => s + i.unitPricePaise * i.quantity, 0)
@@ -612,8 +613,15 @@ export default function BillingScreen({ isModal = false, modalTableId, onCloseMo
         </div>
 
         {selectedTable && selectedTableCfg && (
-          <div className={clsx('flex items-center gap-1.5 px-2 py-1 rounded-lg border text-xs font-black flex-shrink-0', selectedTableCfg.badge)}>
-            <LayoutGrid size={12} />{selectedTable.name}
+          <div className="flex items-center gap-1.5 flex-shrink-0">
+            <div className={clsx('flex items-center gap-1.5 px-2 py-1 rounded-lg border text-xs font-black', selectedTableCfg.badge)}>
+              <LayoutGrid size={12} />{selectedTable.name}
+            </div>
+            {selectedFloor?.priceAdjustmentValue && selectedFloor.priceAdjustmentValue > 0 && (
+              <span className="hidden sm:inline-flex items-center rounded-lg border border-amber-200 bg-amber-50 px-2 py-1 text-[10px] font-black text-amber-700" title="Section premium is included in newly added items">
+                +{selectedFloor.priceAdjustmentType === 'amount' ? `₹${(selectedFloor.priceAdjustmentValue / 100).toFixed(2)}` : `${selectedFloor.priceAdjustmentValue}%`} section
+              </span>
+            )}
           </div>
         )}
 
@@ -761,7 +769,7 @@ export default function BillingScreen({ isModal = false, modalTableId, onCloseMo
               <>
                 <div className="grid grid-cols-2 sm:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-5 gap-2 p-0.5">
                   {paginatedItems.map(item => (
-                    <MenuItemCard key={item.id} item={item} cartQty={cartQtyById.get(item.id) ?? 0} isKotItem={kotMenuItemIds.has(item.id)} onAdd={() => handleAddItem(item)} />
+                    <MenuItemCard key={item.id} item={item} displayPricePaise={getSectionAdjustedPrice(item.pricePaise, selectedFloor)} cartQty={cartQtyById.get(item.id) ?? 0} isKotItem={kotMenuItemIds.has(item.id)} onAdd={() => handleAddItem(item)} />
                   ))}
                 </div>
                 {filteredItems.length > MENU_PAGE_SIZE && (
