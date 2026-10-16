@@ -7,12 +7,21 @@ import '../models/session.dart';
 import '../utils/utils.dart';
 
 class CloudApi {
-  CloudApi(this.session);
+  CloudApi(this.session, {http.Client? client})
+    : client = client ?? http.Client(),
+      serverUrl = session.serverUrl;
 
   final SavedSession session;
+  final http.Client client;
+  String serverUrl;
+  void dispose() => client.close();
   String? _lastStateUpdatedAt;
+  String? get stateRevision => _lastStateUpdatedAt;
+  void observeRevision(String revision) {
+    if (revision.isNotEmpty) _lastStateUpdatedAt = revision;
+  }
 
-  String get _base => cleanBase(session.serverUrl);
+  String get _base => cleanBase(serverUrl);
 
   Map<String, String> get _headers => {
     'Accept': 'application/json',
@@ -69,19 +78,29 @@ class CloudApi {
   static Future<SavedSession> loginAutoLan(
     String serverUrl,
     String loginId,
-    String password,
-  ) async {
+    String password, {
+    bool allowCloudFallback = true,
+  }) async {
     final errors = <String>[];
     final manualUrl = normalizeLanUrl(serverUrl);
     if (manualUrl.isNotEmpty) {
       try {
         return await login(manualUrl, loginId, password, mode: 'lan');
       } catch (error) {
+        if (!allowCloudFallback &&
+            await LanDiscovery.probe(manualUrl) != null) {
+          rethrow;
+        }
         errors.add(error.toString().replaceFirst('Exception: ', ''));
       }
     }
 
     final candidates = await LanDiscovery.discover(preferredUrl: manualUrl);
+    if (!allowCloudFallback && candidates.length > 1) {
+      throw Exception(
+        'More than one desktop found. Tap the correct restaurant before signing in.',
+      );
+    }
     for (final candidate in candidates) {
       try {
         return await login(candidate.url, loginId, password, mode: 'lan');
@@ -92,6 +111,13 @@ class CloudApi {
       }
     }
 
+    if (!allowCloudFallback) {
+      throw Exception(
+        candidates.isEmpty
+            ? 'No desktop found. Connect both devices to the same Wi-Fi and keep BhojPatra Desk open. You can enter the desktop IP manually.'
+            : errors.last,
+      );
+    }
     // A browser-only BhojPatra SaaS session cannot host an inbound LAN server.
     // Keep restaurant work available by falling back to the same live cloud
     // account; LAN remains preferred whenever BhojPatra Desk is reachable.
@@ -119,19 +145,49 @@ class CloudApi {
   }
 
   Future<Map<String, dynamic>> fetchState() async {
-    final response = await http.get(
-      Uri.parse(
-        '$_base/api/v1/outlets/${Uri.encodeComponent(session.outletId)}/state',
-      ),
-      headers: _headers,
-    );
+    final response = await client
+        .get(
+          Uri.parse(
+            '$_base/api/v1/outlets/${Uri.encodeComponent(session.outletId)}/state',
+          ),
+          headers: _headers,
+        )
+        .timeout(const Duration(seconds: 8));
     if (response.statusCode < 200 || response.statusCode >= 300) {
-      throw Exception('Cloud sync fetch failed (${response.statusCode})');
+      throw Exception('Desktop connection failed (${response.statusCode})');
     }
     final payload = jsonDecode(response.body) as Map<String, dynamic>;
     if (payload['exists'] == true && payload['payload'] is Map) {
+      final state = Map<String, dynamic>.from(payload['payload'] as Map);
+      final outletId = text(snapshotValue(state, 'outlet', 'id'));
+      if (session.mode == 'lan' && outletId.isEmpty) {
+        throw Exception(
+          'The counter did not identify its restaurant. Keep Desk open and reconnect.',
+        );
+      }
+      if (outletId.isNotEmpty && outletId != session.outletId) {
+        throw Exception(
+          'This counter has a different restaurant. Sign out and connect to the correct counter.',
+        );
+      }
+      if (session.mode == 'lan' &&
+          [
+            'tables',
+            'orders',
+            'orderItems',
+            'menuItems',
+          ].any((key) => state[key] is! List)) {
+        throw Exception(
+          'The counter has not sent complete restaurant data. Keep Desk open and refresh the connection.',
+        );
+      }
       _lastStateUpdatedAt = text(payload['updatedAt']);
-      return Map<String, dynamic>.from(payload['payload'] as Map);
+      return state;
+    }
+    if (session.mode == 'lan') {
+      throw Exception(
+        'Restaurant data is not ready on this counter. Open Desk, check the restaurant and refresh. Existing phone data has been kept.',
+      );
     }
     return emptySnapshot(session);
   }
@@ -175,6 +231,52 @@ class CloudApi {
       return Map<String, dynamic>.from(payload['payload'] as Map);
     }
     return snapshot;
+  }
+
+  Future<Map<String, dynamic>> submitCaptainCommand(
+    Map<String, dynamic> command,
+  ) async {
+    final response = await client
+        .post(
+          Uri.parse(
+            '$_base/api/v1/outlets/${Uri.encodeComponent(session.outletId)}/captain/commands',
+          ),
+          headers: {..._headers, 'Content-Type': 'application/json'},
+          body: jsonEncode(command),
+        )
+        .timeout(const Duration(seconds: 12));
+    final payload = _jsonMap(response.body);
+    if (response.statusCode == 404) {
+      throw const CaptainCommandRejected(
+        'Install BhojPatra Desk 0.1.28 or newer on the counter to use this captain app.',
+      );
+    }
+    if (response.statusCode >= 400 && response.statusCode < 500) {
+      throw CaptainCommandRejected(
+        text(payload['error'], fallback: 'Order rejected by desktop'),
+      );
+    }
+    if (response.statusCode != 200 ||
+        payload['ok'] != true ||
+        payload['payload'] is! Map ||
+        payload['requestId'] != command['requestId']) {
+      throw Exception(
+        'No order confirmation received. Your draft is kept; retry safely.',
+      );
+    }
+    _lastStateUpdatedAt = text(payload['updatedAt']);
+    return Map<String, dynamic>.from(payload['payload'] as Map);
+  }
+
+  Future<bool> rediscoverDesktop() async {
+    for (final candidate in await LanDiscovery.discover(
+      preferredUrl: serverUrl,
+    )) {
+      if (candidate.outletId != session.outletId) continue;
+      serverUrl = candidate.url;
+      return true;
+    }
+    return false;
   }
 
   Future<Map<String, dynamic>> pushOrderDeltas(
@@ -228,6 +330,13 @@ class CloudApi {
         );
     return WebSocketChannel.connect(uri);
   }
+}
+
+class CaptainCommandRejected implements Exception {
+  const CaptainCommandRejected(this.message);
+  final String message;
+  @override
+  String toString() => message;
 }
 
 class StateConflictException implements Exception {

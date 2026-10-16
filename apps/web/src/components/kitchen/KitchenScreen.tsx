@@ -2,6 +2,7 @@ import { useState, useMemo, useEffect } from 'react'
 import { ChefHat, Expand, Shrink, BellRing } from 'lucide-react'
 import { useBillingStore } from '../../store/billingStore'
 import { useUIStore } from '../../store/uiStore'
+import { useI18n } from '../../lib/i18n'
 import { realtimeClient } from '../../lib/realtime'
 import StationFilter from './StationFilter'
 import KOTCard from './KOTCard'
@@ -13,6 +14,7 @@ type StatusFilter = 'all' | 'new' | 'preparing' | 'ready'
 export default function KitchenScreen() {
   const { kots, orders, stations, updateKOTItemStatus, updateKOTStatus, cancelKOT } = useBillingStore()
   const { addToast } = useUIStore()
+  const { t } = useI18n()
   
   const [isFullscreen, setIsFullscreen] = useState(false)
   const [activeStationId, setActiveStationId] = useState<string>('all')
@@ -70,15 +72,15 @@ export default function KitchenScreen() {
           </div>
           <div className="min-w-0">
             <div className="flex items-center gap-2">
-              <h1 className="text-base sm:text-lg font-black text-white tracking-tight truncate leading-none">KITCHEN DISPLAY</h1>
+              <h1 className="text-base sm:text-lg font-black text-white tracking-tight truncate leading-none">{t('kitchenDisplay')}</h1>
               <span className="flex items-center gap-1 text-[9px] text-emerald-400 bg-emerald-400/10 px-1.5 py-0.5 rounded border border-emerald-400/20 shadow-sm font-bold tracking-wider">
                 <span className="w-1 h-1 rounded-full bg-emerald-400 animate-pulse shadow-[0_0_8px_#34d399]" />
-                LIVE
+                {t('liveStatus')}
               </span>
             </div>
             <div className="mt-0.5">
               <span className="text-[10px] sm:text-xs font-bold text-slate-400">
-                {activeKOTs.length} Active Orders
+                {activeKOTs.length} {t('activeOrders')}
               </span>
             </div>
           </div>
@@ -97,7 +99,7 @@ export default function KitchenScreen() {
                     : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800'
                 )}
               >
-                {s === 'all' ? 'Active Orders' : s}
+                {t(s === 'all' ? 'activeOrders' : s === 'new' ? 'newStatus' : s === 'preparing' ? 'preparingStatus' : 'readyStatus')}
               </button>
             ))}
           </div>
@@ -125,8 +127,8 @@ export default function KitchenScreen() {
         {activeKOTs.length === 0 ? (
           <div className="flex flex-col items-center justify-center h-full text-slate-600">
             <BellRing size={64} strokeWidth={1} className="mb-4 opacity-20" />
-            <h2 className="text-2xl font-bold text-slate-500">No active orders</h2>
-            <p className="text-slate-600 mt-2">Waiting for new KOTs...</p>
+            <h2 className="text-2xl font-bold text-slate-500">{t('noActiveOrders')}</h2>
+            <p className="text-slate-600 mt-2">{t('waitingForKot')}</p>
           </div>
         ) : (
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-4 gap-3 sm:gap-6 auto-rows-max min-w-0">

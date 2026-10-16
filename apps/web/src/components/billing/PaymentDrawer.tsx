@@ -4,6 +4,7 @@ import { useBillingStore } from '../../store/billingStore'
 import { useAuthStore } from '../../store/authStore'
 import { useUIStore } from '../../store/uiStore'
 import { clsx } from 'clsx'
+import { getBillableOrderTotalPaise } from '../../lib/money'
 
 interface Props {
   onClose: () => void
@@ -42,7 +43,10 @@ export default function PaymentDrawer({ onClose, onSettled }: Props) {
     ? orderItems.filter(item => item.orderId === currentOrder.id && item.status !== 'cancelled').length
     : 0
   const hasBillableItems = cart.length > 0 || savedItemCount > 0
-  const orderTotal = currentOrder ? currentOrder.totalPaise + totals.total : totals.total
+  const existingTipPaise = currentOrder?.tipPaise ?? 0
+  const [tipInput, setTipInput] = useState(existingTipPaise ? (existingTipPaise / 100).toFixed(2) : '')
+  const tipPaise = Math.max(0, Math.round((parseFloat(tipInput) || 0) * 100))
+  const orderTotal = currentOrder ? getBillableOrderTotalPaise(currentOrder) + totals.total : totals.total
   const finalTotalPaise = orderTotal
   const finalTotal = finalTotalPaise / 100
 
@@ -101,7 +105,8 @@ export default function PaymentDrawer({ onClose, onSettled }: Props) {
         0,
         user.id,
         user.name,
-        printAfter
+        printAfter,
+        tipPaise
       )
       if (!settled) {
         addToast('error', 'Checkout could not be completed. Please verify the order and payment total.')
@@ -149,6 +154,23 @@ export default function PaymentDrawer({ onClose, onSettled }: Props) {
                   className="w-24 text-center outline-none bg-transparent"
                 />
               </div>
+            </div>
+            <div className="flex-1 bg-white border border-amber-200 rounded-lg p-4 text-center shadow-sm relative">
+              <p className="text-[10px] font-black text-amber-700 uppercase tracking-wider mb-1">Customer Tip (Optional)</p>
+              <div className="flex justify-center items-center gap-1 text-2xl font-black text-slate-800">
+                <span>₹</span>
+                <input
+                  type="number"
+                  min="0"
+                  step="0.01"
+                  value={tipInput}
+                  onChange={event => setTipInput(event.target.value)}
+                  placeholder="0.00"
+                  aria-label="Optional customer tip amount"
+                  className="w-24 text-center outline-none bg-transparent"
+                />
+              </div>
+              <p className="mt-1 text-[9px] font-bold text-amber-600">Recorded separately; not added to this bill.</p>
             </div>
             <button onClick={handleClearTender} className="w-12 h-12 bg-rose-500 hover:bg-rose-600 text-white rounded-lg flex items-center justify-center shadow-sm transition-colors shrink-0">
               <Trash2 size={20} />

@@ -16,25 +16,28 @@ import { useAuthStore } from '../../store/authStore'
 import { getNavItems } from '../../lib/permissions'
 import { clsx } from 'clsx'
 import { useState } from 'react'
+import { useI18n } from '../../lib/i18n'
 
 const NAV_CONFIG = [
-  { key: 'owner', label: 'Owner', icon: Activity, path: '/app/owner', color: 'text-emerald-400 group-hover:text-emerald-300', activeBg: 'bg-slate-800 border-slate-700/60 text-emerald-400' },
-  { key: 'tables', label: 'Tables', icon: LayoutGrid, path: '/app/tables', color: 'text-blue-400 group-hover:text-blue-300', activeBg: 'bg-slate-800 border-slate-700/60 text-blue-400' },
-  { key: 'captain', label: 'Captain', icon: UserCircle, path: '/app/captain', color: 'text-violet-400 group-hover:text-violet-300', activeBg: 'bg-slate-800 border-slate-700/60 text-violet-400' },
-  { key: 'kitchen', label: 'Kitchen', icon: ChefHat, path: '/app/kitchen', color: 'text-red-400 group-hover:text-red-300', activeBg: 'bg-slate-800 border-slate-700/60 text-red-400' },
-  { key: 'orders', label: 'Orders', icon: ClipboardList, path: '/app/orders', color: 'text-cyan-400 group-hover:text-cyan-300', activeBg: 'bg-slate-800 border-slate-700/60 text-cyan-400' },
-  { key: 'menu', label: 'Menu', icon: BookOpen, path: '/app/menu', color: 'text-emerald-400 group-hover:text-emerald-300', activeBg: 'bg-slate-800 border-slate-700/60 text-emerald-400' },
-  { key: 'inventory', label: 'Inventory', icon: Package, path: '/app/inventory', color: 'text-amber-400 group-hover:text-amber-300', activeBg: 'bg-slate-800 border-slate-700/60 text-amber-400' },
-  { key: 'reports', label: 'Reports', icon: BarChart3, path: '/app/reports', color: 'text-indigo-400 group-hover:text-indigo-300', activeBg: 'bg-slate-800 border-slate-700/60 text-indigo-400' },
-  { key: 'admin', label: 'Admin', icon: ShieldCheck, path: '/app/admin', color: 'text-rose-400 group-hover:text-rose-300', activeBg: 'bg-slate-800 border-slate-700/60 text-rose-400' },
-  { key: 'printers', label: 'Printers', icon: ReceiptText, path: '/app/printers', color: 'text-orange-400 group-hover:text-orange-300', activeBg: 'bg-slate-800 border-slate-700/60 text-orange-400' },
-  { key: 'settings', label: 'Settings', icon: Settings, path: '/app/settings', color: 'text-slate-400 group-hover:text-slate-200', activeBg: 'bg-slate-800 border-slate-700 text-slate-300' },
+  { key: 'owner', labelKey: 'navOwner', icon: Activity, path: '/app/owner', color: 'text-emerald-400 group-hover:text-emerald-300', activeBg: 'bg-slate-800 border-slate-700/60 text-emerald-400' },
+  { key: 'tables', labelKey: 'navTables', icon: LayoutGrid, path: '/app/tables', color: 'text-blue-400 group-hover:text-blue-300', activeBg: 'bg-slate-800 border-slate-700/60 text-blue-400' },
+  { key: 'captain', labelKey: 'navCaptain', icon: UserCircle, path: '/app/captain', color: 'text-violet-400 group-hover:text-violet-300', activeBg: 'bg-slate-800 border-slate-700/60 text-violet-400' },
+  { key: 'kitchen', labelKey: 'navKitchen', icon: ChefHat, path: '/app/kitchen', color: 'text-red-400 group-hover:text-red-300', activeBg: 'bg-slate-800 border-slate-700/60 text-red-400' },
+  { key: 'orders', labelKey: 'navOrders', icon: ClipboardList, path: '/app/orders', color: 'text-cyan-400 group-hover:text-cyan-300', activeBg: 'bg-slate-800 border-slate-700/60 text-cyan-400' },
+  { key: 'menu', labelKey: 'navMenu', icon: BookOpen, path: '/app/menu', color: 'text-emerald-400 group-hover:text-emerald-300', activeBg: 'bg-slate-800 border-slate-700/60 text-emerald-400' },
+  { key: 'inventory', labelKey: 'navInventory', icon: Package, path: '/app/inventory', color: 'text-amber-400 group-hover:text-amber-300', activeBg: 'bg-slate-800 border-slate-700/60 text-amber-400' },
+  { key: 'reports', labelKey: 'navReports', icon: BarChart3, path: '/app/reports', color: 'text-indigo-400 group-hover:text-indigo-300', activeBg: 'bg-slate-800 border-slate-700/60 text-indigo-400' },
+  { key: 'expenses', labelKey: 'navExpenses', icon: ReceiptText, path: '/app/expenses', color: 'text-rose-400 group-hover:text-rose-300', activeBg: 'bg-slate-800 border-slate-700/60 text-rose-400' },
+  { key: 'admin', labelKey: 'navAdmin', icon: ShieldCheck, path: '/app/admin', color: 'text-rose-400 group-hover:text-rose-300', activeBg: 'bg-slate-800 border-slate-700/60 text-rose-400' },
+  { key: 'printers', labelKey: 'navPrinters', icon: ReceiptText, path: '/app/printers', color: 'text-orange-400 group-hover:text-orange-300', activeBg: 'bg-slate-800 border-slate-700/60 text-orange-400' },
+  { key: 'settings', labelKey: 'navSettings', icon: Settings, path: '/app/settings', color: 'text-slate-400 group-hover:text-slate-200', activeBg: 'bg-slate-800 border-slate-700 text-slate-300' },
 ] as const
 
 export default function LeftSideNav() {
   const navigate = useNavigate()
   const location = useLocation()
   const { user } = useAuthStore()
+  const { t } = useI18n()
   const [tooltip, setTooltip] = useState<{ key: string; y: number } | null>(null)
 
   if (!user) return null
@@ -49,7 +52,7 @@ export default function LeftSideNav() {
           <button
             onClick={() => navigate('/app')}
             className="group flex h-9 w-9 items-center justify-center rounded-xl transition-all hover:bg-slate-900"
-            title="BhojPatra Home"
+            title={t('home')}
           >
             <img
               src="/brand-icon-clean.webp"
@@ -63,7 +66,8 @@ export default function LeftSideNav() {
           className="flex flex-1 flex-row items-center justify-around gap-1 overflow-x-auto px-2 py-2 sm:flex-col sm:justify-start sm:gap-0.5 sm:px-0 sm:py-2 sm:overflow-x-hidden sm:overflow-y-auto"
           style={{ scrollbarWidth: 'none' }}
         >
-          {visibleNav.map(({ key, label, icon: Icon, path, color, activeBg }) => {
+          {visibleNav.map(({ key, labelKey, icon: Icon, path, color, activeBg }) => {
+            const label = t(labelKey)
             const isActive = location.pathname.startsWith(path)
             return (
               <div key={key} className="relative flex-1 sm:w-full sm:flex-none sm:px-1.5">
@@ -100,6 +104,7 @@ export default function LeftSideNav() {
                         key === 'menu' && 'bg-emerald-500',
                         key === 'inventory' && 'bg-amber-500',
                         key === 'reports' && 'bg-indigo-500',
+                        key === 'expenses' && 'bg-rose-500',
                         key === 'admin' && 'bg-rose-500',
                         key === 'printers' && 'bg-orange-500',
                         key === 'settings' && 'bg-slate-500'
@@ -120,7 +125,7 @@ export default function LeftSideNav() {
           <div className="flex -translate-y-1/2 items-center">
             <div className="h-0 w-0 border-b-[5px] border-r-[6px] border-t-[5px] border-b-transparent border-r-slate-900 border-t-transparent" />
             <div className="whitespace-nowrap rounded-lg border border-slate-800 bg-slate-900 px-2.5 py-1.5 text-xs font-semibold text-white shadow-xl">
-              {NAV_CONFIG.find((item) => item.key === tooltip.key)?.label}
+              {t(NAV_CONFIG.find((item) => item.key === tooltip.key)?.labelKey ?? '')}
             </div>
           </div>
         </div>

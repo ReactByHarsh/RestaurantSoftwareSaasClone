@@ -1,11 +1,13 @@
 import { useState } from 'react'
 import type { FormEvent } from 'react'
-import { ChefHat, ShieldCheck } from 'lucide-react'
+import { useNavigate } from 'react-router-dom'
+import { ChefHat, LogIn, ShieldCheck } from 'lucide-react'
 import { LOCAL_TENANT_ID, useStaffStore } from '../../store/staffStore'
 import { useBillingStore } from '../../store/billingStore'
 import { useAuthStore } from '../../store/authStore'
 
 export default function FirstRunSetup() {
+  const navigate = useNavigate()
   const [error, setError] = useState('')
   const addStaff = useStaffStore((state) => state.addStaff)
   const updateOutlet = useBillingStore((state) => state.updateOutlet)
@@ -109,6 +111,9 @@ export default function FirstRunSetup() {
 
             <button type="submit" className="mt-6 w-full rounded-xl bg-primary px-5 py-3 text-sm font-black text-white shadow-lg shadow-primary/25 transition active:scale-[0.99]">
               CREATE ADMIN AND OPEN DESKTOP
+            </button>
+            <button type="button" onClick={() => navigate('/login')} className="mt-3 flex w-full items-center justify-center gap-2 rounded-xl border-2 border-slate-200 px-5 py-3 text-sm font-black text-slate-700 transition hover:border-primary/50 hover:text-primary">
+              <LogIn size={17} /> Already have a Cloud Admin account? Sign in
             </button>
           </form>
         </div>

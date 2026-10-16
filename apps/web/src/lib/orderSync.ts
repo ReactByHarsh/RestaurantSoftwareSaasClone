@@ -1,4 +1,5 @@
 import Dexie, { type EntityTable } from 'dexie'
+import { cloudFetch, assertCloudSyncEnabled, cloudSessionIsCurrent, guardCloudSession } from './cloudTransport'
 import {
   fetchCompleteCloudSnapshot,
   mergeOperationalSnapshot,
@@ -104,7 +105,9 @@ export const dexieBusinessStateStorage = {
       await localSyncDb.appState.put({ key, value: legacy })
       try {
         const cloudSync = (JSON.parse(legacy) as { state?: { cloudSync?: unknown } }).state?.cloudSync
-        if (cloudSync) localStorage.setItem('bhojpatra-cloud-settings-v2', JSON.stringify(cloudSync))
+        if (cloudSync && !localStorage.getItem('bhojpatra-cloud-settings-v2')) {
+          localStorage.setItem('bhojpatra-cloud-settings-v2', JSON.stringify(cloudSync))
+        }
       } catch { /* malformed legacy state is handled by Zustand */ }
       localStorage.removeItem(key)
     }
@@ -318,7 +321,7 @@ export function chunkOrderChanges<T>(rows: T[], size = MAX_ORDER_CHANGES_PER_PUS
 
 async function pushOutboxBatch(settings: CloudSyncSettings, rows: SyncOutboxRow[], deviceId: string, cursor: number) {
   const batchIdentity = await payloadHash(rows.map((row) => row.batchId))
-  const response = await fetch(`${cleanBaseUrl(settings.serverUrl)}/api/v2/outlets/${encodeURIComponent(settings.outletId)}/sync/push`, {
+  const response = await cloudFetch(`${cleanBaseUrl(settings.serverUrl)}/api/v2/outlets/${encodeURIComponent(settings.outletId)}/sync/push`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Accept: 'application/json', ...authorization(settings) },
     credentials: 'include',
@@ -414,12 +417,17 @@ function mergeRemoteAggregate(snapshot: BillingSnapshot, change: SyncChange): Bi
 }
 
 async function pullChanges(settings: CloudSyncSettings, initial: BillingSnapshot) {
+  const isCurrent = guardCloudSession(settings)
+  const checkSession = () => {
+    if (!isCurrent()) throw new DOMException('Cloud sync stopped', 'AbortError')
+  }
   let snapshot = initial
   let cursor = await getCursor(settings.outletId)
   let hasMore = true
   let changed = false
   while (hasMore) {
-    const response = await fetch(`${cleanBaseUrl(settings.serverUrl)}/api/v2/outlets/${encodeURIComponent(settings.outletId)}/sync/pull?cursor=${cursor}&limit=100`, {
+    checkSession()
+    const response = await cloudFetch(`${cleanBaseUrl(settings.serverUrl)}/api/v2/outlets/${encodeURIComponent(settings.outletId)}/sync/pull?cursor=${cursor}&limit=100`, {
       headers: { Accept: 'application/json', ...authorization(settings) },
       credentials: 'include',
     })
@@ -466,11 +474,14 @@ async function pullChanges(settings: CloudSyncSettings, initial: BillingSnapshot
       }
       cursor = page.cursor
       hasMore = false
+      checkSession()
+      assertCloudSyncEnabled()
       await persistBrowserBusinessSnapshot(snapshot)
       await setCursor(settings.outletId, cursor)
       continue
     }
     for (const change of page.changes) {
+      checkSession()
       const key = `${change.entityType}:${change.entityId}`
       const local = await localSyncDb.syncRecords.get(key)
       const pending = await localSyncDb.syncOutbox.get(key)
@@ -504,11 +515,14 @@ async function pullChanges(settings: CloudSyncSettings, initial: BillingSnapshot
       })
       await localSyncDb.syncOutbox.delete(key)
     }
+    checkSession()
+    assertCloudSyncEnabled()
     await persistBrowserBusinessSnapshot(snapshot)
     cursor = page.cursor
     hasMore = page.hasMore
     await setCursor(settings.outletId, cursor)
   }
+  checkSession()
   if (changed) await persistBrowserBusinessSnapshot(snapshot)
   return { snapshot, changed, cursor }
 }
@@ -546,9 +560,11 @@ export type OrderSyncResult = {
 }
 
 async function executeSync(snapshot: BillingSnapshot, settings: CloudSyncSettings): Promise<OrderSyncResult> {
+  const isCurrent = guardCloudSession(settings)
   await ensureDesktopStorageHydrated()
   await captureOrderDeltas(snapshot)
   const deviceId = await getDeviceId()
+  if (!isCurrent()) return { snapshot, uploaded: 0, conflicts: 0, cursor: 0, changed: false, skipped: true }
   if (!acquireLease(deviceId)) return { snapshot, uploaded: 0, conflicts: 0, cursor: await getCursor(settings.outletId), changed: false, skipped: true }
   try {
     let cursor = await getCursor(settings.outletId)
@@ -557,6 +573,7 @@ async function executeSync(snapshot: BillingSnapshot, settings: CloudSyncSetting
     const rows = (await localSyncDb.syncOutbox.orderBy('updatedAt').toArray())
       .filter((row) => !row.nextRetryAt || Date.parse(row.nextRetryAt) <= Date.now())
     for (const batch of chunkOrderChanges(rows)) {
+      if (!isCurrent()) return { snapshot, uploaded, conflicts: conflictCount, cursor, changed: false, skipped: true }
       try {
         const result = await pushOutboxBatch(settings, batch, deviceId, cursor)
         // Push cursors describe writes, not consumed remote changes. Advancing
@@ -584,8 +601,10 @@ async function executeSync(snapshot: BillingSnapshot, settings: CloudSyncSetting
         throw error
       }
     }
+    if (!isCurrent()) return { snapshot, uploaded, conflicts: conflictCount, cursor, changed: false, skipped: true }
     const pulled = await pullChanges(settings, snapshot)
     const pending = await localSyncDb.syncOutbox.count()
+    if (!isCurrent()) return { snapshot, uploaded, conflicts: conflictCount, cursor, changed: false, skipped: true, pending }
     return { snapshot: pulled.snapshot, uploaded, conflicts: conflictCount, cursor: pulled.cursor, changed: pulled.changed, pending }
   } finally {
     await mirrorDesktopStorage()
@@ -594,7 +613,7 @@ async function executeSync(snapshot: BillingSnapshot, settings: CloudSyncSetting
 }
 
 export function syncOrderDeltasNow(snapshot: BillingSnapshot, settings: CloudSyncSettings) {
-  if (!settings.enabled || !settings.serverUrl || !settings.outletId || !settings.accountLogin || !settings.accountSecret) {
+  if (!cloudSessionIsCurrent(settings) || !settings.serverUrl || !settings.outletId || !settings.accountLogin || !settings.accountSecret) {
     return Promise.resolve<OrderSyncResult>({ snapshot, uploaded: 0, conflicts: 0, cursor: 0, changed: false, skipped: true })
   }
   if (!activeSync) activeSync = executeSync(snapshot, settings).finally(() => { activeSync = null })

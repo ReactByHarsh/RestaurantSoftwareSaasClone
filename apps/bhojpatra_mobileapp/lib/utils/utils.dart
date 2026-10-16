@@ -16,10 +16,11 @@ String normalizeLanUrl(String value) {
   final uri = Uri.tryParse(withScheme);
   if (uri == null || uri.host.isEmpty) return '';
   final port = uri.hasPort ? uri.port : 3000;
-  return uri
-      .replace(path: '', query: '', fragment: '', port: port)
-      .toString()
-      .replaceAll(RegExp(r'/+$'), '');
+  return Uri(
+    scheme: uri.scheme,
+    host: uri.host,
+    port: port,
+  ).toString().replaceAll(RegExp(r'/+$'), '');
 }
 
 String text(Object? value, {String fallback = ''}) {

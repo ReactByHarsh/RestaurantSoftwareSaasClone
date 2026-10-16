@@ -43,9 +43,26 @@ export async function loadDesktopState() {
   return invoke<DesktopStatePayload>('load_local_state')
 }
 
+export async function readLocalDatabaseBackup(path: string) {
+  if (!isTauriDesktop()) throw new Error('SQLite backup restore is available in BhojPatra Desk.')
+  return invoke<DesktopStatePayload>('read_local_database_backup', { path })
+}
+
+export async function restoreLocalDatabaseBackup(path: string) {
+  if (!isTauriDesktop()) throw new Error('SQLite backup restore is available in BhojPatra Desk.')
+  return invoke<DesktopStatePayload>('restore_local_database_backup', { path })
+}
+
+let pendingSave: Promise<void> = Promise.resolve()
+
 export async function saveDesktopState(snapshot: BillingSnapshot, staff: StaffAccount[]) {
   if (!isTauriDesktop()) return
-  await invoke('save_local_state', { snapshot, staff })
+  // Every caller shares the queue, including table-close and settings saves.
+  // Separate per-component queues can let an older snapshot finish last.
+  pendingSave = pendingSave.catch(() => undefined).then(async () => {
+    await invoke('save_local_state', { snapshot, staff })
+  })
+  await pendingSave
 }
 
 export async function createDailyLocalBackup(force = false) {

@@ -22,10 +22,13 @@ import {
 } from '../../lib/cloudSync'
 import { getDeviceId, syncOrderDeltasNow } from '../../lib/orderSync'
 import { realtimeClient } from '../../lib/realtime'
+import { guardCloudSession } from '../../lib/cloudTransport'
 import { useBillingStore } from '../../store/billingStore'
 import { useAuthStore } from '../../store/authStore'
 import { useStaffStore } from '../../store/staffStore'
 import { useUIStore } from '../../store/uiStore'
+import { planKotPrintJobs } from '../../lib/kotPrintRouting'
+import { desktopKotPrintQueue } from '../../lib/kotPrintQueue'
 
 const BACKUP_CHECK_INTERVAL_MS = 60 * 60 * 1000
 
@@ -54,9 +57,7 @@ export default function DesktopBootstrap({ children }: { children: ReactNode }) 
       const staff = useStaffStore.getState().staff
       // Serialize writes so a slower older invocation cannot finish after a
       // newer one and put stale table carts back into SQLite.
-      saveInFlight = saveInFlight
-        .catch(() => undefined)
-        .then(() => saveDesktopState(snapshot, staff))
+      saveInFlight = saveDesktopState(snapshot, staff)
       return saveInFlight
     }
 
@@ -80,7 +81,10 @@ export default function DesktopBootstrap({ children }: { children: ReactNode }) 
     const runDailyBackup = async () => {
       if (!hydrationComplete || disposed) return
       await flushSave()
-      const result = await createDailyLocalBackup(false)
+      // Refresh the date-stamped snapshot so bills recorded later today are
+      // covered by the recovery copy, not just the database as it looked at
+      // the first app launch that day.
+      const result = await createDailyLocalBackup(true)
       if (result?.errors.length) {
         console.warn('Daily backup completed with inaccessible drive targets', result.errors)
       }
@@ -110,7 +114,8 @@ export default function DesktopBootstrap({ children }: { children: ReactNode }) 
       if (!useAuthStore.getState().isAuthenticated) return
       const billing = useBillingStore.getState()
       const cloud = billing.cloudSync
-      if (!cloud.enabled || !cloud.serverUrl) return
+      if (disposed || !cloud.enabled || !cloud.autoSyncEnabled || !cloud.serverUrl) return
+      const isCurrent = guardCloudSession(cloud)
       cloudSyncInFlight = true
       let retryScheduled = false
       try {
@@ -118,6 +123,7 @@ export default function DesktopBootstrap({ children }: { children: ReactNode }) 
         let outletId = cloud.outletId.trim()
         if (cloud.accountLogin && cloud.accountSecret) {
           const session = await runCloudLogin(cloud.serverUrl, cloud.accountLogin, cloud.accountSecret)
+          if (disposed || !isCurrent()) return
           tenantId = session.user.tenantId
           outletId = session.outlets[0]?.id || `out_${session.user.tenantId}`
         }
@@ -127,6 +133,7 @@ export default function DesktopBootstrap({ children }: { children: ReactNode }) 
         const cloudAuth = { accountLogin: cloud.accountLogin, accountSecret: cloud.accountSecret }
         const localSnapshot = billing.exportSnapshot()
         const result = await syncOrderDeltasNow(localSnapshot, effectiveCloud)
+        if (disposed || !isCurrent()) return
         if (result.changed) useBillingStore.getState().importSnapshot(result.snapshot, true)
         if (result.skipped || result.conflicts || result.pending) throw new Error('Cloud sync is incomplete; pending changes or conflicts need attention')
         const signedInRole = useAuthStore.getState().user?.role
@@ -152,11 +159,13 @@ export default function DesktopBootstrap({ children }: { children: ReactNode }) 
             cloudAuth,
           )
           if (uploaded.payload) {
+            if (disposed || !isCurrent()) return
             const current = useBillingStore.getState().exportSnapshot()
             useBillingStore.getState().importSnapshot(mergeOperationalSnapshot(current, uploaded.payload), true)
           }
         }
         const remote = await fetchCloudSnapshot(outletId, cloud.serverUrl, cloudAuth)
+        if (disposed || !isCurrent()) return
         if (remote.exists) {
           const remoteUpdatedAt = Date.parse(remote.updatedAt) || 0
           const lastDownloadedAt = Date.parse(cloud.lastCloudDownloadedAt || '') || 0
@@ -166,8 +175,10 @@ export default function DesktopBootstrap({ children }: { children: ReactNode }) 
           }
         }
         const cloudStaff = await fetchCloudStaff(cloud.serverUrl, cloudAuth)
+        if (disposed || !isCurrent()) return
         useStaffStore.getState().replaceStaff([...cloudStaff.staff, ...useStaffStore.getState().staff])
         await syncCloudStaff(useStaffStore.getState().staff, cloud.serverUrl, cloudAuth)
+        if (disposed || !isCurrent()) return
         const syncedAt = new Date().toISOString()
         useBillingStore.getState().updateCloudSyncSettings({
           tenantId,
@@ -183,6 +194,7 @@ export default function DesktopBootstrap({ children }: { children: ReactNode }) 
         cloudRetryAttempt = 0
         if (reason === 'daily') useUIStore.getState().addToast('success', 'Cloud delta sync completed', 'Cloud Sync')
       } catch (error) {
+        if (disposed || !isCurrent()) return
         console.error('Cloud sync failed', error)
         const retryMinutes = [1, 5, 15, 60]
         const delay = retryMinutes[Math.min(cloudRetryAttempt, retryMinutes.length - 1)]
@@ -207,7 +219,7 @@ export default function DesktopBootstrap({ children }: { children: ReactNode }) 
         cloud.lastSuccessfulSyncAt,
         cloud.nextSyncAt,
       ])
-      if (!useAuthStore.getState().isAuthenticated || !cloud.enabled || !cloud.autoSyncEnabled) return
+      if (disposed || !useAuthStore.getState().isAuthenticated || !cloud.enabled || !cloud.autoSyncEnabled) return
 
       const now = Date.now()
       let nextRun = getDailyCloudSyncDueAt(cloud, now)
@@ -305,12 +317,15 @@ export default function DesktopBootstrap({ children }: { children: ReactNode }) 
     }
 
     const start = async () => {
-      // Validate the saved Workers credentials before restoring the session.
-      // This gives first launch a login screen while allowing trusted repeat
-      // launches to open directly only when Cloud Admin still accepts them.
-      useAuthStore.getState().logout()
+      // Restore SQLite before rendering. Keep a remembered sign-in unless the
+      // user explicitly logged out; license validation is handled separately
+      // by DesktopLicenseGuard and cloud sync is independently opt-in.
       await hydrateRestaurantState()
       if (disposed) return
+      const kotQueue = desktopKotPrintQueue(message => useUIStore.getState().addToast('error', message, 'Kitchen printer'))
+      void kotQueue.flush(useBillingStore.getState().outlet.id).catch(error => {
+        useUIStore.getState().addToast('error', String(error), 'Kitchen print queue')
+      })
 
       const onStateChanged = () => {
         queueSave()
@@ -342,7 +357,24 @@ export default function DesktopBootstrap({ children }: { children: ReactNode }) 
         if (!payload || typeof payload !== 'object') return
         const snapshot = payload as Record<string, unknown>
         if (!Array.isArray(snapshot.orders) || !Array.isArray(snapshot.tables)) return
-        useBillingStore.getState().importSnapshot(snapshot as any, true)
+        // LAN writes are already committed to this desktop's SQLite. Keep local
+        // unsent drafts, but never replace accepted captain items with an older
+        // active-table session from the counter.
+        const previousKotIds = new Set(useBillingStore.getState().kots.map(kot => kot.id))
+        useBillingStore.getState().importSnapshot(snapshot as any, true, true)
+        const billing = useBillingStore.getState()
+        const receivedKots = billing.kots.filter(kot => kot.id.startsWith('captain_') && !previousKotIds.has(kot.id) && kot.status === 'new')
+        if (receivedKots.length) {
+          useUIStore.getState().addToast('success', `Captain sent ${receivedKots.length} KOT(s)`, 'Captain LAN')
+          if (billing.printSettings.autoPrintCaptainKot !== false) {
+            try {
+              kotQueue.enqueue(billing.outlet.id, planKotPrintJobs(receivedKots, billing.stations, billing.printSettings, billing.outlet))
+              void kotQueue.flush(billing.outlet.id).catch(error => useUIStore.getState().addToast('error', String(error), 'Kitchen print queue'))
+            } catch (error) {
+              useUIStore.getState().addToast('error', `Could not save KOT print queue: ${String(error)}`, 'Kitchen printer')
+            }
+          }
+        }
       })
       const previousBillingUnsubscribe = unsubscribeBilling
       unsubscribeBilling = () => {
@@ -350,13 +382,6 @@ export default function DesktopBootstrap({ children }: { children: ReactNode }) 
         unsubscribeAuth()
       }
 
-      const savedCloud = useBillingStore.getState().cloudSync
-      if (savedCloud.accountLogin && savedCloud.accountSecret) {
-        const result = await useAuthStore.getState().login(savedCloud.accountLogin, savedCloud.accountSecret)
-        if (!result.success && !disposed) {
-          useUIStore.getState().addToast('warning', 'Saved cloud login could not be verified. Please sign in again.', 'Cloud Login')
-        }
-      }
       if (disposed) return
 
       const flushOnPageExit = () => {

@@ -1,5 +1,6 @@
 import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
+import type { AppLanguage } from '../i18n/types'
 
 interface Toast {
   id: string
@@ -9,12 +10,14 @@ interface Toast {
 }
 
 interface UIStore {
+  language: AppLanguage
   activeModule: string
   sidebarExpanded: boolean
   tableCompactView: boolean
   tableRightSidebarOpen: boolean
   toasts: Toast[]
 
+  setLanguage: (language: AppLanguage) => void
   setActiveModule: (mod: string) => void
   toggleSidebar: () => void
   setSidebarExpanded: (v: boolean) => void
@@ -27,12 +30,14 @@ interface UIStore {
 export const useUIStore = create<UIStore>()(
   persist(
     (set, get) => ({
+      language: 'en',
       activeModule: 'billing',
       sidebarExpanded: true,
       tableCompactView: false,
       tableRightSidebarOpen: true,
       toasts: [],
 
+      setLanguage: (language) => set({ language }),
       setActiveModule: (mod) => set({ activeModule: mod }),
       toggleSidebar: () => set(s => ({ sidebarExpanded: !s.sidebarExpanded })),
       setSidebarExpanded: (v) => set({ sidebarExpanded: v }),
@@ -52,6 +57,7 @@ export const useUIStore = create<UIStore>()(
     {
       name: 'bhojpatra-ui-v1',
       partialize: (state) => ({
+        language: state.language,
         activeModule: state.activeModule,
         sidebarExpanded: state.sidebarExpanded,
         tableCompactView: state.tableCompactView,
@@ -60,6 +66,7 @@ export const useUIStore = create<UIStore>()(
       merge: (persistedState, currentState) => ({
         ...currentState,
         ...(persistedState as Partial<UIStore> | undefined),
+        language: (persistedState as Partial<UIStore> | undefined)?.language ?? currentState.language,
         toasts: [],
       }),
     }

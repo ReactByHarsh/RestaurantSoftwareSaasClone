@@ -40,3 +40,8 @@ export function calculateTotal(pricePaise: number, quantity: number, taxPercent:
   const tax = calculateTax(subtotal, taxPercent)
   return subtotal + tax
 }
+
+/** Bill/report total excluding a separately recorded customer tip. */
+export function getBillableOrderTotalPaise(order: { totalPaise: number; tipPaise?: number }): number {
+  return Math.max(0, order.totalPaise - Math.max(0, Math.round(order.tipPaise ?? 0)))
+}

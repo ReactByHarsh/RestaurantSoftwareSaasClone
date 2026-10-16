@@ -1,5 +1,5 @@
 import type { KOT, MenuCategory, MenuItem, Order, OrderItem, Payment } from './types'
-import { calculateTax } from './money'
+import { calculateTax, getBillableOrderTotalPaise } from './money'
 import { buildUpiPaymentUrl } from './upi'
 
 type OutletPrintInfo = { name: string; address?: string; phone?: string; gstin?: string; logoDataUrl?: string }
@@ -107,10 +107,11 @@ function tableHeader(width: number) {
 function paymentSummaryLines(order: Order, payments: Payment[], width: number) {
   const successfulPayments = payments.filter((payment) => payment.status === 'success')
   const paidPaise = successfulPayments.reduce((sum, payment) => sum + payment.amountPaise, 0)
+  const billableTotalPaise = getBillableOrderTotalPaise(order)
   const cashPaise = successfulPayments
     .filter((payment) => payment.method === 'cash')
     .reduce((sum, payment) => sum + payment.amountPaise, 0)
-  const pendingPaise = Math.max(0, order.totalPaise - Math.min(order.totalPaise, paidPaise))
+  const pendingPaise = Math.max(0, billableTotalPaise - Math.min(billableTotalPaise, paidPaise))
   const methodTotals = successfulPayments.reduce<Record<string, number>>((acc, payment) => {
     acc[payment.method] = (acc[payment.method] ?? 0) + payment.amountPaise
     return acc
@@ -118,7 +119,7 @@ function paymentSummaryLines(order: Order, payments: Payment[], width: number) {
   return [
     rule(width),
     center('PAYMENT DETAILS', width),
-    columns('Paid Amount', money(Math.min(order.totalPaise, paidPaise)), width),
+    columns('Paid Amount', money(Math.min(billableTotalPaise, paidPaise)), width),
     columns('Cash', money(cashPaise), width),
     ...Object.entries(methodTotals)
       .filter(([method]) => method !== 'cash')
@@ -138,7 +139,7 @@ function receiptUpiAmountPaise(order: Order, payments: Payment[]) {
   }
   // Draft/proforma receipts have no payment rows yet, so the full payable amount is
   // the amount the customer should be invited to pay by UPI.
-  return Math.max(0, order.totalPaise)
+  return getBillableOrderTotalPaise(order)
 }
 
 function upiPaymentLines(order: Order, settings: ReceiptPrintInfo, amountPaise: number, width: number) {
@@ -314,7 +315,7 @@ export function buildReceiptPrintText(
     ...(order.taxPaise > 0 ? [columns('GST', money(order.taxPaise), width)] : []),
     ...(order.discountPaise > 0 ? [columns('Discount', `-${money(order.discountPaise)}`, width)] : []),
     rule(width, '='),
-    columns('TOTAL', money(order.totalPaise), width),
+    columns('TOTAL', money(getBillableOrderTotalPaise(order)), width),
   )
   if (type === 'invoice') {
     lines.push(columns('Paid', money(order.paidPaise), width))
@@ -390,7 +391,7 @@ export function buildReceiptPrintParts(
       ...(totals.taxPaise > 0 ? [columns('CGST', money(totals.cgstPaise), width), columns('SGST', money(totals.sgstPaise), width)] : []),
       rule(width, '='),
       ...(previousPartsNetPaise !== undefined ? [columns('Previous Bills Total', money(previousPartsNetPaise), width)] : []),
-      columns(netLabel, money(totals.netPaise), width),
+      columns(netLabel, money(partCount === 1 ? getBillableOrderTotalPaise(order) : totals.netPaise), width),
       ...(previousPartsNetPaise !== undefined ? [columns('Grand Total', money(grandTotalPaise), width)] : []),
     )
     const upiPaymentUrl = buildReceiptUpiPaymentUrl(order, settings, paymentAmountPaise)

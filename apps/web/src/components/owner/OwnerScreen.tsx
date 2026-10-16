@@ -196,7 +196,6 @@ export default function OwnerScreen() {
       const tenantId = session.user.tenantId
       const outletId = session.outlets[0]?.id || `out_${tenantId}`
       updateCloudSyncSettings({
-        enabled: true,
         tenantId,
         outletId,
         cloudMode: 'delta_v2',

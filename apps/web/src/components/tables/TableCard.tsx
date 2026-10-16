@@ -22,6 +22,7 @@ interface Props {
   onMerge?: () => void
   onShare?: () => void
   onRemove?: () => void
+  onCheckout?: () => void
   onClick?: () => void
 }
 
@@ -46,7 +47,7 @@ function formatElapsed(ms: number) {
   return `${minutes}m ${String(seconds).padStart(2, '0')}s`
 }
 
-export default function TableCard({ table, activeOrder, compact = false, canManage = false, floorColor, floorBadge, floorName, onEdit, onTransfer, onMerge, onShare, onRemove, onClick }: Props) {
+export default function TableCard({ table, activeOrder, compact = false, canManage = false, floorColor, floorBadge, floorName, onEdit, onTransfer, onMerge, onShare, onRemove, onCheckout, onClick }: Props) {
   const navigate = useNavigate()
   const { selectTable, updateTableStatus, savedCarts } = useBillingStore()
   const config = STATUS_CONFIG[table.status] || STATUS_CONFIG.available
@@ -153,6 +154,11 @@ export default function TableCard({ table, activeOrder, compact = false, canMana
     onRemove?.()
   }
 
+  const handleCheckoutClick = (e: React.MouseEvent) => {
+    e.stopPropagation()
+    onCheckout?.()
+  }
+
   const isSharedTable = /\([a-z]\)$/.test(table.name.trim())
 
   return (
@@ -233,7 +239,7 @@ export default function TableCard({ table, activeOrder, compact = false, canMana
       )}
 
       {/* Card Body */}
-      <div className={clsx('flex-1 flex flex-col', compact ? 'px-1.5 py-0.5' : 'p-2.5 pt-1.5')}>
+        <div className={clsx('flex min-h-0 flex-1 flex-col overflow-hidden', compact ? 'px-1.5 py-0.5' : 'p-2.5 pt-1.5')}>
         <div className={clsx('min-w-0 z-0', compact ? 'space-y-0' : 'space-y-1')}>
           {floorName && floorBadge && (
             <div>
@@ -254,8 +260,8 @@ export default function TableCard({ table, activeOrder, compact = false, canMana
           </div>
         </div>
 
-        {activeOrder && (
-          <div className={clsx('mt-0.5 min-w-0 space-y-0 leading-[9px]', compact ? 'text-[7px]' : 'text-[10px] leading-normal')}>
+          {activeOrder && (
+          <div className={clsx('mt-0.5 flex min-h-0 min-w-0 flex-1 flex-col leading-[9px]', compact ? 'text-[7px]' : 'text-[10px] leading-normal')}>
             <p className={clsx('whitespace-nowrap font-black', config.text)} title={`Order time ${orderTimeLabel}`}>
               Time: {orderTimeLabel}
             </p>
@@ -265,6 +271,19 @@ export default function TableCard({ table, activeOrder, compact = false, canMana
             <p className={clsx('whitespace-nowrap font-black', config.text)} title={`Order total ${formatPaise(visibleOrderTotalPaise)}`}>
               Total: {compact ? formatPaiseShort(visibleOrderTotalPaise) : formatPaise(visibleOrderTotalPaise)}
             </p>
+            {onCheckout && (
+              <button
+                onClick={handleCheckoutClick}
+                aria-label={`Checkout ${table.name}`}
+                title="Checkout"
+                className={clsx(
+                  'absolute z-20 flex items-center justify-center rounded-md bg-primary font-black uppercase tracking-wide text-white shadow-sm transition-colors hover:bg-primary-dark',
+                  compact ? 'bottom-1 right-1 h-5 w-5 p-0 text-[7px]' : 'bottom-1.5 left-2 right-2 h-6 px-2 text-[8px]'
+                )}
+              >
+                {compact ? <ReceiptText size={11} strokeWidth={3} /> : 'Checkout'}
+              </button>
+            )}
           </div>
         )}
 

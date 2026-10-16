@@ -8,7 +8,7 @@ import {
   useBillingStore,
   type CartItem,
 } from './billingStore'
-import { localSyncDb } from '../lib/orderSync'
+import { localSyncDb, dexieBusinessStateStorage } from '../lib/orderSync'
 
 vi.hoisted(() => {
   const values = new Map<string, string>()
@@ -186,6 +186,7 @@ describe('section pricing', () => {
 describe('billing store stale-state recovery', () => {
   beforeEach(async () => {
     vi.restoreAllMocks()
+    localStorage.clear()
     await Promise.all([
       localSyncDb.syncRecords.clear(),
       localSyncDb.syncOutbox.clear(),
@@ -194,6 +195,35 @@ describe('billing store stale-state recovery', () => {
       localSyncDb.snapshots.clear(),
     ])
     useBillingStore.getState().reset()
+  })
+
+  it('keeps cloud sync and automatic cloud backup opt-in by default', () => {
+    const initialCloud = useBillingStore.getState().cloudSync
+    expect(initialCloud.enabled).toBe(false)
+    expect(initialCloud.autoSyncEnabled).toBe(false)
+    expect(initialCloud.autoSyncDaily).toBe(false)
+
+    useBillingStore.getState().updateCloudSyncSettings({ enabled: true, autoSyncEnabled: true, autoSyncDaily: true })
+    useBillingStore.getState().updateCloudSyncSettings({ enabled: false })
+    const disabledCloud = useBillingStore.getState().cloudSync
+    expect(disabledCloud.enabled).toBe(false)
+    expect(disabledCloud.autoSyncEnabled).toBe(false)
+    expect(disabledCloud.autoSyncDaily).toBe(false)
+    expect(disabledCloud.nextSyncAt).toBeUndefined()
+  })
+
+  it('shows committed LAN captain items while preserving the counters unsent draft', () => {
+    const local = order('running')
+    useBillingStore.setState({ tables: [table(local.id)], orders: [local], orderItems: [savedOrderItem],
+      currentOrder: local, selectedTableId: 'table-1', cart: [cartItem], savedCarts: {}, activeOrderType: 'dine_in' })
+    const incoming = useBillingStore.getState().exportSnapshot()
+    const captainItem = { ...savedOrderItem, id: 'oi-captain', quantity: 5, totalPaise: 50000 }
+    incoming.orderItems.push(captainItem)
+    incoming.orders[0] = { ...local, subtotalPaise: 60000, totalPaise: 60000, version: 2 }
+    useBillingStore.getState().importSnapshot(incoming, true, true)
+    expect(useBillingStore.getState().orderItems.map(item => item.id)).toContain('oi-captain')
+    expect(useBillingStore.getState().currentOrder?.totalPaise).toBe(60000)
+    expect(useBillingStore.getState().cart).toEqual([cartItem])
   })
 
   it('exports the active table cart even before the user switches tables', () => {
@@ -211,6 +241,106 @@ describe('billing store stale-state recovery', () => {
     expect(useBillingStore.getState().exportSnapshot().savedCarts).toEqual({
       'table-1': [cartItem],
     })
+  })
+
+  it('keeps five table products after leaving a takeaway screen, reopening and restarting', () => {
+    useBillingStore.setState({ tables: [table()], activeOrderType: 'takeaway' })
+    useBillingStore.getState().selectTable('table-1')
+    for (let index = 0; index < 5; index++) {
+      useBillingStore.getState().addToCart({
+        id: `product-${index}`, name: `Product ${index}`, outletId: 'outlet-1',
+        categoryId: 'category-1', pricePaise: 10000, taxPercent: 0, itemType: 'veg',
+        isAvailable: true, productType: 'sale_only',
+      } as MenuItem)
+    }
+    const orderId = useBillingStore.getState().currentOrder?.id
+    useBillingStore.getState().closeTableView()
+    useBillingStore.getState().selectTable('table-1')
+    expect(useBillingStore.getState().activeOrderType).toBe('dine_in')
+    expect(useBillingStore.getState().cart).toHaveLength(5)
+    expect(useBillingStore.getState().currentOrder?.id).toBe(orderId)
+    const snapshot = useBillingStore.getState().exportSnapshot()
+    useBillingStore.getState().reset()
+    useBillingStore.getState().importSnapshot(snapshot)
+    useBillingStore.getState().selectTable('table-1')
+    expect(useBillingStore.getState().cart).toHaveLength(5)
+    expect(useBillingStore.getState().currentOrder?.id).toBe(orderId)
+  })
+
+  it('retains unlinked table drafts instead of silently deleting them during normalization', () => {
+    const snapshot = { ...useBillingStore.getState().exportSnapshot(), tables: [table()],
+      savedCarts: { 'table-1': [cartItem] } }
+    useBillingStore.getState().importSnapshot(snapshot)
+    useBillingStore.getState().selectTable('table-1')
+    expect(useBillingStore.getState().cart).toEqual([cartItem])
+    useBillingStore.getState().startNewOrder('user-1', 'Owner')
+    expect(useBillingStore.getState().cart).toEqual([cartItem])
+  })
+
+  it('does not re-enable cloud sync from a stale incoming live snapshot', () => {
+    useBillingStore.getState().updateCloudSyncSettings({ enabled: false })
+    const snapshot = useBillingStore.getState().exportSnapshot()
+    useBillingStore.getState().importSnapshot({ ...snapshot, cloudSync: { ...snapshot.cloudSync!, enabled: true } }, true)
+    expect(useBillingStore.getState().cloudSync.enabled).toBe(false)
+  })
+
+  it('keeps the saved offline switch when restoring an older SQLite snapshot', () => {
+    const oldSnapshot = useBillingStore.getState().exportSnapshot()
+    useBillingStore.getState().updateCloudSyncSettings({ enabled: false })
+    useBillingStore.getState().importSnapshot({ ...oldSnapshot, cloudSync: { ...oldSnapshot.cloudSync!, enabled: true } })
+    expect(useBillingStore.getState().cloudSync.enabled).toBe(false)
+    expect(JSON.parse(localStorage.getItem('bhojpatra-cloud-settings-v2')!).enabled).toBe(false)
+  })
+
+  it('does not overwrite the offline choice during legacy browser-storage migration', async () => {
+    useBillingStore.getState().updateCloudSyncSettings({ enabled: false })
+    const key = 'offline-preference-migration-test'
+    localStorage.setItem(key, JSON.stringify({ state: { cloudSync: { enabled: true } } }))
+    await localSyncDb.appState.delete(key)
+    await dexieBusinessStateStorage.getItem(key)
+    expect(JSON.parse(localStorage.getItem('bhojpatra-cloud-settings-v2')!).enabled).toBe(false)
+  })
+
+  it('clears a parked draft after an authoritative remote checkout while the table view is closed', () => {
+    const activeOrder = { ...order('running'), version: 1 }
+    useBillingStore.setState({ tables: [table(activeOrder.id)], orders: [activeOrder],
+      currentOrder: null, selectedTableId: null, savedCarts: { 'table-1': [cartItem] } })
+    const snapshot = useBillingStore.getState().exportSnapshot()
+    useBillingStore.getState().importSnapshot({ ...snapshot, orders: [{ ...order('paid'), version: 2 }],
+      tables: [table()], savedCarts: {} }, true)
+    useBillingStore.getState().selectTable('table-1')
+    expect(useBillingStore.getState().cart).toEqual([])
+    expect(useBillingStore.getState().savedCarts).not.toHaveProperty('table-1')
+  })
+
+  it('repairs an older table order with the wrong order type without deleting its products', () => {
+    const activeOrder = { ...order('running'), type: 'takeaway' as const }
+    useBillingStore.setState({ tables: [table(activeOrder.id)], orders: [activeOrder],
+      currentOrder: activeOrder, selectedTableId: 'table-1', cart: [cartItem],
+      savedCarts: { 'table-1': [cartItem] }, activeOrderType: 'takeaway' })
+    useBillingStore.getState().selectTable('table-1')
+    expect(useBillingStore.getState().cart).toEqual([cartItem])
+    expect(useBillingStore.getState().currentOrder?.type).toBe('dine_in')
+    useBillingStore.getState().closeTableView()
+    useBillingStore.getState().selectTable('table-1')
+    expect(useBillingStore.getState().cart).toEqual([cartItem])
+  })
+
+  it('keeps separate carts when switching tables and changing order types', () => {
+    useBillingStore.setState({ tables: [table(), { ...table(), id: 'table-2', name: 'Table 2' }] })
+    const product = { id: 'product-1', categoryId: 'category-1', name: 'Product', itemType: 'veg',
+      pricePaise: 10000, taxPercent: 0, isAvailable: true, productType: 'sale_only' } as MenuItem
+    useBillingStore.getState().selectTable('table-1')
+    useBillingStore.getState().addToCart(product)
+    useBillingStore.getState().selectTable('table-2')
+    useBillingStore.getState().addToCart(product)
+    useBillingStore.getState().addToCart(product)
+    useBillingStore.getState().setOrderType('delivery')
+    expect(useBillingStore.getState().selectedTableId).toBeNull()
+    useBillingStore.getState().selectTable('table-1')
+    expect(useBillingStore.getState().cart[0]?.quantity).toBe(1)
+    useBillingStore.getState().selectTable('table-2')
+    expect(useBillingStore.getState().cart[0]?.quantity).toBe(2)
   })
 
   it('reopens a persisted occupied table with its unsent cart', () => {

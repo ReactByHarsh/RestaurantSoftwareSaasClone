@@ -51,4 +51,12 @@ describe('daily cloud sync schedule', () => {
     expect(mergeOperationalSnapshot(local, operational).orders.map((order) => order.id).sort()).toEqual(['closed', 'open'])
     expect(mergeOperationalSnapshot(local, operational).purchaseEntries).toHaveLength(1)
   })
+
+  it('includes unlinked table drafts in operational snapshots but excludes carts linked to closed orders', () => {
+    const local = snapshotWithOrders([{ id: 'closed', status: 'paid' } as BillingSnapshot['orders'][number]])
+    local.tables = [{ id: 'draft-table' }, { id: 'paid-table', activeOrderId: 'closed' }] as BillingSnapshot['tables']
+    const cart = [{ menuItemId: 'product-1', quantity: 1 }] as NonNullable<BillingSnapshot['savedCarts']>[string]
+    local.savedCarts = { 'draft-table': cart, 'paid-table': cart }
+    expect(createOperationalSnapshot(local).savedCarts).toEqual({ 'draft-table': cart })
+  })
 })

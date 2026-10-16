@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom'
 import { LogOut, Search, Bell } from 'lucide-react'
 import { useAuthStore } from '../../store/authStore'
 import { useBillingStore } from '../../store/billingStore'
+import { useI18n } from '../../lib/i18n'
 
 export default function TopStatusBar() {
   const navigate = useNavigate()
@@ -10,6 +11,7 @@ export default function TopStatusBar() {
   const [showUserMenu, setShowUserMenu] = useState(false)
   const activeKOTs = useBillingStore(s => s.getActiveKOTs())
   const outlet = useBillingStore(s => s.outlet)
+  const { t } = useI18n()
   const accessLabel = user?.accessStartsAt || user?.accessEndsAt
     ? `${user.accessStartsAt ? new Date(user.accessStartsAt).toLocaleDateString('en-IN') : 'Now'} - ${user.accessEndsAt ? new Date(user.accessEndsAt).toLocaleDateString('en-IN') : 'No expiry'}`
     : ''
@@ -55,7 +57,7 @@ export default function TopStatusBar() {
           <Search size={13} className="flex-shrink-0 text-slate-400" />
           <input
             type="text"
-            placeholder="Quick search…"
+            placeholder={t('quickSearch')}
             className="bg-transparent border-none outline-none w-full text-slate-700 placeholder:text-slate-400 text-xs"
           />
         </div>
@@ -67,7 +69,7 @@ export default function TopStatusBar() {
             className="flex items-center gap-1.5 bg-amber-50 border border-amber-200 text-amber-700 px-2 py-1.5 rounded-lg text-xs font-bold hover:bg-amber-100 transition-colors shadow-sm"
           >
             <Bell size={13} className="animate-pulse" />
-            <span className="hidden xs:inline">{activeKOTs.length} KOT</span>
+            <span className="hidden xs:inline">{activeKOTs.length} {t('kot')}</span>
             <span className="xs:hidden">{activeKOTs.length}</span>
           </button>
         )}
@@ -105,7 +107,7 @@ export default function TopStatusBar() {
                     className="w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-semibold text-red-600 hover:bg-red-50 transition-colors"
                   >
                     <LogOut size={15} />
-                    Sign Out
+                    {t('signOut')}
                   </button>
                 </div>
               </div>

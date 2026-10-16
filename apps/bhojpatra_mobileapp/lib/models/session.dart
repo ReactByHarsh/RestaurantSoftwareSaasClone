@@ -42,11 +42,11 @@ class SavedSession {
       mode: storedMode == 'cloud_owner'
           ? 'cloud_live'
           : text(
-        storedMode,
-        fallback: serverModeLabel(text(json['serverUrl'])) == 'CLOUD'
-            ? 'cloud_live'
-            : 'lan',
-      ),
+              storedMode,
+              fallback: serverModeLabel(text(json['serverUrl'])) == 'CLOUD'
+                  ? 'cloud_live'
+                  : 'lan',
+            ),
     );
   }
 }

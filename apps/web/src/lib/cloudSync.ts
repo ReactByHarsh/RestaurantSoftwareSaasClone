@@ -1,5 +1,7 @@
+import { cloudFetch } from './cloudTransport'
 import type {
   AuditLog,
+  Expense,
   Floor,
   InventoryItem,
   KOT,
@@ -70,6 +72,7 @@ export type BillingSnapshot = {
   stations: Station[]
   inventoryItems: InventoryItem[]
   purchaseEntries?: PurchaseEntry[]
+  expenses?: Expense[]
   orders: Order[]
   orderItems: OrderItem[]
   kots: KOT[]
@@ -105,11 +108,11 @@ export function createOperationalSnapshot(snapshot: BillingSnapshot): BillingSna
     if (!table.activeOrderId || activeOrderIds.has(table.activeOrderId)) return table
     return { ...table, status: table.status === 'dirty' ? 'dirty' as const : 'available' as const, activeOrderId: undefined }
   })
-  const activeTableIds = new Set(tables
-    .filter((table) => table.activeOrderId && activeOrderIds.has(table.activeOrderId))
+  const draftTableIds = new Set(snapshot.tables
+    .filter((table) => !table.activeOrderId || !snapshot.orders.some(order => order.id === table.activeOrderId && isClosedSnapshotOrder(order)))
     .map((table) => table.id))
   const savedCarts = Object.fromEntries(Object.entries(snapshot.savedCarts ?? {})
-    .filter(([key]) => activeTableIds.has(key) || activeOrderIds.has(key)))
+    .filter(([key, cart]) => Array.isArray(cart) && cart.length > 0 && (draftTableIds.has(key) || activeOrderIds.has(key))))
 
   return withoutCloudSecret({
     ...snapshot,
@@ -138,6 +141,7 @@ export function mergeOperationalSnapshot(local: BillingSnapshot, cloud: BillingS
     cloudSync: local.cloudSync,
     appUpdate: local.appUpdate,
     purchaseEntries: local.purchaseEntries ?? [],
+    expenses: local.expenses ?? [],
     auditLogs: local.auditLogs,
     orders: [...cloud.orders, ...localClosedOrders.filter((order) => !cloudOrderIds.has(order.id))],
     orderItems: [...cloud.orderItems, ...local.orderItems.filter((item) => localClosedIds.has(item.orderId) && !cloudOrderIds.has(item.orderId))],
@@ -197,6 +201,9 @@ function authHeaders(auth?: CloudAuth): Record<string, string> {
 }
 
 export async function runCloudLogin(serverUrl: string, emailOrPhone: string, password: string): Promise<{ user: User; outlets: OutletSettings[] }> {
+  // Account authentication is separate from restaurant-data sync: a user must
+  // be able to sign in and validate a desktop license even when cloud sync is
+  // disabled for the business data on this computer.
   const response = await fetch(`${cleanBaseUrl(serverUrl)}/api/v1/auth/login`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
@@ -221,7 +228,7 @@ export async function fetchCloudBootstrap(
   serverUrl = 'https://bhojpatra-cloud.yash-v-shinde.workers.dev',
   auth?: CloudAuth
 ): Promise<{ outlet: OutletSettings; users: User[]; realtime: { status: string; transport: string; manualSyncRequired: boolean } }> {
-  const response = await fetch(`${cleanBaseUrl(serverUrl)}/api/v1/outlets/${encodeURIComponent(outletId)}/bootstrap`, {
+  const response = await cloudFetch(`${cleanBaseUrl(serverUrl)}/api/v1/outlets/${encodeURIComponent(outletId)}/bootstrap`, {
     headers: { Accept: 'application/json', ...authHeaders(auth) },
     credentials: 'include',
   })
@@ -244,7 +251,7 @@ export async function fetchCloudStaff(serverUrl?: string, auth?: CloudAuth): Pro
   const baseUrl = serverUrl || cloud?.serverUrl
   const effectiveAuth = auth || cloud?.auth
   if (!baseUrl) return { staff: [] }
-  const response = await fetch(`${cleanBaseUrl(baseUrl)}/api/v1/staff/sync`, {
+  const response = await cloudFetch(`${cleanBaseUrl(baseUrl)}/api/v1/staff/sync`, {
     headers: { Accept: 'application/json', ...authHeaders(effectiveAuth) },
     credentials: 'include',
   })
@@ -273,7 +280,7 @@ export async function syncCloudStaff(staff: StaffAccount[], serverUrl?: string, 
   const baseUrl = serverUrl || cloud?.serverUrl
   const effectiveAuth = auth || cloud?.auth
   if (!baseUrl) return { staff }
-  const response = await fetch(`${cleanBaseUrl(baseUrl)}/api/v1/staff/sync`, {
+  const response = await cloudFetch(`${cleanBaseUrl(baseUrl)}/api/v1/staff/sync`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Accept: 'application/json', ...authHeaders(effectiveAuth) },
     credentials: 'include',
@@ -300,11 +307,12 @@ export function getSnapshotDataScore(snapshot: BillingSnapshot) {
     snapshot.menuCategories.length * 2,
     snapshot.inventoryItems.length * 2,
     (snapshot.purchaseEntries?.length ?? 0) * 3,
+    (snapshot.expenses?.length ?? 0) * 3,
   ].reduce((score, value) => score + value, 0)
 }
 
 export async function fetchCloudSnapshot(outletId: string, serverUrl = 'https://bhojpatra-cloud.yash-v-shinde.workers.dev', auth?: CloudAuth): Promise<CloudStateResponse> {
-  const response = await fetch(`${cleanBaseUrl(serverUrl)}/api/v1/outlets/${encodeURIComponent(outletId)}/state`, {
+  const response = await cloudFetch(`${cleanBaseUrl(serverUrl)}/api/v1/outlets/${encodeURIComponent(outletId)}/state`, {
     headers: { Accept: 'application/json', ...authHeaders(auth) },
     credentials: 'include',
   })
@@ -314,7 +322,7 @@ export async function fetchCloudSnapshot(outletId: string, serverUrl = 'https://
 
 const completeSnapshotCollections = [
   'menuCategories', 'menuItems', 'floors', 'tables', 'stations',
-  'inventoryItems', 'purchaseEntries', 'orders', 'orderItems',
+  'inventoryItems', 'purchaseEntries', 'expenses', 'orders', 'orderItems',
   'kots', 'payments', 'auditLogs',
 ] as const
 
@@ -343,7 +351,7 @@ export async function fetchCloudOrderHistory(
   let cursor = 0
   let hasMore = true
   while (hasMore) {
-    const response = await fetch(`${cleanBaseUrl(serverUrl)}/api/v1/state/${encodeURIComponent(outletId)}/history?cursor=${cursor}&limit=200`, {
+    const response = await cloudFetch(`${cleanBaseUrl(serverUrl)}/api/v1/state/${encodeURIComponent(outletId)}/history?cursor=${cursor}&limit=200`, {
       headers: { Accept: 'application/json', ...authHeaders(auth) },
       credentials: 'include',
     })
@@ -420,7 +428,7 @@ export async function saveCloudSnapshot(
   auth?: CloudAuth
 ): Promise<{ ok: true; outletId: string; updatedAt: string; skipped?: boolean; payload?: BillingSnapshot }> {
   const safePayload = createOperationalSnapshot(payload)
-  const response = await fetch(`${cleanBaseUrl(serverUrl)}/api/v1/outlets/${encodeURIComponent(outletId)}/state`, {
+  const response = await cloudFetch(`${cleanBaseUrl(serverUrl)}/api/v1/outlets/${encodeURIComponent(outletId)}/state`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json', Accept: 'application/json', ...authHeaders(auth) },
     credentials: 'include',
@@ -443,7 +451,7 @@ export async function saveCloudDailyBackup(
     snapshotKind: 'full',
     snapshotSchemaVersion: 1,
   })
-  const response = await fetch(`${cleanBaseUrl(serverUrl)}/api/v1/outlets/${encodeURIComponent(outletId)}/backups/daily`, {
+  const response = await cloudFetch(`${cleanBaseUrl(serverUrl)}/api/v1/outlets/${encodeURIComponent(outletId)}/backups/daily`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Accept: 'application/json', ...authHeaders(auth) },
     credentials: 'include',
@@ -463,7 +471,7 @@ export async function fetchInitialState(
   const baseUrl = serverUrl || cloud?.serverUrl
   const effectiveAuth = auth || cloud?.auth
   if (!baseUrl) return { exists: false, payload: {} as BillingSnapshot, updatedAt: now() }
-  const response = await fetch(`${cleanBaseUrl(baseUrl)}/api/v1/state/${encodeURIComponent(outletId)}/initial-state`, {
+  const response = await cloudFetch(`${cleanBaseUrl(baseUrl)}/api/v1/state/${encodeURIComponent(outletId)}/initial-state`, {
     headers: { Accept: 'application/json', ...authHeaders(effectiveAuth) },
     credentials: 'include',
   })
@@ -474,7 +482,7 @@ export async function fetchInitialState(
 export async function createCloudOrder(order: Order, items: OrderItem[]) {
   const cloud = activeCloudSettings()
   if (!cloud) return { ok: true, order, items, skipped: true }
-  const response = await fetch(`${cleanBaseUrl(cloud.serverUrl)}/api/v1/orders`, {
+  const response = await cloudFetch(`${cleanBaseUrl(cloud.serverUrl)}/api/v1/orders`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Accept: 'application/json', ...authHeaders(cloud.auth) },
     credentials: 'include',
@@ -487,7 +495,7 @@ export async function createCloudOrder(order: Order, items: OrderItem[]) {
 export async function updateCloudOrder(order: Order, items: OrderItem[]) {
   const cloud = activeCloudSettings()
   if (!cloud) return { ok: true, order, items, skipped: true }
-  const response = await fetch(`${cleanBaseUrl(cloud.serverUrl)}/api/v1/orders/${encodeURIComponent(order.id)}`, {
+  const response = await cloudFetch(`${cleanBaseUrl(cloud.serverUrl)}/api/v1/orders/${encodeURIComponent(order.id)}`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json', Accept: 'application/json', ...authHeaders(cloud.auth) },
     credentials: 'include',
@@ -500,7 +508,7 @@ export async function updateCloudOrder(order: Order, items: OrderItem[]) {
 export async function addCloudKOT(outletId: string, kot: KOT) {
   const cloud = activeCloudSettings()
   if (!cloud) return { ok: true, outletId, kot, skipped: true }
-  const response = await fetch(`${cleanBaseUrl(cloud.serverUrl)}/api/v1/kots/${encodeURIComponent(outletId)}`, {
+  const response = await cloudFetch(`${cleanBaseUrl(cloud.serverUrl)}/api/v1/kots/${encodeURIComponent(outletId)}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Accept: 'application/json', ...authHeaders(cloud.auth) },
     credentials: 'include',
@@ -513,7 +521,7 @@ export async function addCloudKOT(outletId: string, kot: KOT) {
 export async function updateCloudKOT(outletId: string, kot: KOT) {
   const cloud = activeCloudSettings()
   if (!cloud) return { ok: true, outletId, kot, skipped: true }
-  const response = await fetch(`${cleanBaseUrl(cloud.serverUrl)}/api/v1/kots/${encodeURIComponent(outletId)}/${encodeURIComponent(kot.id)}`, {
+  const response = await cloudFetch(`${cleanBaseUrl(cloud.serverUrl)}/api/v1/kots/${encodeURIComponent(outletId)}/${encodeURIComponent(kot.id)}`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json', Accept: 'application/json', ...authHeaders(cloud.auth) },
     credentials: 'include',
@@ -526,7 +534,7 @@ export async function updateCloudKOT(outletId: string, kot: KOT) {
 export async function addCloudPayment(outletId: string, payment: Payment) {
   const cloud = activeCloudSettings()
   if (!cloud) return { ok: true, outletId, payment, skipped: true }
-  const response = await fetch(`${cleanBaseUrl(cloud.serverUrl)}/api/v1/payments/${encodeURIComponent(outletId)}`, {
+  const response = await cloudFetch(`${cleanBaseUrl(cloud.serverUrl)}/api/v1/payments/${encodeURIComponent(outletId)}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Accept: 'application/json', ...authHeaders(cloud.auth) },
     credentials: 'include',

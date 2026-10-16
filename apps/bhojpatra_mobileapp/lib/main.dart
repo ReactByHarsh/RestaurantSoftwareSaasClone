@@ -4,52 +4,44 @@ import 'dart:convert';
 import 'models/session.dart';
 import 'screens/login_screen.dart';
 import 'screens/mobile_home.dart';
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
+import 'theme/bhojpatra_theme.dart';
 
 void main() {
   runApp(const BhojPatraMobileApp());
 }
 
 class BhojPatraMobileApp extends StatelessWidget {
-  const BhojPatraMobileApp({super.key});
+  const BhojPatraMobileApp({
+    super.key,
+    this.captainOnly = false,
+    this.discoverOnStart = true,
+  });
+  final bool captainOnly;
+  final bool discoverOnStart;
 
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'BhojPatra Mobile',
+      title: 'BhojPatra',
       debugShowCheckedModeBanner: false,
-      theme: ThemeData(
-        colorScheme: ColorScheme.fromSeed(
-          seedColor: const Color(0xfff36b21),
-          brightness: Brightness.light,
-        ),
-        scaffoldBackgroundColor: const Color(0xfffff8f3),
-        useMaterial3: true,
-        appBarTheme: const AppBarTheme(
-          backgroundColor: Color(0xfffff8f3),
-          foregroundColor: Color(0xff3b1d0b),
-          surfaceTintColor: Colors.transparent,
-        ),
-        filledButtonTheme: FilledButtonThemeData(
-          style: FilledButton.styleFrom(
-            backgroundColor: const Color(0xfff36b21),
-            foregroundColor: Colors.white,
-          ),
-        ),
-        cardTheme: CardThemeData(
-          elevation: 0,
-          color: const Color(0xfffffdfb),
-          shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(22),
-          ),
-        ),
+      theme: Brand.theme,
+      home: SessionGate(
+        captainOnly: captainOnly,
+        discoverOnStart: discoverOnStart,
       ),
-      home: const SessionGate(),
     );
   }
 }
 
 class SessionGate extends StatefulWidget {
-  const SessionGate({super.key});
+  const SessionGate({
+    super.key,
+    this.captainOnly = false,
+    this.discoverOnStart = true,
+  });
+  final bool captainOnly;
+  final bool discoverOnStart;
 
   @override
   State<SessionGate> createState() => _SessionGateState();
@@ -58,6 +50,10 @@ class SessionGate extends StatefulWidget {
 class _SessionGateState extends State<SessionGate> {
   SavedSession? _session;
   bool _loading = true;
+  final _secure = const FlutterSecureStorage();
+  String get _sessionKey => widget.captainOnly
+      ? 'bhojpatra_captain_session'
+      : 'bhojpatra_mobile_session';
 
   @override
   void initState() {
@@ -67,7 +63,11 @@ class _SessionGateState extends State<SessionGate> {
 
   Future<void> _restoreSession() async {
     final prefs = await SharedPreferences.getInstance();
-    final raw = prefs.getString('bhojpatra_mobile_session');
+    String? raw;
+    try {
+      raw = await _secure.read(key: _sessionKey);
+    } catch (_) {}
+    raw ??= prefs.getString(_sessionKey);
     if (!mounted) return;
     if (raw != null) {
       try {
@@ -79,17 +79,15 @@ class _SessionGateState extends State<SessionGate> {
   }
 
   Future<void> _setSession(SavedSession session) async {
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.setString(
-      'bhojpatra_mobile_session',
-      jsonEncode(session.toJson()),
-    );
+    await _secure.write(key: _sessionKey, value: jsonEncode(session.toJson()));
+    await (await SharedPreferences.getInstance()).remove(_sessionKey);
     if (mounted) setState(() => _session = session);
   }
 
   Future<void> _logout() async {
     final prefs = await SharedPreferences.getInstance();
-    await prefs.remove('bhojpatra_mobile_session');
+    await prefs.remove(_sessionKey);
+    await _secure.delete(key: _sessionKey);
     if (mounted) setState(() => _session = null);
   }
 
@@ -99,8 +97,16 @@ class _SessionGateState extends State<SessionGate> {
       return const Scaffold(body: Center(child: CircularProgressIndicator()));
     }
     if (_session == null) {
-      return LoginScreen(onLoggedIn: _setSession);
+      return LoginScreen(
+        onLoggedIn: _setSession,
+        captainOnly: widget.captainOnly,
+        discoverOnStart: widget.discoverOnStart,
+      );
     }
-    return MobileHome(session: _session!, onLogout: _logout);
+    return MobileHome(
+      session: _session!,
+      onLogout: _logout,
+      captainOnly: widget.captainOnly,
+    );
   }
 }

@@ -18,6 +18,9 @@ export type StockUnit = 'kg' | 'g' | 'l' | 'ml' | 'pcs' | 'nos' | 'plate' | 'por
 
 export type ProductUsageType = 'sale_purchase' | 'sale_only' | 'purchase_only' | 'kitchen_processed'
 
+export type ExpenseType = 'salary' | 'rent' | 'utilities' | 'supplies' | 'maintenance' | 'marketing' | 'transport' | 'miscellaneous' | 'other'
+export type ExpensePaymentMode = 'cash' | 'card' | 'upi' | 'bank' | 'other'
+
 // ─── User / Auth ─────────────────────────────────────────────────────────────
 
 export interface User {
@@ -82,6 +85,8 @@ export interface MenuCategory {
   sortOrder: number
   isActive: boolean
 }
+
+export type MenuPriceOption = 'regular' | 'mrp' | 'special' | 'online' | 'delivery' | 'takeaway'
 
 export interface MenuItem {
   id: string
@@ -158,6 +163,8 @@ export interface Floor {
   priceAdjustmentType?: 'percentage' | 'amount'
   /** Percentage (e.g. 10) or fixed paise amount (e.g. 2000 = ₹20). */
   priceAdjustmentValue?: number
+  /** Saved menu price field used for items added at tables in this section. */
+  menuPriceOption?: MenuPriceOption
   sortOrder: number
   isActive: boolean
 }
@@ -202,6 +209,8 @@ export interface Order {
   discountPaise: number
   taxPaise: number
   chargePaise: number
+  /** Optional customer tip added during checkout, in paise. */
+  tipPaise?: number
   totalPaise: number
   paidPaise: number
   paymentStatus: 'unpaid' | 'partial' | 'paid'
@@ -346,6 +355,21 @@ export interface PurchaseEntry {
   totalPaise: number
   paymentMode: 'cash' | 'card' | 'upi'
   barcode?: string
+  createdAt: string
+  updatedAt: string
+}
+
+export interface Expense {
+  id: string
+  outletId: string
+  expenseDate: string
+  type: ExpenseType
+  description: string
+  amountPaise: number
+  paymentMode: ExpensePaymentMode
+  referenceNo?: string
+  notes?: string
+  createdByUserId?: string
   createdAt: string
   updatedAt: string
 }

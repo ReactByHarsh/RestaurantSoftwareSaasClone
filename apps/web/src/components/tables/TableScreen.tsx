@@ -52,6 +52,7 @@ export default function TableScreen() {
   const [showTableModal, setShowTableModal] = useState(false)
   const [editingTable, setEditingTable] = useState<RestaurantTable | null>(null)
   const [billingModalTableId, setBillingModalTableId] = useState<string | null>(null)
+  const [checkoutTableId, setCheckoutTableId] = useState<string | null>(null)
   const isRightSidebarOpen = tableRightSidebarOpen
   const [editMode, setEditMode] = useState(false)
 
@@ -124,13 +125,14 @@ export default function TableScreen() {
       return
     }
     const adjustmentType = String(fd.get('adjustmentType') ?? 'percentage') as Floor['priceAdjustmentType']
+    const menuPriceOption = String(fd.get('menuPriceOption') ?? 'regular') as Floor['menuPriceOption']
     const enteredValue = Math.max(0, Number(fd.get('adjustmentValue') ?? 0) || 0)
     const adjustmentValue = adjustmentType === 'amount' ? Math.round(enteredValue * 100) : Math.round(enteredValue * 100) / 100
     if (editingFloor) {
-      updateFloor(editingFloor.id, { name, priceAdjustmentType: adjustmentType, priceAdjustmentValue: adjustmentValue })
+      updateFloor(editingFloor.id, { name, priceAdjustmentType: adjustmentType, priceAdjustmentValue: adjustmentValue, menuPriceOption })
       addToast('success', `${name} section updated`)
     } else {
-      addFloor(name, { priceAdjustmentType: adjustmentType, priceAdjustmentValue: adjustmentValue })
+      addFloor(name, { priceAdjustmentType: adjustmentType, priceAdjustmentValue: adjustmentValue, menuPriceOption })
       addToast('success', `${name} section created`)
     }
     setShowSectionModal(false)
@@ -402,6 +404,7 @@ export default function TableScreen() {
                 onMerge={canMerge && table.activeOrderId ? () => openMerge(table) : undefined}
                 onShare={() => handleShareTable(table)}
                 onRemove={() => handleRemoveTable(table)}
+                onCheckout={table.activeOrderId ? () => setCheckoutTableId(table.id) : undefined}
                 onClick={() => setBillingModalTableId(table.id)}
               />
             )
@@ -562,7 +565,7 @@ export default function TableScreen() {
       {/* ── CREATE SECTION MODAL ──────────────────────────────────── */}
       {showSectionModal && (
         <div className="fixed inset-0 z-50 bg-slate-900/40 backdrop-blur-sm flex items-center justify-center p-4">
-          <div className="w-full max-w-md bg-white rounded-3xl shadow-2xl border border-slate-100 overflow-hidden">
+          <div className="w-full max-w-2xl bg-white rounded-3xl shadow-2xl border border-slate-100 overflow-hidden">
             <div className="px-6 py-5 border-b border-slate-100 flex items-center justify-between">
               <div>
                 <h2 className="text-lg font-black text-slate-900">{editingFloor ? 'Edit Dining Section' : 'Add Dining Section'}</h2>
@@ -573,7 +576,7 @@ export default function TableScreen() {
             <form onSubmit={handleCreateSection} className="p-6 space-y-5">
               <div>
                 <label className="block text-xs font-black uppercase tracking-widest text-slate-400 mb-2">Section Name</label>
-                <input name="name" required autoFocus placeholder="e.g. AC Section" className="w-full px-4 py-3 rounded-2xl border-2 border-slate-100 text-sm font-bold outline-none focus:border-primary/50 focus:ring-4 focus:ring-primary/10" />
+                <input key={editingFloor?.id ?? 'new-section'} name="name" required autoFocus defaultValue={editingFloor?.name ?? ''} placeholder="e.g. AC Section" className="w-full px-4 py-3 rounded-2xl border-2 border-slate-100 text-sm font-bold outline-none focus:border-primary/50 focus:ring-4 focus:ring-primary/10" />
               </div>
               <div className="flex flex-wrap gap-2">
                 {SECTION_PRESETS.map(name => (
@@ -585,10 +588,21 @@ export default function TableScreen() {
               </div>
               <div className="rounded-2xl border border-primary/15 bg-primary-50/50 p-4 space-y-3">
                 <div>
-                  <p className="text-xs font-black uppercase tracking-widest text-primary">Section price premium</p>
-                  <p className="text-[11px] font-semibold text-slate-500 mt-1">Applied to new items added at tables in this section. Existing bills keep their saved prices.</p>
+                  <p className="text-xs font-black uppercase tracking-widest text-primary">Section menu pricing</p>
+                  <p className="text-[11px] font-semibold text-slate-500 mt-1">New items added at tables in this section use the selected saved menu price. Existing bills keep their saved prices.</p>
                 </div>
-                <div className="grid grid-cols-2 gap-3">
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                  <div>
+                    <label className="block text-[11px] font-black uppercase tracking-widest text-slate-400 mb-1.5">Menu price</label>
+                    <select name="menuPriceOption" defaultValue={editingFloor?.menuPriceOption ?? 'regular'} className="w-full px-3 py-2.5 rounded-xl border border-slate-200 bg-white text-sm font-bold outline-none focus:border-primary/50">
+                      <option value="regular">Regular SP</option>
+                      <option value="mrp">MRP</option>
+                      <option value="special">Special SP</option>
+                      <option value="online">Online SP</option>
+                      <option value="delivery">Delivery SP</option>
+                      <option value="takeaway">Takeaway SP</option>
+                    </select>
+                  </div>
                   <div>
                     <label className="block text-[11px] font-black uppercase tracking-widest text-slate-400 mb-1.5">Adjustment type</label>
                     <select name="adjustmentType" defaultValue={editingFloor?.priceAdjustmentType ?? 'percentage'} className="w-full px-3 py-2.5 rounded-xl border border-slate-200 bg-white text-sm font-bold outline-none focus:border-primary/50">
@@ -726,14 +740,16 @@ export default function TableScreen() {
       )}
 
       {/* ── BILLING MODAL ────────────────────────────────────────── */}
-      {billingModalTableId && (
+      {(billingModalTableId || checkoutTableId) && (
         <div className="fixed inset-0 z-50 bg-white flex flex-col animate-in fade-in duration-200">
           <BillingScreen 
               isModal={true} 
-              modalTableId={billingModalTableId} 
+              modalTableId={checkoutTableId ?? billingModalTableId ?? undefined}
+              autoOpenPayment={Boolean(checkoutTableId)}
               onCloseModal={() => {
                 closeTableView()
                 setBillingModalTableId(null)
+                setCheckoutTableId(null)
               }}
             />
         </div>

@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:http/http.dart' as http;
+import 'package:flutter/services.dart';
 
 import '../utils/utils.dart';
 
@@ -12,6 +13,7 @@ class LanDesktopCandidate {
     required this.source,
     this.name,
     this.outletName,
+    this.outletId,
     this.licensed,
   });
 
@@ -19,10 +21,12 @@ class LanDesktopCandidate {
   final String source;
   final String? name;
   final String? outletName;
+  final String? outletId;
   final bool? licensed;
 }
 
 class LanDiscovery {
+  static const _platform = MethodChannel('bhojpatra/lan');
   static const int httpPort = 3000;
   static const int discoveryPort = 3001;
   static const String probeMessage = 'BHOJPATRA_DISCOVER_V1';
@@ -31,35 +35,47 @@ class LanDiscovery {
     String? preferredUrl,
     Duration timeout = const Duration(seconds: 5),
   }) async {
-    final candidates = <LanDesktopCandidate>[];
-    final seen = <String>{};
-
-    Future<void> addProbe(String url, String source) async {
-      final normalized = normalizeLanUrl(url);
-      if (normalized.isEmpty || !seen.add(normalized)) return;
-      final candidate = await probe(normalized, source: source);
-      if (candidate != null) candidates.add(candidate);
+    if (Platform.isAndroid &&
+        await _platform.invokeMethod<bool>('prepareDiscovery') != true) {
+      throw Exception(
+        'Allow nearby/local network access to find BhojPatra Desk. Then tap Auto find again.',
+      );
     }
+    try {
+      final candidates = <LanDesktopCandidate>[];
+      final seen = <String>{};
 
-    final preferred = preferredUrl?.trim();
-    if (preferred != null &&
-        preferred.isNotEmpty &&
-        preferred != defaultLanServerUrl) {
-      await addProbe(preferred, 'saved');
+      Future<void> addProbe(String url, String source) async {
+        final normalized = normalizeLanUrl(url);
+        if (normalized.isEmpty || !seen.add(normalized)) return;
+        final candidate = await probe(normalized, source: source);
+        if (candidate != null) candidates.add(candidate);
+      }
+
+      final preferred = preferredUrl?.trim();
+      if (preferred != null &&
+          preferred.isNotEmpty &&
+          preferred != defaultLanServerUrl) {
+        await addProbe(preferred, 'saved');
+      }
+
+      await _discoverByUdp(candidates, seen);
+
+      await Future.wait(
+        (await _likelyHotspotUrls()).map((url) => addProbe(url, 'hotspot')),
+      );
+
+      final remaining = timeout - const Duration(seconds: 2);
+      if (candidates.isEmpty && remaining.inMilliseconds > 0) {
+        await _scanLocalSubnets(candidates, seen, timeout: remaining);
+      }
+
+      return candidates;
+    } finally {
+      if (Platform.isAndroid) {
+        await _platform.invokeMethod<void>('finishDiscovery');
+      }
     }
-
-    await _discoverByUdp(candidates, seen);
-
-    for (final url in await _likelyHotspotUrls()) {
-      await addProbe(url, 'hotspot');
-    }
-
-    final remaining = timeout - const Duration(seconds: 2);
-    if (candidates.isEmpty && remaining.inMilliseconds > 0) {
-      await _scanLocalSubnets(candidates, seen, timeout: remaining);
-    }
-
-    return candidates;
   }
 
   static Future<LanDesktopCandidate?> probe(
@@ -83,6 +99,7 @@ class LanDiscovery {
         source: source,
         name: text(payload['name'], fallback: 'BhojPatra Desk'),
         outletName: outlet is Map ? text(outlet['name']) : null,
+        outletId: outlet is Map ? text(outlet['id']) : null,
         licensed: payload['licensed'] is bool
             ? payload['licensed'] as bool
             : null,
@@ -109,9 +126,9 @@ class LanDiscovery {
         socket.send(payload, target, discoveryPort);
       }
 
-      final completer = Completer<void>();
+      final probes = <Future<void>>[];
       late StreamSubscription subscription;
-      subscription = socket.listen((event) async {
+      subscription = socket.listen((event) {
         if (event != RawSocketEvent.read) return;
         final datagram = socket?.receive();
         if (datagram == null) return;
@@ -119,15 +136,15 @@ class LanDiscovery {
           'http://${datagram.address.address}:$httpPort',
         );
         if (!seen.add(url)) return;
-        final candidate = await probe(url, source: 'auto');
-        if (candidate != null) candidates.add(candidate);
-        if (!completer.isCompleted) completer.complete();
+        probes.add(
+          probe(url, source: 'auto').then((candidate) {
+            if (candidate != null) candidates.add(candidate);
+          }),
+        );
       });
-      await completer.future.timeout(
-        const Duration(milliseconds: 1200),
-        onTimeout: () {},
-      );
+      await Future<void>.delayed(const Duration(milliseconds: 1200));
       await subscription.cancel();
+      await Future.wait(probes);
     } catch (_) {
       // UDP broadcast is best-effort; hotspot routers often disable it.
     } finally {
@@ -172,7 +189,7 @@ class LanDiscovery {
     }
 
     final deadline = DateTime.now().add(timeout);
-    const batchSize = 32;
+    const batchSize = 64;
     for (var index = 0; index < targets.length; index += batchSize) {
       if (DateTime.now().isAfter(deadline) || candidates.isNotEmpty) return;
       final batch = targets
@@ -188,6 +205,15 @@ class LanDiscovery {
 
   static Future<List<InternetAddress>> _localIpv4Addresses() async {
     try {
+      if (Platform.isAndroid) {
+        final addresses =
+            await _platform.invokeListMethod<String>('networkAddresses') ?? [];
+        final ipv4 = addresses
+            .where(_isPrivateIpv4)
+            .map(InternetAddress.new)
+            .toList();
+        if (ipv4.isNotEmpty) return ipv4;
+      }
       final interfaces = await NetworkInterface.list(
         includeLoopback: false,
         type: InternetAddressType.IPv4,

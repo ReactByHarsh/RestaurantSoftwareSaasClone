@@ -1,6 +1,6 @@
 [package]
 name = "app"
-version = "0.1.21"
+version = "0.1.32"
 description = "A Tauri App"
 authors = ["you"]
 license = ""
@@ -31,6 +31,7 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 sha2 = "0.10"
 tauri = { version = "2.11.1", features = [] }
+tauri-plugin-dialog = "2"
 tauri-plugin-log = "2"
 tauri-plugin-process = "2"
 time = "=0.3.36"
@@ -41,6 +42,7 @@ tower-http = { version = "0.5", features = ["cors"] }
 tauri-plugin-updater = "2"
 
 [target.'cfg(windows)'.dependencies]
+winreg = "0.55"
 windows-sys = { version = "0.59", features = [
   "Win32_Foundation",
   "Win32_Graphics_Gdi",

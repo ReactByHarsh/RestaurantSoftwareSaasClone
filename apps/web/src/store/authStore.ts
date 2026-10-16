@@ -2,6 +2,8 @@ import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
 import type { User, Outlet } from '../lib/types'
 import { runCloudLogin } from '../lib/cloudSync'
+import { activateDesktopLicense, DEFAULT_LICENSE_SERVER, LicenseActivationError, readSavedLicenseKey } from '../lib/license'
+import { readCloudPreference } from '../lib/cloudTransport'
 import { isTauriDesktop } from '../lib/localDb'
 import { useBillingStore } from './billingStore'
 import { toPublicUser, useStaffStore, type StaffAccount } from './staffStore'
@@ -13,7 +15,7 @@ interface AuthStore {
   bypassStaffLogin: boolean
   showStaffLoginOnDesktop: boolean
   firstRunComplete: boolean
-  login: (emailOrPhone: string, password: string) => Promise<{ success: boolean; error?: string }>
+  login: (emailOrPhone: string, password: string, licenseKey?: string, moveLicense?: boolean) => Promise<{ success: boolean; error?: string; code?: string }>
   autoLoginIfEnabled: () => boolean
   completeFirstRun: (account: StaffAccount) => void
   setBypassStaffLogin: (enabled: boolean) => void
@@ -75,10 +77,39 @@ export const useAuthStore = create<AuthStore>()(
       showStaffLoginOnDesktop: false,
       firstRunComplete: false,
 
-      login: async (emailOrPhone, password) => {
+      login: async (emailOrPhone, password, licenseKey, moveLicense = false) => {
+        const localAccount = useStaffStore.getState().findByLogin(emailOrPhone)
+
+        // The native desktop can be used for local/offline testing before a
+        // Cloud Admin account is connected. Prefer a local account when one
+        // exists; cloud-managed accounts continue through the Cloudflare
+        // login path below.
+        const cloudDisabled = !useBillingStore.getState().cloudSync.enabled
+        if (localAccount && (!isCloudAccount(localAccount) || cloudDisabled)) {
+          if (localAccount.status === 'inactive') return { success: false, error: 'This staff login is deactivated' }
+          if (localAccount.status === 'halted') return { success: false, error: 'This staff login is halted by admin' }
+          const accessError = getAccountAccessError(localAccount)
+          if (accessError) return { success: false, error: accessError }
+
+          const credentialsMatch = (await verifyStoredCredential(localAccount.password, password)) || (await verifyStoredCredential(localAccount.pin, password))
+          if (!credentialsMatch) return { success: false, error: 'Invalid credentials' }
+
+          set({
+            user: { ...toPublicUser(localAccount), lastLoginAt: new Date().toISOString() },
+            outlet: useBillingStore.getState().outlet,
+            isAuthenticated: true,
+          })
+          return { success: true }
+        }
+
+        // Offline sessions only use valid staff credentials saved on this device.
+        if (!isTauriDesktop() && cloudDisabled && (useBillingStore.getState().cloudSync.accountLogin || readCloudPreference()?.enabled === false)) {
+          return { success: false, error: 'Cloud sync is off. Sign in with a staff account saved on this device.' }
+        }
+
         // The installed desktop is a cloud-managed client. Its only valid
-        // login source is the account created in Cloud Admin; local staff
-        // records are retained for LAN/role data, not as desktop credentials.
+        // cloud login source is the account created in Cloud Admin. If no
+        // local account exists, the desktop still accepts that cloud login.
         if (isTauriDesktop()) {
           const billing = useBillingStore.getState()
           const serverUrl = billing.cloudSync.serverUrl || 'https://bhojpatra-cloud.yash-v-shinde.workers.dev'
@@ -90,6 +121,12 @@ export const useAuthStore = create<AuthStore>()(
             const outlet = session.outlets[0]
             if (!outlet) return { success: false, error: 'No outlet is assigned to this login' }
 
+            await activateDesktopLicense({
+              serverUrl: DEFAULT_LICENSE_SERVER,
+              licenseKey: licenseKey?.trim() || readSavedLicenseKey(),
+              moveLicense,
+            })
+
             // Desktop startup only validates the Workers credentials. Local
             // SQLite has already been hydrated by DesktopBootstrap; importing
             // a cloud snapshot here can replace open table carts during a
@@ -97,7 +134,7 @@ export const useAuthStore = create<AuthStore>()(
             useBillingStore.getState().updateOutlet(outlet)
 
             useBillingStore.getState().updateCloudSyncSettings({
-              enabled: true,
+              enabled: billing.cloudSync.enabled,
               serverUrl,
               tenantId: session.user.tenantId,
               outletId: outlet.id,
@@ -123,7 +160,11 @@ export const useAuthStore = create<AuthStore>()(
             })
             return { success: true }
           } catch (error) {
-            return { success: false, error: error instanceof Error ? error.message : 'Cloud login failed' }
+            return {
+              success: false,
+              error: error instanceof Error ? error.message : 'Cloud login failed',
+              code: error instanceof LicenseActivationError ? error.code : undefined,
+            }
           }
         }
 

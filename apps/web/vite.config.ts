@@ -56,6 +56,11 @@ export default defineConfig({
     host: host || false,
     port: 5173,
     strictPort: Boolean(process.env.TAURI_ENV_PLATFORM),
+    // Rust's generated target directory contains locked DLLs on Windows.
+    // Vite does not need to watch it for frontend hot reloads.
+    watch: {
+      ignored: ['**/src-tauri/target/**']
+    },
     hmr: host
       ? {
           protocol: 'ws',

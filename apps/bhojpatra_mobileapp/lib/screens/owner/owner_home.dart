@@ -12,12 +12,14 @@ class OwnerHome extends StatefulWidget {
     required this.session,
     required this.onRefresh,
     required this.onSave,
+    required this.onCommand,
   });
 
   final Map<String, dynamic> snapshot;
   final SavedSession session;
   final Future<void> Function() onRefresh;
   final Future<void> Function(Map<String, dynamic>) onSave;
+  final Future<Map<String, dynamic>> Function(Map<String, dynamic>) onCommand;
 
   @override
   State<OwnerHome> createState() => _OwnerHomeState();
@@ -37,7 +39,7 @@ class _OwnerHomeState extends State<OwnerHome> {
           CaptainWorkspace(
             snapshot: widget.snapshot,
             session: widget.session,
-            onSave: widget.onSave,
+            onCommand: widget.onCommand,
           ),
           KitchenWorkspace(snapshot: widget.snapshot, onSave: widget.onSave),
         ],

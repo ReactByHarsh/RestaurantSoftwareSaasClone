@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { BarChart3, TrendingUp, IndianRupee, Users, ShoppingBag, FileText, Calendar } from 'lucide-react'
-import { formatPaise } from '../../lib/money'
+import { formatPaise, getBillableOrderTotalPaise } from '../../lib/money'
 import { useBillingStore } from '../../store/billingStore'
 import {
   BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer,
@@ -9,13 +9,14 @@ import {
 import { clsx } from 'clsx'
 import BusinessSummaryReport from './BusinessSummaryReport'
 import SalesSummaryReport from './SalesSummaryReport'
+import { CancellationReport, ExpenseReport, InventoryAnalyticsReport } from './AdditionalReports'
 
 type DateRange = 'today' | 'week' | 'month' | 'custom'
 
 const COLORS = ['#2563EB', '#F97316', '#8B5CF6', '#06B6D4']
 
 export default function ReportsScreen() {
-  const [tab, setTab] = useState<'overview' | 'summary' | 'sales'>('sales')
+  const [tab, setTab] = useState<'overview' | 'summary' | 'sales' | 'cancellations' | 'inventory' | 'expenses'>('sales')
   const [dateRange, setDateRange] = useState<DateRange>('today')
   
   const todayStr = new Date().toLocaleDateString('en-CA') // YYYY-MM-DD
@@ -35,7 +36,7 @@ export default function ReportsScreen() {
   const recentOrders = orders.filter(order =>
     order.paymentStatus === 'paid' &&
     !['cancelled', 'void'].includes(order.status) &&
-    order.totalPaise > 0
+    getBillableOrderTotalPaise(order) > 0
   ).slice(0, 5)
 
   return (
@@ -63,6 +64,24 @@ export default function ReportsScreen() {
               )}
             >
               <ShoppingBag size={14} /> Sales Summary
+            </button>
+            <button
+              onClick={() => setTab('cancellations')}
+              className={clsx('px-4 py-1.5 rounded-lg text-xs font-black transition-all flex items-center gap-1.5', tab === 'cancellations' ? 'bg-white text-primary shadow-sm' : 'text-slate-500 hover:text-slate-800 hover:bg-slate-200/50')}
+            >
+              <FileText size={14} /> Cancellations
+            </button>
+            <button
+              onClick={() => setTab('inventory')}
+              className={clsx('px-4 py-1.5 rounded-lg text-xs font-black transition-all flex items-center gap-1.5', tab === 'inventory' ? 'bg-white text-primary shadow-sm' : 'text-slate-500 hover:text-slate-800 hover:bg-slate-200/50')}
+            >
+              <BarChart3 size={14} /> Inventory
+            </button>
+            <button
+              onClick={() => setTab('expenses')}
+              className={clsx('px-4 py-1.5 rounded-lg text-xs font-black transition-all flex items-center gap-1.5', tab === 'expenses' ? 'bg-white text-primary shadow-sm' : 'text-slate-500 hover:text-slate-800 hover:bg-slate-200/50')}
+            >
+              <IndianRupee size={14} /> Expenses
             </button>
             <button
               onClick={() => setTab('overview')}
@@ -115,6 +134,12 @@ export default function ReportsScreen() {
           <SalesSummaryReport fromDate={customFrom} toDate={customTo} />
         ) : tab === 'summary' ? (
           <BusinessSummaryReport fromDate={customFrom} toDate={customTo} />
+        ) : tab === 'cancellations' ? (
+          <CancellationReport fromDate={customFrom} toDate={customTo} />
+        ) : tab === 'inventory' ? (
+          <InventoryAnalyticsReport fromDate={customFrom} toDate={customTo} />
+        ) : tab === 'expenses' ? (
+          <ExpenseReport fromDate={customFrom} toDate={customTo} />
         ) : (
           <>
             {/* KPI Cards */}
@@ -277,7 +302,7 @@ export default function ReportsScreen() {
                     </p>
                   </div>
                   <div className="text-right">
-                    <p className="font-black text-slate-800 text-sm">{formatPaise(order.totalPaise)}</p>
+                    <p className="font-black text-slate-800 text-sm">{formatPaise(getBillableOrderTotalPaise(order))}</p>
                     <span className={clsx(
                       'text-[9px] font-black uppercase tracking-widest px-1.5 py-0.5 rounded border inline-block mt-0.5',
                       order.paymentStatus === 'paid' ? 'bg-emerald-50 text-emerald-600 border-emerald-200' : 'bg-slate-50 text-slate-500 border-slate-200'

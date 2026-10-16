@@ -2,6 +2,7 @@ import { create } from 'zustand'
 import { createJSONStorage, persist } from 'zustand/middleware'
 import type {
   AuditLog,
+  Expense,
   Floor,
   InventoryItem,
   ItemType,
@@ -9,6 +10,7 @@ import type {
   KOTStatus,
   MenuCategory,
   MenuItem,
+  MenuPriceOption,
   Modifier,
   Order,
   OrderItem,
@@ -24,11 +26,13 @@ import type {
 } from '../lib/types'
 import { mergeOperationalSnapshot, type BillingSnapshot, type CloudSyncSettings } from '../lib/cloudSync'
 import { dexieBusinessStateStorage } from '../lib/orderSync'
-import { calculateTax } from '../lib/money'
+import { cancelCloudRequests, readCloudPreference } from '../lib/cloudTransport'
+import { calculateTax, getBillableOrderTotalPaise } from '../lib/money'
 import { isTauriDesktop, saveDesktopState } from '../lib/localDb'
 import { realtimeClient } from '../lib/realtime'
 import { DEFAULT_BRIDGE_URL, describePrinterError, normalizePrinterConnectionMode, sendPrintJob, type PrinterConnectionMode } from '../lib/printer'
-import { buildKotPrintText, buildReceiptPrintParts } from '../lib/printTemplates'
+import { buildReceiptPrintParts } from '../lib/printTemplates'
+import { planKotPrintJobs } from '../lib/kotPrintRouting'
 import { isInventoryMenuItem, isSaleableMenuItem } from '../lib/productTypes'
 import { DEFAULT_STATIONS } from '../lib/seedData'
 import { useUIStore } from './uiStore'
@@ -75,6 +79,8 @@ export interface PrintSettings {
   businessName: string
   headingSize: 'compact' | 'standard' | 'large'
   fontSize: 'compact' | 'standard' | 'large'
+  /** Relative size of the final amount line in browser/HTML receipt printing. */
+  finalAmountScale: number
   headerText: string
   footerText: string
   showGstin: boolean
@@ -89,6 +95,9 @@ export interface PrintSettings {
   showPaymentDetailsOnBill: boolean
   autoPrintReceipt: boolean
   autoPrintKot: boolean
+  /** Shared KOT fallback; blank uses the receipt printer. Stations can override it. */
+  kotPrinterName?: string
+  autoPrintCaptainKot?: boolean
   printerName: string
   connectionMode: PrinterConnectionMode
   usbVendorId?: number
@@ -115,9 +124,9 @@ const DEFAULT_CLOUD_SYNC_SETTINGS: CloudSyncSettings = {
   outletId: '',
   accountLogin: '',
   accountSecret: '',
-  autoSyncEnabled: true,
+  autoSyncEnabled: false,
   syncIntervalHours: 24,
-  autoSyncDaily: true,
+  autoSyncDaily: false,
   syncHour24: 2,
   cloudMode: 'delta_v2',
 }
@@ -135,6 +144,7 @@ export type DataDeletionSection =
   | 'floorsTables'
   | 'kitchenStations'
   | 'inventory'
+  | 'expenses'
   | 'auditLogs'
   | 'allBusinessData'
 
@@ -150,6 +160,7 @@ interface BillingStore {
   stations: Station[]
   inventoryItems: InventoryItem[]
   purchaseEntries: PurchaseEntry[]
+  expenses: Expense[]
   orders: Order[]
   orderItems: OrderItem[]
   kots: KOT[]
@@ -163,7 +174,7 @@ interface BillingStore {
   selectedTableId: string | null
 
   exportSnapshot: () => BillingSnapshot
-  importSnapshot: (snapshot: BillingSnapshot, preserveSession?: boolean) => void
+  importSnapshot: (snapshot: BillingSnapshot, preserveSession?: boolean, authoritativeLan?: boolean) => void
   reset: () => void
 
   updateOutlet: (settings: Partial<OutletSettings>) => void
@@ -182,7 +193,7 @@ interface BillingStore {
   updateStation: (id: string, updates: Partial<Station>) => void
   deleteStation: (id: string) => boolean
 
-  addFloor: (name: string, settings?: Pick<Floor, 'priceAdjustmentType' | 'priceAdjustmentValue'>) => void
+  addFloor: (name: string, settings?: Pick<Floor, 'priceAdjustmentType' | 'priceAdjustmentValue' | 'menuPriceOption'>) => void
   updateFloor: (id: string, updates: Partial<Floor>) => void
   deleteFloor: (id: string) => boolean
   addTable: (input: { floorId: string; name: string; seats: number }) => void
@@ -197,6 +208,9 @@ interface BillingStore {
   addPurchaseEntry: (input: Omit<PurchaseEntry, 'id' | 'outletId' | 'createdAt' | 'updatedAt' | 'inventoryItemId'> & { inventoryItemId?: string; minimumStock?: number }) => PurchaseEntry
   updatePurchaseEntry: (id: string, updates: Partial<Omit<PurchaseEntry, 'id' | 'outletId' | 'createdAt' | 'updatedAt'>>) => void
   deletePurchaseEntry: (id: string) => void
+  addExpense: (input: Omit<Expense, 'id' | 'outletId' | 'createdAt' | 'updatedAt'>) => Expense
+  updateExpense: (id: string, updates: Partial<Omit<Expense, 'id' | 'outletId' | 'createdAt' | 'updatedAt'>>) => void
+  deleteExpense: (id: string) => void
 
   setOrderType: (type: OrderType) => void
   selectTable: (tableId: string | null) => void
@@ -215,7 +229,7 @@ interface BillingStore {
   clearCart: () => void
   sendKOT: (userId: string, userName: string) => KOT | null
   addPayment: (orderId: string, payment: PaymentInput, userId: string) => void
-  settlePayment: (orderId: string | null, payments: PaymentInput[], discountPaise: number, userId: string, userName: string, printAfter?: boolean) => Promise<boolean>
+  settlePayment: (orderId: string | null, payments: PaymentInput[], discountPaise: number, userId: string, userName: string, printAfter?: boolean, tipPaise?: number) => Promise<boolean>
   cancelPayments: (orderId: string) => void
   cancelOrder: (orderId: string, reason: string) => void
   cancelKOT: (kotId: string, reason: string) => boolean
@@ -264,6 +278,21 @@ export function getSectionAdjustedPrice(basePricePaise: number, floor?: Floor) {
     return Math.max(0, Math.round(basePricePaise + floor.priceAdjustmentValue))
   }
   return Math.max(0, Math.round(basePricePaise + (basePricePaise * floor.priceAdjustmentValue) / 100))
+}
+
+export function getMenuItemPriceForSection(item: MenuItem, floor?: Floor) {
+  const option: MenuPriceOption = floor?.menuPriceOption ?? 'regular'
+  const selectedPrice = {
+    regular: item.pricePaise,
+    mrp: item.mrpPaise,
+    special: item.specialPricePaise,
+    online: item.onlinePricePaise,
+    delivery: item.deliveryPricePaise,
+    takeaway: item.takeawayPricePaise,
+  }[option]
+  // Older products may not have every optional price populated. Falling back to
+  // regular keeps existing menus billable while the new section setting is used.
+  return Math.max(0, Math.round(selectedPrice ?? item.pricePaise))
 }
 
 function selectedSection(state: Pick<BillingStore, 'floors' | 'tables' | 'selectedTableId' | 'currentOrder' | 'activeOrderType'>) {
@@ -315,6 +344,7 @@ const DEFAULT_PRINT_SETTINGS: PrintSettings = {
   businessName: 'BhojPatra Bistro',
   headingSize: 'standard',
   fontSize: 'standard',
+  finalAmountScale: 100,
   headerText: 'Tax Invoice',
   footerText: 'Thank you. Please visit again.',
   showGstin: true,
@@ -329,6 +359,8 @@ const DEFAULT_PRINT_SETTINGS: PrintSettings = {
   showPaymentDetailsOnBill: true,
   autoPrintReceipt: false,
   autoPrintKot: false,
+  kotPrinterName: '',
+  autoPrintCaptainKot: true,
   printerName: '',
   connectionMode: isTauriDesktop() ? 'native' : 'browser',
   bridgeUrl: 'http://127.0.0.1:8181',
@@ -339,22 +371,13 @@ const DEFAULT_PRINT_SETTINGS: PrintSettings = {
   directProformaPrint: false,
 }
 
-function combineKotsForPrint(kots: KOT[]): KOT {
-  const first = kots[0]
-  if (!first) throw new Error('At least one KOT is required')
-  return {
-    ...first,
-    stationId: undefined,
-    kotNo: kots.map((kot) => kot.kotNo).join(' + '),
-    items: kots.flatMap((kot) => kot.items),
-  }
-}
-
 type DevicePrintSettings = Pick<PrintSettings,
   | 'receiptWidth'
   | 'headingSize'
   | 'fontSize'
   | 'printerName'
+  | 'kotPrinterName'
+  | 'autoPrintCaptainKot'
   | 'connectionMode'
   | 'usbVendorId'
   | 'usbProductId'
@@ -374,6 +397,8 @@ function pickDevicePrintSettings(settings: PrintSettings): DevicePrintSettings {
     headingSize: settings.headingSize,
     fontSize: settings.fontSize,
     printerName: settings.printerName,
+    kotPrinterName: settings.kotPrinterName,
+    autoPrintCaptainKot: settings.autoPrintCaptainKot,
     connectionMode: settings.connectionMode,
     usbVendorId: settings.usbVendorId,
     usbProductId: settings.usbProductId,
@@ -635,6 +660,7 @@ const INITIAL_STATE = {
   stations: defaultStations(),
   inventoryItems: [] as InventoryItem[],
   purchaseEntries: [] as PurchaseEntry[],
+  expenses: [] as Expense[],
   orders: [],
   orderItems: [],
   kots: [],
@@ -682,7 +708,7 @@ const syncCart = (state: BillingStore, newCart: CartItem[]): Partial<BillingStor
 }
 
 function parkActiveCart(state: BillingStore) {
-  if (state.activeOrderType !== 'dine_in' || !state.selectedTableId) return state.savedCarts
+  if (!state.selectedTableId) return state.savedCarts
   const savedCarts = { ...state.savedCarts }
   // While an occupied table is being opened, selectedTableId can be assigned
   // just before its order/cart is restored. Preserve the already parked cart
@@ -690,7 +716,6 @@ function parkActiveCart(state: BillingStore) {
   // explicit cart deletion.
   if (!state.currentOrder) return savedCarts
   if (state.currentOrder && (
-    state.currentOrder.type !== 'dine_in' ||
     state.currentOrder.tableId !== state.selectedTableId ||
     !isRestorableCurrentOrder(state.currentOrder, state.tables)
   )) {
@@ -896,7 +921,9 @@ function reconcileSnapshot(snapshot: BillingSnapshot): BillingSnapshot {
       if (closedLinkedTableIds.has(tableId)) return false
       const linkedOrderId = snapshot.tables.find((table) => table.id === tableId)?.activeOrderId
       const linkedOrder = linkedOrderId ? snapshot.orders.find((order) => order.id === linkedOrderId) : undefined
-      return Boolean(linkedOrder && !isClosedOrder(linkedOrder))
+      // Legacy/transient drafts can have a valid table but no linked order.
+      // Missing metadata is not an instruction to delete customer products.
+      return snapshot.tables.some(table => table.id === tableId) && (!linkedOrder || !isClosedOrder(linkedOrder))
     })
   ) as Record<string, CartItem[]>
   // Do not infer that an open order is abandoned from a temporarily missing
@@ -944,6 +971,7 @@ export const useBillingStore = create<BillingStore>()(
           stations: state.stations,
           inventoryItems: state.inventoryItems,
           purchaseEntries: state.purchaseEntries,
+          expenses: state.expenses,
           orders: state.orders,
           orderItems: state.orderItems,
           kots: state.kots,
@@ -956,17 +984,36 @@ export const useBillingStore = create<BillingStore>()(
         }))
       },
 
-      importSnapshot: (snapshot, preserveSession = false) => set((state) => {
+      importSnapshot: (snapshot, preserveSession = false, authoritativeLan = false) => set((state) => {
         if (preserveSession && snapshot.snapshotKind === 'operational') {
           snapshot = mergeOperationalSnapshot(state, snapshot)
         }
         const localSavedCarts = preserveSession ? parkActiveCart(state) : state.savedCarts
         const conflictSafeSnapshot = preserveSession
-          ? preserveLocalActiveTableSessions(preserveNewerCompletedOrders(snapshot, state), state)
+          ? authoritativeLan ? snapshot : preserveLocalActiveTableSessions(preserveNewerCompletedOrders(snapshot, state), state)
           : snapshot
         const incomingSnapshot = preserveSession
           ? { ...conflictSafeSnapshot, savedCarts: mergeSavedCarts(conflictSafeSnapshot.savedCarts, localSavedCarts) }
           : conflictSafeSnapshot
+        if (preserveSession) {
+          // A confirmed remote checkout/cancellation is an explicit cart-clear
+          // action, even when the table no longer points at the closed order.
+          // Do not mistake that old local cart for an unlinked draft.
+          for (const table of state.tables) {
+            if (!table.activeOrderId) continue
+            const incomingOrder = conflictSafeSnapshot.orders.find(order => order.id === table.activeOrderId)
+            if (!incomingOrder || !isClosedOrder(incomingOrder)) continue
+            const incomingTable = conflictSafeSnapshot.tables.find(candidate => candidate.id === table.id)
+            if (!incomingTable?.activeOrderId || incomingTable.activeOrderId === table.activeOrderId) {
+              delete incomingSnapshot.savedCarts?.[table.id]
+            } else {
+              // Another order now occupies this table; only its incoming cart
+              // belongs here, not the draft from the previous closed order.
+              if (conflictSafeSnapshot.savedCarts?.[table.id]) incomingSnapshot.savedCarts![table.id] = conflictSafeSnapshot.savedCarts[table.id]
+              else delete incomingSnapshot.savedCarts?.[table.id]
+            }
+          }
+        }
         const normalizedBase = stripLegacyDemoData(reconcileSnapshot(incomingSnapshot))
         const normalized = {
           ...normalizedBase,
@@ -974,7 +1021,9 @@ export const useBillingStore = create<BillingStore>()(
         }
         const restoredSession = resolveRestoredSession(
           normalized,
-          preserveSession ? state.currentOrder : null,
+          preserveSession ? authoritativeLan && state.selectedTableId
+            ? normalized.orders.find(order => order.id === normalized.tables.find(table => table.id === state.selectedTableId)?.activeOrderId) ?? state.currentOrder
+            : state.currentOrder : null,
           preserveSession ? state.selectedTableId : null,
           preserveSession ? state.cart : [],
         )
@@ -984,9 +1033,13 @@ export const useBillingStore = create<BillingStore>()(
           tables: normalized.tables,
           outlet: { ...DEFAULT_OUTLET, ...normalized.outlet },
           printSettings: mergeDevicePrintSettings(normalized.printSettings, state.printSettings),
-          cloudSync: { ...DEFAULT_CLOUD_SYNC_SETTINGS, ...normalized.cloudSync },
+          // Sync and LAN snapshots cannot change this device's offline choice.
+          cloudSync: preserveSession ? state.cloudSync : {
+            ...DEFAULT_CLOUD_SYNC_SETTINGS, ...normalized.cloudSync, ...readCloudPreference(),
+          },
           appUpdate: { ...DEFAULT_APP_UPDATE_SETTINGS, ...normalized.appUpdate },
           purchaseEntries: normalized.purchaseEntries ?? [],
+          expenses: normalized.expenses ?? [],
           savedCarts: restoredSession.savedCarts,
           currentOrder: restoredSession.currentOrder,
           cart: restoredSession.cart,
@@ -1019,7 +1072,14 @@ export const useBillingStore = create<BillingStore>()(
       }),
 
       updateCloudSyncSettings: (settings) => set((state) => {
-        const cloudSync = { ...state.cloudSync, ...settings }
+        let cloudSync = { ...state.cloudSync, ...settings }
+        if (!cloudSync.enabled) {
+          cloudSync = { ...cloudSync, autoSyncEnabled: false, autoSyncDaily: false, nextSyncAt: undefined }
+        }
+        if (!cloudSync.enabled || ['serverUrl', 'accountLogin', 'accountSecret'].some(key =>
+          cloudSync[key as keyof CloudSyncSettings] !== state.cloudSync[key as keyof CloudSyncSettings])) {
+          cancelCloudRequests()
+        }
         if (typeof localStorage !== 'undefined') {
           localStorage.setItem('bhojpatra-cloud-settings-v2', JSON.stringify(cloudSync))
         }
@@ -1110,6 +1170,9 @@ export const useBillingStore = create<BillingStore>()(
             auditLogs: audit('Deleted inventory, purchase entries, and cleared menu recipes'),
           }
         }
+        if (section === 'expenses') {
+          return { expenses: [], auditLogs: audit('Deleted expense records') }
+        }
         if (section === 'auditLogs') {
           return { auditLogs: [] }
         }
@@ -1122,6 +1185,7 @@ export const useBillingStore = create<BillingStore>()(
           stations: defaultStations(state.outlet.id),
           inventoryItems: [],
           purchaseEntries: [],
+          expenses: [],
           orders: [],
           orderItems: [],
           kots: [],
@@ -1570,7 +1634,52 @@ export const useBillingStore = create<BillingStore>()(
         }
       }),
 
-      setOrderType: (type) => set({ activeOrderType: type }),
+      addExpense: (input) => {
+        const createdAt = now()
+        const expense: Expense = {
+          ...input,
+          id: newId('exp'),
+          outletId: get().outlet.id,
+          amountPaise: Math.max(0, Math.round(input.amountPaise)),
+          description: input.description.trim(),
+          createdAt,
+          updatedAt: createdAt,
+        }
+        set((state) => ({
+          expenses: [expense, ...state.expenses],
+          auditLogs: addAudit(state, 'expense.created', 'expense', `Added ${expense.type} expense`, expense.id),
+        }))
+        return expense
+      },
+
+      updateExpense: (id, updates) => set((state) => {
+        const previous = state.expenses.find((expense) => expense.id === id)
+        if (!previous) return state
+        const next: Expense = {
+          ...previous,
+          ...updates,
+          description: updates.description?.trim() ?? previous.description,
+          amountPaise: updates.amountPaise === undefined ? previous.amountPaise : Math.max(0, Math.round(updates.amountPaise)),
+          updatedAt: now(),
+        }
+        return {
+          expenses: state.expenses.map((expense) => expense.id === id ? next : expense),
+          auditLogs: addAudit(state, 'expense.updated', 'expense', `Updated ${next.type} expense`, id),
+        }
+      }),
+
+      deleteExpense: (id) => set((state) => ({
+        expenses: state.expenses.filter((expense) => expense.id !== id),
+        auditLogs: addAudit(state, 'expense.deleted', 'expense', 'Deleted expense', id),
+      })),
+
+      setOrderType: (type) => set((state) => type === state.activeOrderType ? {} : !state.selectedTableId ? { activeOrderType: type } : {
+        activeOrderType: type,
+        savedCarts: parkActiveCart(state),
+        selectedTableId: null,
+        currentOrder: null,
+        cart: [],
+      }),
 
       selectTable: (tableId) => {
         const state = get()
@@ -1579,7 +1688,14 @@ export const useBillingStore = create<BillingStore>()(
         if (tableId) {
           const table = get().tables.find((candidate) => candidate.id === tableId)
           if (table?.activeOrderId) {
-            const order = get().orders.find(o => o.id === table.activeOrderId)
+            let order = get().orders.find(o => o.id === table.activeOrderId)
+            // Repair orders created by older versions which carried the last
+            // Takeaway/Delivery tab into a dining-table session.
+            if (order && !isClosedOrder(order) && order.type !== 'dine_in') {
+              order = { ...order, type: 'dine_in' }
+              const repairedOrder = order
+              set(state => ({ orders: state.orders.map(candidate => candidate.id === repairedOrder.id ? repairedOrder : candidate) }))
+            }
             let savedCart = parkedSavedCarts[tableId] || []
             if (!order || isClosedOrder(order)) {
               // An orphaned or closed activeOrderId can be safely cleared.
@@ -1593,6 +1709,7 @@ export const useBillingStore = create<BillingStore>()(
                 savedCarts: cleanedSavedCarts,
                 selectedTableId: tableId,
                 currentOrder: null,
+                activeOrderType: 'dine_in',
                 cart: savedCart
               }))
             } else {
@@ -1606,13 +1723,13 @@ export const useBillingStore = create<BillingStore>()(
                 savedCarts: parkedSavedCarts,
                 currentOrder: order,
                 cart: savedCart,
-                activeOrderType: order.type,
+                activeOrderType: 'dine_in',
               })
             }
           } else {
             // Restore unsaved cart if it exists
             const savedCart = parkedSavedCarts[tableId] || []
-            set({ selectedTableId: tableId, currentOrder: null, cart: savedCart, savedCarts: parkedSavedCarts })
+            set({ selectedTableId: tableId, currentOrder: null, cart: savedCart, savedCarts: parkedSavedCarts, activeOrderType: 'dine_in' })
           }
         } else {
           set({ selectedTableId: null, currentOrder: null, cart: [], savedCarts: parkedSavedCarts })
@@ -1636,6 +1753,7 @@ export const useBillingStore = create<BillingStore>()(
 
       startNewOrder: (userId, userName) => {
         const state = get()
+        if (state.currentOrder && !isClosedOrder(state.currentOrder)) return
         const table = state.selectedTableId ? state.tables.find((candidate) => candidate.id === state.selectedTableId) : undefined
         const orderUuid = newId('ord')
         const order: Order = {
@@ -1665,7 +1783,7 @@ export const useBillingStore = create<BillingStore>()(
         set((current) => ({
           orders: [order, ...current.orders],
           currentOrder: order,
-          cart: [],
+          cart: order.tableId ? current.savedCarts[order.tableId] ?? current.cart : [],
           tables: order.tableId ? current.tables.map((candidate) => candidate.id === order.tableId ? { ...candidate, status: 'occupied', activeOrderId: order.id } : candidate) : current.tables,
           auditLogs: addAudit(current, 'order.created', 'order', `Created ${order.orderNo}`, order.id),
         }))
@@ -1676,7 +1794,7 @@ export const useBillingStore = create<BillingStore>()(
         if (!order) return
         // Restore unsaved cart items if any exist for this table, otherwise keep draft empty
         const savedCart = order.tableId ? get().savedCarts[order.tableId] || [] : []
-        set({ currentOrder: order, cart: savedCart, selectedTableId: order.tableId ?? null })
+        set({ currentOrder: order, cart: savedCart, selectedTableId: order.tableId ?? null, activeOrderType: order.type })
       },
 
       addToCart: (item, options) => {
@@ -1731,7 +1849,7 @@ export const useBillingStore = create<BillingStore>()(
           const parentCategory = category?.parentId ? workingState.menuCategories.find((candidate) => candidate.id === category.parentId) : undefined
           const categoryDiscountPercent = Math.max(0, categoryRule.discountPercent ?? 0)
           const section = selectedSection(workingState)
-          const adjustedBasePricePaise = getSectionAdjustedPrice(item.pricePaise, section)
+          const adjustedBasePricePaise = getSectionAdjustedPrice(getMenuItemPriceForSection(item, section), section)
           const unitPricePaise = adjustedBasePricePaise + modifierTotal
           const discountPaise = categoryDiscountPercent > 0 ? Math.round(unitPricePaise * categoryDiscountPercent / 100) : 0
           const newCart = existing
@@ -1853,7 +1971,7 @@ export const useBillingStore = create<BillingStore>()(
               const updatedCurrentOrder = {
                 ...o,
                 discountPaise: orderTotalDiscount,
-                totalPaise: Math.max(0, baseTotal), // Note: settlePayment handles final global discount
+                totalPaise: Math.max(0, baseTotal),
                 updatedAt: now()
               }
               if (state.currentOrder?.id === orderId) {
@@ -2143,7 +2261,7 @@ export const useBillingStore = create<BillingStore>()(
 
       },
 
-      settlePayment: async (orderId, paymentInputs, discountPaise, userId, userName, printAfter) => {
+      settlePayment: async (orderId, paymentInputs, discountPaise, userId, userName, printAfter, tipPaise = 0) => {
         const state = get()
         let targetOrder = orderId ? state.orders.find((candidate) => candidate.id === orderId) : state.currentOrder
         let isDirectCheckout = false
@@ -2190,9 +2308,10 @@ export const useBillingStore = create<BillingStore>()(
         const totalCollected = paymentInputs
           .filter((payment) => isCollectedPayment(payment.method))
           .reduce((sum, payment) => sum + payment.amountPaise, 0)
+        const requestedTipPaise = Math.max(0, Math.round(tipPaise))
         
         set((state) => {
-          let finalTotalPaise = targetOrder!.totalPaise
+          let finalTotalPaise = getBillableOrderTotalPaise(targetOrder!)
           let finalSubtotalPaise = targetOrder!.subtotalPaise
           let finalTaxPaise = targetOrder!.taxPaise
           let finalOrderDiscount = targetOrder!.discountPaise + discountPaise
@@ -2256,6 +2375,7 @@ export const useBillingStore = create<BillingStore>()(
             subtotalPaise: finalSubtotalPaise,
             taxPaise: finalTaxPaise,
             discountPaise: finalOrderDiscount,
+            tipPaise: requestedTipPaise || undefined,
             totalPaise: finalTotalPaise,
             paidPaise: cappedCollectedPaise,
             paymentStatus,
@@ -2311,10 +2431,12 @@ export const useBillingStore = create<BillingStore>()(
 
         const completedSnapshot = afterSettle.exportSnapshot()
         if (isTauriDesktop()) {
-          void saveDesktopState(completedSnapshot, useStaffStore.getState().staff).catch((error) => {
+          try {
+            await saveDesktopState(completedSnapshot, useStaffStore.getState().staff)
+          } catch (error) {
             console.error('Checkout local save failed', error)
-            useUIStore.getState().addToast('error', 'Checkout is complete in memory, but the desktop database save will be retried.', 'Local Save Warning')
-          })
+            useUIStore.getState().addToast('error', 'Checkout is complete in memory, but its local database save failed. Keep BhojPatra open while it retries.', 'Local Save Warning')
+          }
         }
         if (printAfter ?? (get().printSettings.autoPrintReceipt || get().printSettings.directReceiptPrint)) setTimeout(() => get().printReceipt(actualOrderId), 0)
         return true
@@ -2705,7 +2827,7 @@ export const useBillingStore = create<BillingStore>()(
             id: newId('pay'),
             orderId,
             method,
-            amountPaise: order.totalPaise,
+            amountPaise: getBillableOrderTotalPaise(order),
             referenceNo: referenceNo || undefined,
             status: 'success',
             collectedByUserId: userId,
@@ -2714,7 +2836,7 @@ export const useBillingStore = create<BillingStore>()(
           }, ...current.payments.map((payment) => payment.orderId === orderId && payment.status === 'success'
             ? { ...payment, status: 'failed' as const, statusReason: reason }
             : payment)],
-          orders: current.orders.map((candidate) => candidate.id === orderId ? { ...candidate, paidPaise: order.totalPaise, updatedAt: changedAt } : candidate),
+          orders: current.orders.map((candidate) => candidate.id === orderId ? { ...candidate, paidPaise: getBillableOrderTotalPaise(order), updatedAt: changedAt } : candidate),
           auditLogs: addAudit(current, 'payment.revised', 'payment', `${reason}; changed to ${method.toUpperCase()}`, orderId),
         }))
         return true
@@ -2893,42 +3015,22 @@ export const useBillingStore = create<BillingStore>()(
       },
 
       printKOT: (kotId, kotIds) => {
-        const url = `/print/kot/${kotId}`
         const state = get()
-        const kot = state.kots.find((candidate) => candidate.id === kotId)
-        if (!kot) return
-        const selectedKots = kotIds?.length
-          ? kotIds.map((id) => state.kots.find((candidate) => candidate.id === id)).filter((candidate): candidate is KOT => Boolean(candidate))
-          : [kot]
-        const printableKot = state.printSettings.kotPrintMode === 'single' && selectedKots.length > 1
-          ? combineKotsForPrint(selectedKots)
-          : kot
-        const station = kot.stationId ? state.stations.find(candidate => candidate.id === kot.stationId) : undefined
-        const stationPrinter = station?.printerTarget?.trim()
-        const job = {
-          jobName: `KOT ${printableKot.kotNo}${station ? ` ${station.name}` : ''}`,
-          text: buildKotPrintText(printableKot, state.outlet, state.printSettings),
-          browserUrl: url,
-        }
-        const printTarget = state.printSettings.kotPrintMode === 'single' && selectedKots.length > 1
-          ? (state.printSettings.printerName.trim() || stationPrinter)
-          : stationPrinter
-        const printSettings = printTarget
-          ? { ...state.printSettings, connectionMode: state.printSettings.connectionMode === 'bridge' ? 'bridge' as const : 'native' as const, bridgeUrl: state.printSettings.bridgeUrl || DEFAULT_BRIDGE_URL, printerName: printTarget, openCashDrawer: false }
-          : { ...state.printSettings, openCashDrawer: false }
-        void sendPrintJob(printSettings, job)
-          .then((result) => {
-            useUIStore.getState().addToast('success', result === 'direct' ? `${printableKot.kotNo} sent to printer` : `${printableKot.kotNo} opened in print dialog`, 'KOT Print')
-          })
-          .catch(async (error) => {
-            const message = describePrinterError(error)
-            if (printSettings.connectionMode === 'bridge') {
-              useUIStore.getState().addToast('error', message, 'KOT Print')
-            } else {
-              useUIStore.getState().addToast('error', `${message} Opening the system print dialog instead.`)
-              await sendPrintJob({ ...state.printSettings, connectionMode: 'browser', openCashDrawer: false }, job)
+        const ids = new Set(kotIds?.length ? kotIds : [kotId])
+        const kots = state.kots.filter(k => ids.has(k.id))
+        const jobs = planKotPrintJobs(kots, state.stations, state.printSettings, state.outlet)
+        void (async () => {
+          for (const routed of jobs) {
+            try {
+              const result = await sendPrintJob(routed.settings, routed.job)
+              useUIStore.getState().addToast('success', result === 'direct'
+                ? `${routed.job.jobName} sent to ${routed.settings.printerName}` : `${routed.job.jobName} opened in print dialog`, 'KOT Print')
+            } catch (error) {
+              // Never silently redirect a failed kitchen ticket to the bill printer.
+              useUIStore.getState().addToast('error', `${describePrinterError(error)} Check the kitchen before retrying.`, 'KOT Print')
             }
-          })
+          }
+        })()
       },
 
       getCartTotal: () => {
@@ -3001,10 +3103,10 @@ export const useBillingStore = create<BillingStore>()(
           order.businessDate === today() &&
           order.paymentStatus === 'paid' &&
           !['cancelled', 'void'].includes(order.status) &&
-          order.totalPaise > 0 &&
+          getBillableOrderTotalPaise(order) > 0 &&
           (itemCountByOrder.get(order.id) ?? 0) > 0
         )
-        const totalSalesPaise = paidOrders.reduce((sum, order) => sum + order.totalPaise, 0)
+        const totalSalesPaise = paidOrders.reduce((sum, order) => sum + getBillableOrderTotalPaise(order), 0)
         const paymentModes = state.payments
           .filter((payment) => payment.status === 'success' && isCollectedPayment(payment.method) && paidOrders.some((order) => order.id === payment.orderId))
           .reduce<Record<string, number>>((acc, payment) => {
@@ -3025,7 +3127,7 @@ export const useBillingStore = create<BillingStore>()(
           const hour = index + 10
           const sales = paidOrders
             .filter((order) => new Date(order.closedAt ?? order.createdAt).getHours() === hour)
-            .reduce((sum, order) => sum + order.totalPaise, 0)
+            .reduce((sum, order) => sum + getBillableOrderTotalPaise(order), 0)
           return { hour: `${hour > 12 ? hour - 12 : hour}${hour >= 12 ? 'PM' : 'AM'}`, sales }
         })
 
@@ -3039,7 +3141,7 @@ export const useBillingStore = create<BillingStore>()(
             if (!linkedOrder || ['paid', 'cancelled', 'void'].includes(linkedOrder.status)) return false
             return (itemCountByOrder.get(linkedOrder.id) ?? 0) > 0 || (linkedOrder.tableId ? (state.savedCarts[linkedOrder.tableId]?.length ?? 0) > 0 : false)
           }).length,
-          cancelledPaise: state.orders.filter((order) => order.status === 'cancelled').reduce((sum, order) => sum + order.totalPaise, 0),
+          cancelledPaise: state.orders.filter((order) => order.status === 'cancelled').reduce((sum, order) => sum + getBillableOrderTotalPaise(order), 0),
           discountPaise: paidOrders.reduce((sum, order) => sum + order.discountPaise, 0),
           paymentModes: Object.entries(paymentModes).map(([method, amountPaise]) => ({ method: method as PaymentMethod, amountPaise })),
           topItems: Object.entries(itemSales)
@@ -3066,6 +3168,7 @@ export const useBillingStore = create<BillingStore>()(
         stations: state.stations,
           inventoryItems: ensureMenuInventoryItems(state.inventoryItems, state.menuItems, state.outlet.id),
         purchaseEntries: state.purchaseEntries,
+        expenses: state.expenses,
         orders: state.orders,
         orderItems: state.orderItems,
         kots: state.kots,
@@ -3090,6 +3193,7 @@ export const useBillingStore = create<BillingStore>()(
           stations: persisted.stations ?? defaultStations(persisted.outlet?.id),
           inventoryItems: persisted.inventoryItems ?? [],
           purchaseEntries: persisted.purchaseEntries ?? [],
+          expenses: persisted.expenses ?? [],
           orders: persisted.orders ?? [],
           orderItems: persisted.orderItems ?? [],
           kots: persisted.kots ?? [],
@@ -3114,13 +3218,20 @@ export const useBillingStore = create<BillingStore>()(
           cloudSync: {
             ...DEFAULT_CLOUD_SYNC_SETTINGS,
             ...(persisted.cloudSync ?? {}),
-            autoSyncEnabled: persisted.cloudSync?.autoSyncEnabled ?? persisted.cloudSync?.autoSyncDaily ?? true,
+            autoSyncEnabled: persisted.cloudSync?.enabled
+              ? persisted.cloudSync.autoSyncEnabled ?? persisted.cloudSync.autoSyncDaily ?? true
+              : false,
+            autoSyncDaily: persisted.cloudSync?.enabled
+              ? persisted.cloudSync.autoSyncDaily ?? persisted.cloudSync.autoSyncEnabled ?? true
+              : false,
             syncIntervalHours: 24,
             nextSyncAt: persisted.cloudSync?.syncIntervalHours === 24 ? persisted.cloudSync.nextSyncAt : undefined,
             cloudMode: 'delta_v2',
+            ...readCloudPreference(),
           },
           printSettings: mergeDevicePrintSettings(normalized.printSettings, persisted.printSettings),
           purchaseEntries: normalized.purchaseEntries ?? [],
+          expenses: normalized.expenses ?? [],
           savedCarts: restoredSession.savedCarts,
           currentOrder: restoredSession.currentOrder,
           selectedTableId: restoredSession.selectedTableId,

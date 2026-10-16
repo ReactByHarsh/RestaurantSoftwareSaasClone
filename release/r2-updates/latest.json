@@ -1,15 +1,15 @@
 {
-    "version":  "0.1.21",
-    "notes":  "BhojPatra Desk release 0.1.21.",
-    "pub_date":  "2026-09-07T05:10:52Z",
+    "version":  "0.1.32",
+    "notes":  "BhojPatra Desk release 0.1.32.",
+    "pub_date":  "2026-10-16T14:44:05Z",
     "platforms":  {
                       "windows-x86_64-nsis":  {
-                                                  "signature":  "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVTS2hzdHZqVXVkNXdlYWJla3dIdVNsdHJVWlpQaGVQbVNRQjh6YXRXU3RvQ3lScUJZMmg2MTI0dzdPbm1BUFZuSkJCM0h0T1BHNDFMR3lTRGlqWmEwYXZMTnFUZVJkZFFVPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg4NzU3NDY4CWZpbGU6QmhvalBhdHJhIERlc2tfMC4xLjIxX3g2NC1zZXR1cC5leGUKaW9DeGtEODhVaUdXbnMyQ2hwQlJpVlgwK0w2c1FRcEJVZUgyVmlYanNtTVlQQW1XSVhUaGZxekVDWXduYldSWHlHSGdkM0NMZTZ0N2NBbVhWblloQkE9PQo=",
-                                                  "url":  "https://pub-99fc5ebb1fb24ce9a69d861fc420f8b2.r2.dev/BhojPatra-Desk_0.1.21_x64-setup.exe"
+                                                  "signature":  "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVTS2hzdHZqVXVkNXpxYXdpZW10MTB3YTN1NDJqNHVtZ1pBWFZ0M2JpY2x3MkRTQ1NId2pPcm1YbEdZQjliZnkzaENLVVJWSklqdzUwalFCWldPRmNIZ2tyVjNFSS9zMWdBPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkyMTYxODAwCWZpbGU6QmhvalBhdHJhIERlc2tfMC4xLjMyX3g2NC1zZXR1cC5leGUKOHBRbWJEUVpUMGhWNENYR3VYQzAyaDRWRVQ4SzhqVmp0RS9mYytOZ01oaCtvUU5xWGtBMzQ3SmNaRi9IbGFCMXNHUE45aDBWMXVob0tGUUh6UERRRHc9PQo=",
+                                                  "url":  "https://pub-99fc5ebb1fb24ce9a69d861fc420f8b2.r2.dev/BhojPatra-Desk_0.1.32_x64-setup.exe"
                                               },
                       "windows-x86_64":  {
-                                             "signature":  "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVTS2hzdHZqVXVkNXdlYWJla3dIdVNsdHJVWlpQaGVQbVNRQjh6YXRXU3RvQ3lScUJZMmg2MTI0dzdPbm1BUFZuSkJCM0h0T1BHNDFMR3lTRGlqWmEwYXZMTnFUZVJkZFFVPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg4NzU3NDY4CWZpbGU6QmhvalBhdHJhIERlc2tfMC4xLjIxX3g2NC1zZXR1cC5leGUKaW9DeGtEODhVaUdXbnMyQ2hwQlJpVlgwK0w2c1FRcEJVZUgyVmlYanNtTVlQQW1XSVhUaGZxekVDWXduYldSWHlHSGdkM0NMZTZ0N2NBbVhWblloQkE9PQo=",
-                                             "url":  "https://pub-99fc5ebb1fb24ce9a69d861fc420f8b2.r2.dev/BhojPatra-Desk_0.1.21_x64-setup.exe"
+                                             "signature":  "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVTS2hzdHZqVXVkNXpxYXdpZW10MTB3YTN1NDJqNHVtZ1pBWFZ0M2JpY2x3MkRTQ1NId2pPcm1YbEdZQjliZnkzaENLVVJWSklqdzUwalFCWldPRmNIZ2tyVjNFSS9zMWdBPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkyMTYxODAwCWZpbGU6QmhvalBhdHJhIERlc2tfMC4xLjMyX3g2NC1zZXR1cC5leGUKOHBRbWJEUVpUMGhWNENYR3VYQzAyaDRWRVQ4SzhqVmp0RS9mYytOZ01oaCtvUU5xWGtBMzQ3SmNaRi9IbGFCMXNHUE45aDBWMXVob0tGUUh6UERRRHc9PQo=",
+                                             "url":  "https://pub-99fc5ebb1fb24ce9a69d861fc420f8b2.r2.dev/BhojPatra-Desk_0.1.32_x64-setup.exe"
                                          }
                   }
 }

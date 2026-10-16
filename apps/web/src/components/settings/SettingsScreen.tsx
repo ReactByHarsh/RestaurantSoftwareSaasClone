@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { Settings as SettingsIcon, Save, Store, Printer, Bell, Wifi, Sparkles, Download, Upload, Cloud, ShieldCheck, ArrowUpCircle, Image as ImageIcon, Trash2, PanelRight } from 'lucide-react'
+import { Settings as SettingsIcon, Save, Store, Printer, Bell, Wifi, Sparkles, Download, Upload, Cloud, ShieldCheck, ArrowUpCircle, Image as ImageIcon, Trash2, PanelRight, Database } from 'lucide-react'
 import QRCode from 'qrcode'
+import { open as openFileDialog } from '@tauri-apps/plugin-dialog'
 import { useUIStore } from '../../store/uiStore'
 import { useBillingStore } from '../../store/billingStore'
 import { useAuthStore } from '../../store/authStore'
@@ -20,10 +21,12 @@ import {
   type BillingSnapshot,
   type CloudSyncSettings,
 } from '../../lib/cloudSync'
-import { extractBillingSnapshot } from '../../lib/backup'
+import { extractBillingSnapshot, isBillingSnapshot } from '../../lib/backup'
 import { getDeviceId, getOrderSyncHealth, syncOrderDeltasNow } from '../../lib/orderSync'
-import { createDailyLocalBackup, getLanServerStatus, isTauriDesktop, saveDesktopState, type LanServerStatus, type LocalBackupResult } from '../../lib/localDb'
+import { guardCloudSession } from '../../lib/cloudTransport'
+import { createDailyLocalBackup, getLanServerStatus, isTauriDesktop, readLocalDatabaseBackup, restoreLocalDatabaseBackup, saveDesktopState, type LanServerStatus, type LocalBackupResult } from '../../lib/localDb'
 import { getLanBridgeStatus, type LanBridgeStatus } from '../../lib/lanBridge'
+import { getDictionary, LANGUAGE_OPTIONS, useI18n } from '../../lib/i18n'
 
 type DisplayLanStatus = LanServerStatus | LanBridgeStatus
 
@@ -55,6 +58,7 @@ function mergeRestoreSnapshot(local: BillingSnapshot, cloud: BillingSnapshot): B
 export default function SettingsScreen() {
   const navigate = useNavigate()
   const { addToast } = useUIStore()
+  const { language, setLanguage, t } = useI18n()
   const { outlet, printSettings, cloudSync, appUpdate, updateOutlet, updateCloudSyncSettings, updateAppUpdateSettings, exportSnapshot, importSnapshot } = useBillingStore()
   const staff = useStaffStore((state) => state.staff)
   const backupInputRef = useRef<HTMLInputElement>(null)
@@ -63,12 +67,18 @@ export default function SettingsScreen() {
   const cloudSyncFormRef = useRef<HTMLFormElement>(null)
   const [cloudBusy, setCloudBusy] = useState(false)
   const [backupBusy, setBackupBusy] = useState(false)
+  const [backupImportMenuOpen, setBackupImportMenuOpen] = useState(false)
   const [lastLocalBackup, setLastLocalBackup] = useState<LocalBackupResult | null>(null)
   const [updateBusy, setUpdateBusy] = useState(false)
   const [logoPreview, setLogoPreview] = useState(outlet.logoDataUrl ?? '')
   const [lanStatus, setLanStatus] = useState<DisplayLanStatus | null>(null)
   const [lanQrDataUrl, setLanQrDataUrl] = useState('')
   const [syncHealth, setSyncHealth] = useState<{ pending: number; conflicts: number; oldestPendingAt?: string }>({ pending: 0, conflicts: 0 })
+  const [selectedLanguage, setSelectedLanguage] = useState(language)
+
+  useEffect(() => {
+    setSelectedLanguage(language)
+  }, [language])
 
   useEffect(() => {
     let active = true
@@ -131,6 +141,12 @@ export default function SettingsScreen() {
     })
   }
 
+  const saveLanguagePreference = () => {
+    setLanguage(selectedLanguage)
+    const messages = getDictionary(selectedLanguage)
+    addToast('success', messages.languageSaved, messages.languageSettings)
+  }
+
   const readCloudSettingsForm = (form: HTMLFormElement): CloudSyncSettings => {
     const data = new FormData(form)
     return {
@@ -140,13 +156,13 @@ export default function SettingsScreen() {
       outletId: String(data.get('outletId') ?? '').trim(),
       accountLogin: String(data.get('accountLogin') ?? '').trim(),
       accountSecret: String(data.get('accountSecret') ?? '').trim(),
-      autoSyncEnabled: data.get('autoSyncEnabled') === 'on',
+      autoSyncEnabled: data.get('enabled') === 'on' && data.get('autoSyncEnabled') === 'on',
       syncIntervalHours: 24,
-      autoSyncDaily: data.get('autoSyncEnabled') === 'on',
+      autoSyncDaily: data.get('enabled') === 'on' && data.get('autoSyncEnabled') === 'on',
       syncHour24: Number(data.get('syncHour24') ?? 2),
       cloudMode: 'delta_v2',
       lastSuccessfulSyncAt: cloudSync.lastSuccessfulSyncAt,
-      nextSyncAt: data.get('autoSyncEnabled') === 'on'
+      nextSyncAt: data.get('enabled') === 'on' && data.get('autoSyncEnabled') === 'on'
         ? (cloudSync.autoSyncEnabled && cloudSync.nextSyncAt
             ? cloudSync.nextSyncAt
             : new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString())
@@ -162,6 +178,7 @@ export default function SettingsScreen() {
   }
 
   const handleSaveAllSettings = () => {
+    saveLanguagePreference()
     if (outletFormRef.current) saveOutletForm(outletFormRef.current)
     if (appUpdateFormRef.current) saveAppUpdateForm(appUpdateFormRef.current)
     if (cloudSyncFormRef.current) saveCloudSyncForm(cloudSyncFormRef.current)
@@ -214,6 +231,10 @@ export default function SettingsScreen() {
     if (!file) return
 
     try {
+      const signature = new TextDecoder().decode(await file.slice(0, 16).arrayBuffer())
+      if (signature.startsWith('SQLite format 3')) {
+        throw new Error('This is a daily SQLite database backup. Choose Import Backup, then Restore daily database backup.')
+      }
       const text = file.name.endsWith('.gz')
         ? await new Response(file.stream().pipeThrough(new DecompressionStream('gzip'))).text()
         : await file.text()
@@ -226,6 +247,43 @@ export default function SettingsScreen() {
       addToast('success', 'Backup restored successfully', 'Backup Import')
     } catch (error) {
       addToast('error', error instanceof Error ? error.message : 'Could not import backup', 'Backup Import')
+    }
+  }
+
+  const handleDatabaseBackupImport = async () => {
+    setBackupImportMenuOpen(false)
+    setBackupBusy(true)
+    try {
+      const selected = await openFileDialog({
+        title: 'Choose a BhojPatra daily database backup',
+        multiple: false,
+        filters: [{ name: 'BhojPatra SQLite backup', extensions: ['sqlite', 'sqlite3', 'db'] }],
+      })
+      if (!selected || Array.isArray(selected)) return
+
+      const backup = await readLocalDatabaseBackup(selected)
+      if (!isBillingSnapshot(backup.snapshot)) {
+        throw new Error('The selected database does not contain a supported BhojPatra restaurant backup.')
+      }
+      const outletName = backup.snapshot.outlet?.name || 'this outlet'
+      const confirmed = window.confirm(
+        `Restore the backup for ${outletName}? This replaces the current restaurant data and staff list. A safety backup will be kept in the Daily Local Database Backup folder.`,
+      )
+      if (!confirmed) return
+
+      const restored = await restoreLocalDatabaseBackup(selected)
+      if (!isBillingSnapshot(restored.snapshot)) {
+        throw new Error('The backup could not be restored because its restaurant data is incomplete.')
+      }
+      useBillingStore.getState().importSnapshot(restored.snapshot)
+      if (Array.isArray(restored.staff)) {
+        useStaffStore.getState().replaceStaff(restored.staff)
+      }
+      addToast('success', 'Restaurant data and staff restored successfully', 'Backup Import')
+    } catch (error) {
+      addToast('error', error instanceof Error ? error.message : 'Could not import database backup', 'Backup Import')
+    } finally {
+      setBackupBusy(false)
     }
   }
 
@@ -269,6 +327,10 @@ export default function SettingsScreen() {
   const handleCloudSyncNow = async () => {
     if (cloudSyncFormRef.current) saveCloudSyncForm(cloudSyncFormRef.current)
     const formSettings = cloudSyncFormRef.current ? readCloudSettingsForm(cloudSyncFormRef.current) : cloudSync
+    if (!formSettings.enabled) {
+      addToast('info', 'Cloud sync is off. Local data is kept on this device.', 'Cloud Sync')
+      return
+    }
     const dueAt = getDailyCloudSyncDueAt(formSettings)
     if (dueAt > Date.now()) {
       addToast('info', `Today's cloud sync is already complete. Next sync: ${new Date(dueAt).toLocaleString('en-IN')}`, 'Cloud Sync')
@@ -283,6 +345,7 @@ export default function SettingsScreen() {
     }
 
     setCloudBusy(true)
+    const isCurrent = guardCloudSession(formSettings)
     try {
       if (formSettings.accountLogin && formSettings.accountSecret) {
         const session = await runCloudLogin(serverUrl, formSettings.accountLogin, formSettings.accountSecret)
@@ -292,12 +355,14 @@ export default function SettingsScreen() {
       tenantId = tenantId || outlet.tenantId
       outletId = outletId || outlet.id
       const cloudAuth = { accountLogin: formSettings.accountLogin, accountSecret: formSettings.accountSecret }
-      const effectiveCloud = { ...formSettings, enabled: true, tenantId, outletId, cloudMode: 'delta_v2' as const }
+      if (!isCurrent()) return
+      const effectiveCloud = { ...formSettings, tenantId, outletId, cloudMode: 'delta_v2' as const }
       // First push any local pending order mutations, then pull the complete
       // cloud restaurant dataset. Delta sync alone cannot restore menu,
       // floors, inventory, or older order history into a fresh desktop.
       const snapshot = exportSnapshot()
       const result = await syncOrderDeltasNow({ ...snapshot, cloudSync: effectiveCloud }, effectiveCloud)
+      if (!isCurrent()) return
       if (result.changed) importSnapshot(result.snapshot, true)
       if (result.skipped || result.conflicts || result.pending) throw new Error('Sync is incomplete. Resolve pending changes or conflicts before restoring cloud data.')
       if (['owner', 'admin', 'manager'].includes(useAuthStore.getState().user?.role ?? '')) {
@@ -308,6 +373,7 @@ export default function SettingsScreen() {
       }
 
       const completeCloud = await fetchCompleteCloudSnapshot(outletId, serverUrl, cloudAuth)
+      if (!isCurrent()) return
       const importedCloudData = completeCloud.exists && hasSnapshotData(completeCloud.payload)
       if (importedCloudData) {
         const safeRestore = mergeRestoreSnapshot(
@@ -321,8 +387,10 @@ export default function SettingsScreen() {
       }
 
       const cloudStaff = await fetchCloudStaff(serverUrl, cloudAuth)
+      if (!isCurrent()) return
       useStaffStore.getState().replaceStaff([...cloudStaff.staff, ...useStaffStore.getState().staff])
       await syncCloudStaff(useStaffStore.getState().staff, serverUrl, cloudAuth)
+      if (!isCurrent()) return
       const syncedAt = new Date().toISOString()
       updateCloudSyncSettings({
         ...effectiveCloud,
@@ -353,18 +421,25 @@ export default function SettingsScreen() {
   const handleCloudConnect = async () => {
     if (!cloudSyncFormRef.current) return
     const formSettings = readCloudSettingsForm(cloudSyncFormRef.current)
+    if (!formSettings.enabled) {
+      addToast('info', 'Enable cloud sync before connecting an account.', 'Cloud Sync')
+      return
+    }
+    saveCloudSyncForm(cloudSyncFormRef.current)
     if (!formSettings.serverUrl || !formSettings.accountLogin || !formSettings.accountSecret) {
       addToast('warning', 'Enter cloud server URL, login, and password first', 'Cloud Sync')
       return
     }
     setCloudBusy(true)
+    const isCurrent = guardCloudSession(formSettings)
     try {
       const session = await runCloudLogin(formSettings.serverUrl, formSettings.accountLogin, formSettings.accountSecret)
+      if (!isCurrent()) return
       const outletId = session.outlets[0]?.id || `out_${session.user.tenantId}`
       const tenantId = session.user.tenantId
       updateCloudSyncSettings({
         ...formSettings,
-        enabled: true,
+        enabled: formSettings.enabled,
         tenantId,
         outletId,
         cloudMode: 'delta_v2',
@@ -452,7 +527,7 @@ export default function SettingsScreen() {
             <SettingsIcon size={20} strokeWidth={2.5} />
           </div>
           <div>
-            <h1 className="text-xl font-black text-slate-800 tracking-tight leading-none">Settings</h1>
+            <h1 className="text-xl font-black text-slate-800 tracking-tight leading-none">{t('navSettings')}</h1>
             <p className="text-xs font-bold text-slate-500 mt-0.5">Configure outlet preferences</p>
           </div>
         </div>
@@ -462,7 +537,7 @@ export default function SettingsScreen() {
             onClick={handleSaveAllSettings}
             className="flex items-center gap-1.5 px-3 py-1.5 bg-primary text-white text-xs font-black rounded-lg hover:bg-primary-dark transition-all active:scale-95 shadow-sm"
           >
-            <Save size={14} strokeWidth={2.5} /> SAVE SETTINGS
+            <Save size={14} strokeWidth={2.5} /> {t('saveSettings')}
           </button>
           <button
             onClick={handleBackupDownload}
@@ -470,17 +545,69 @@ export default function SettingsScreen() {
           >
             <Download size={14} strokeWidth={2.5} /> EXPORT BACKUP
           </button>
-          <button
-            onClick={() => backupInputRef.current?.click()}
-            className="flex items-center gap-1.5 px-3 py-1.5 bg-emerald-50 border-2 border-emerald-200 text-emerald-700 text-xs font-black rounded-lg hover:bg-emerald-100 transition-all active:scale-95 shadow-sm"
-          >
-            <Upload size={14} strokeWidth={2.5} /> IMPORT BACKUP
-          </button>
+          <div className="relative">
+            <button
+              onClick={() => isTauriDesktop() ? setBackupImportMenuOpen(open => !open) : backupInputRef.current?.click()}
+              disabled={backupBusy}
+              aria-expanded={backupImportMenuOpen}
+              className="flex items-center gap-1.5 px-3 py-1.5 bg-emerald-50 border-2 border-emerald-200 text-emerald-700 text-xs font-black rounded-lg hover:bg-emerald-100 transition-all active:scale-95 shadow-sm disabled:opacity-60"
+            >
+              <Upload size={14} strokeWidth={2.5} /> {backupBusy ? 'RESTORING BACKUP…' : 'IMPORT BACKUP'}
+            </button>
+            {backupImportMenuOpen && isTauriDesktop() && (
+              <div className="absolute right-0 top-full z-50 mt-2 w-72 overflow-hidden rounded-xl border border-slate-200 bg-white p-1.5 shadow-xl">
+                <button
+                  type="button"
+                  onClick={() => { setBackupImportMenuOpen(false); backupInputRef.current?.click() }}
+                  className="flex w-full items-center gap-2 rounded-lg px-3 py-2.5 text-left text-xs font-bold text-slate-700 hover:bg-slate-50"
+                >
+                  <Upload size={15} className="text-emerald-600" /> {t('settingsImportJsonBackup')}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void handleDatabaseBackupImport()}
+                  className="flex w-full items-center gap-2 rounded-lg px-3 py-2.5 text-left text-xs font-bold text-slate-700 hover:bg-slate-50"
+                >
+                  <Database size={15} className="text-emerald-600" /> {t('settingsRestoreDatabaseBackup')}
+                </button>
+              </div>
+            )}
+          </div>
         </div>
       </div>
 
       <div className="flex-1 overflow-auto p-4 sm:p-6 lg:px-8">
         <div className="space-y-4 pb-8">
+
+          {/* LANGUAGE */}
+          <section className="bg-white rounded-2xl border-2 border-slate-100 shadow-[0_2px_10px_rgba(0,0,0,0.02)] overflow-hidden">
+            <div className="px-5 py-3 border-b-2 border-slate-100 bg-slate-50/50 flex items-center gap-2">
+              <span className="text-lg" aria-hidden="true">अ</span>
+              <h2 className="text-sm font-black text-slate-800 tracking-tight">{t('languageSettings')}</h2>
+            </div>
+            <form
+              className="p-5 flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between"
+              onSubmit={(event) => { event.preventDefault(); saveLanguagePreference() }}
+            >
+              <div className="max-w-2xl">
+                <p className="text-sm font-black text-slate-800">{t('languageSettings')}</p>
+                <p className="mt-1 text-[11px] font-bold leading-5 text-slate-500">{t('languageDescription')}</p>
+                <select
+                  value={selectedLanguage}
+                  onChange={(event) => setSelectedLanguage(event.target.value as typeof selectedLanguage)}
+                  className="mt-3 min-w-56 rounded-xl border-2 border-slate-200 bg-white px-3 py-2 text-sm font-bold text-slate-800 outline-none focus:border-primary/60 focus:ring-4 focus:ring-primary/10"
+                  aria-label={t('languageSettings')}
+                >
+                  {LANGUAGE_OPTIONS.map((option) => (
+                    <option key={option.value} value={option.value}>{t(option.labelKey)}</option>
+                  ))}
+                </select>
+              </div>
+              <button type="submit" className="inline-flex items-center justify-center gap-1.5 rounded-xl bg-primary px-4 py-2.5 text-xs font-black text-white shadow-sm hover:bg-primary-dark">
+                <Save size={14} strokeWidth={2.5} /> {t('saveLanguage')}
+              </button>
+            </form>
+          </section>
 
           {/* OUTLET INFO */}
           <section className="bg-white rounded-2xl border-2 border-slate-100 shadow-[0_2px_10px_rgba(0,0,0,0.02)] overflow-hidden">
@@ -559,7 +686,7 @@ export default function SettingsScreen() {
                 <div>
                   <p className="text-sm font-black text-slate-800">Automatic, date-stamped SQLite protection</p>
                   <p className="mt-1 text-[11px] font-bold leading-5 text-slate-500">
-                    Once per day BhojPatra saves an integrity-checked copy of the complete local database, including setup, staff, tables, carts, orders, KOTs, payments, and sync metadata. A protected app-data copy is always kept, with additional copies in `BhojPatra Backups` on every writable fixed drive.
+                    BhojPatra creates an integrity-checked copy of the complete local database at startup and refreshes it hourly, including setup, staff, tables, carts, orders, KOTs, payments, and local sync metadata. A protected app-data copy is always kept, with additional copies in `BhojPatra Backups` on writable fixed drives.
                   </p>
                   {lastLocalBackup && (
                     <div className="mt-3 space-y-1 rounded-xl border border-emerald-100 bg-emerald-50 p-3">
@@ -756,7 +883,11 @@ export default function SettingsScreen() {
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                 <div className="md:col-span-2">
                   <label className="flex items-center gap-3 cursor-pointer p-3 rounded-xl border-2 border-slate-100 bg-slate-50">
-                    <input name="enabled" type="checkbox" defaultChecked={cloudSync.enabled} className="w-5 h-5 rounded text-primary" />
+                    <input name="enabled" type="checkbox" checked={cloudSync.enabled} onChange={event => {
+                      updateCloudSyncSettings({ enabled: event.target.checked })
+                      if (isTauriDesktop()) void saveDesktopState(useBillingStore.getState().exportSnapshot(), useStaffStore.getState().staff)
+                        .catch(() => addToast('error', 'Could not save cloud settings to the local database', 'Cloud Sync'))
+                    }} className="w-5 h-5 rounded text-primary" />
                     <div>
                       <p className="font-black text-slate-800 text-sm">Enable cloud sync</p>
                       <p className="text-[10px] font-bold text-slate-500 mt-0.5">Keep local desktop working offline and sync restaurant data to the cloud in the background.</p>
@@ -790,7 +921,7 @@ export default function SettingsScreen() {
                 </div>
                 <div className="flex items-end">
                   <label className="flex items-center gap-3 cursor-pointer p-3 rounded-xl border-2 border-slate-100 bg-slate-50 w-full">
-                    <input name="autoSyncEnabled" type="checkbox" defaultChecked={cloudSync.autoSyncEnabled} className="w-5 h-5 rounded text-primary" />
+                    <input name="autoSyncEnabled" type="checkbox" checked={cloudSync.autoSyncEnabled} disabled={!cloudSync.enabled} onChange={event => updateCloudSyncSettings({ autoSyncEnabled: event.target.checked, autoSyncDaily: event.target.checked })} className="w-5 h-5 rounded text-primary disabled:opacity-40" />
                     <div>
                       <p className="font-black text-slate-800 text-sm">Automatic delta sync</p>
                       <p className="text-[10px] font-bold text-slate-500 mt-0.5">Turn this on or off. When enabled, newest orders and changes sync once every 24 hours.</p>
@@ -806,10 +937,10 @@ export default function SettingsScreen() {
                   {syncHealth.oldestPendingAt ? ` · Oldest: ${new Date(syncHealth.oldestPendingAt).toLocaleString('en-IN')}` : ''}
                 </p>
                 <div className="flex gap-2">
-                  <button type="button" onClick={handleCloudConnect} disabled={cloudBusy} className="px-4 py-2 rounded-xl bg-slate-900 text-white text-xs font-black disabled:opacity-40">
+                  <button type="button" onClick={handleCloudConnect} disabled={cloudBusy || !cloudSync.enabled} className="px-4 py-2 rounded-xl bg-slate-900 text-white text-xs font-black disabled:opacity-40">
                     CONNECT ACCOUNT
                   </button>
-                  <button type="button" onClick={handleCloudSyncNow} disabled={cloudBusy} className="px-4 py-2 rounded-xl bg-sky-600 text-white text-xs font-black disabled:opacity-40">
+                  <button type="button" onClick={handleCloudSyncNow} disabled={cloudBusy || !cloudSync.enabled} className="px-4 py-2 rounded-xl bg-sky-600 text-white text-xs font-black disabled:opacity-40">
                     {cloudBusy ? 'SYNCING...' : 'RUN DAILY SYNC'}
                   </button>
                   <button type="submit" className="px-4 py-2 rounded-xl bg-primary text-white text-xs font-black shadow-sm">

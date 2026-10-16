@@ -2,8 +2,9 @@ import { Fragment, useMemo, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { ChevronDown, ChevronUp, Edit3, Printer, RefreshCw, Undo } from 'lucide-react'
 import { clsx } from 'clsx'
-import { useBillingStore } from '../../store/billingStore'
+import { isClosedOrder, useBillingStore } from '../../store/billingStore'
 import { formatPaise } from '../../lib/money'
+import { getOrderHistoryTimestamp, isWithinLocalDateRange, localDateInputValue } from '../../lib/orderHistory'
 import { useAuthStore } from '../../store/authStore'
 import { useUIStore } from '../../store/uiStore'
 import ReasonDialog from '../shared/ReasonDialog'
@@ -49,14 +50,8 @@ export default function OrdersScreen({ onBack }: Props = {}) {
   const navigate = useNavigate()
 
   const [search, setSearch] = useState('')
-  const [fromDate, setFromDate] = useState(() => {
-    const d = new Date()
-    return d.toISOString().split('T')[0]
-  })
-  const [toDate, setToDate] = useState(() => {
-    const d = new Date()
-    return d.toISOString().split('T')[0]
-  })
+  const [fromDate, setFromDate] = useState(() => localDateInputValue())
+  const [toDate, setToDate] = useState(() => localDateInputValue())
   
   const [selectedOrderId, setSelectedOrderId] = useState<string | null>(null)
   const [expandedOrderId, setExpandedOrderId] = useState<string | null>(null)
@@ -78,16 +73,15 @@ export default function OrdersScreen({ onBack }: Props = {}) {
   }, [orderItems])
 
   const filtered = useMemo(() => {
-    const from = new Date(fromDate).getTime()
-    const to = new Date(toDate).getTime() + 86400000 // end of day
-
     return orders.filter(o => {
       if (['cancelled', 'void'].includes(o.status)) return false
       if (o.totalPaise <= 0) return false
-      if ((activeItemCountByOrder.get(o.id) ?? 0) <= 0) return false
+      // Preserve completed bills in history even if an older/imported record
+      // is missing its child item rows; only hide empty open drafts.
+      if (!isClosedOrder(o) && (activeItemCountByOrder.get(o.id) ?? 0) <= 0) return false
 
-      const orderTime = new Date(o.createdAt).getTime()
-      if (orderTime < from || orderTime >= to) return false
+      const historyTime = getOrderHistoryTimestamp(o)
+      if (!isWithinLocalDateRange(historyTime, fromDate, toDate)) return false
       
       if (search) {
         const q = search.toLowerCase()
@@ -96,7 +90,7 @@ export default function OrdersScreen({ onBack }: Props = {}) {
             !(o.customerName?.toLowerCase().includes(q))) return false
       }
       return true
-    }).sort((a, b) => b.createdAt.localeCompare(a.createdAt))
+    }).sort((a, b) => Date.parse(getOrderHistoryTimestamp(b)) - Date.parse(getOrderHistoryTimestamp(a)))
   }, [orders, fromDate, toDate, search, activeItemCountByOrder])
 
   const itemsByOrderId = useMemo(() => {

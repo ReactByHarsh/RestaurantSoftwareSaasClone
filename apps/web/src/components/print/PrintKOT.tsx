@@ -1,11 +1,15 @@
 import { useEffect } from 'react'
-import { useParams } from 'react-router-dom'
+import { useParams, useSearchParams } from 'react-router-dom'
 import { useBillingStore } from '../../store/billingStore'
 
 export default function PrintKOT() {
   const { kotId } = useParams()
   const { kots, printSettings, outlet } = useBillingStore()
-  const kot = kots.find((candidate) => candidate.id === kotId)
+  const [search] = useSearchParams()
+  const baseKot = kots.find((candidate) => candidate.id === kotId)
+  const requestedIds = new Set((search.get('ids') || '').split(','))
+  const selected = baseKot ? kots.filter(candidate => requestedIds.has(candidate.id) && candidate.orderId === baseKot.orderId) : []
+  const kot = baseKot && selected.length > 1 ? { ...baseKot, kotNo: selected.map(k => k.kotNo).join(' + '), items: selected.flatMap(k => k.items) } : baseKot
 
   useEffect(() => {
     const handleAfterPrint = () => window.close()

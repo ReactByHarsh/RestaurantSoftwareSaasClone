@@ -381,7 +381,7 @@ export default function OrderCart({ onSendKOT, onSettleBill, onBackToMenu }: Pro
 
       {/* ── BOTTOM ACTION GRID ── */}
       <div className="p-1.5 border-t border-slate-300 bg-white flex-shrink-0 grid grid-cols-6 grid-rows-2 gap-1.5">
-        <button onClick={onSendKOT} disabled={cart.length === 0} className="flex flex-col items-center justify-center py-1.5 px-1 bg-emerald-600 hover:bg-emerald-700 text-white rounded-md gap-1 disabled:opacity-40 transition-colors shadow-sm">
+        <button title="Send KOT (F3)" onClick={onSendKOT} disabled={cart.length === 0} className="flex flex-col items-center justify-center py-1.5 px-1 bg-emerald-600 hover:bg-emerald-700 text-white rounded-md gap-1 disabled:opacity-40 transition-colors shadow-sm">
           <SendHorizonal size={16} strokeWidth={2.5}/> <span className="text-[8px] font-black uppercase tracking-wider leading-none">KOT</span>
         </button>
         <button disabled className="flex flex-col items-center justify-center py-1.5 px-1 bg-slate-600 hover:bg-slate-700 text-white rounded-md gap-1 opacity-50 shadow-sm">
@@ -402,7 +402,7 @@ export default function OrderCart({ onSendKOT, onSettleBill, onBackToMenu }: Pro
           <BadgePercent size={16} strokeWidth={2.5}/> <span className="text-[8px] font-black uppercase tracking-wider leading-none">Discount</span>
         </button>
 
-        <button onClick={onSettleBill} disabled={!hasBillableItems} className="col-start-6 row-span-2 flex flex-col items-center justify-center py-3 bg-primary hover:bg-primary-dark text-white rounded-lg font-black uppercase tracking-widest text-sm disabled:opacity-40 transition-colors shadow-sm">
+        <button title="Payment / Checkout (F2)" onClick={onSettleBill} disabled={!hasBillableItems} className="col-start-6 row-span-2 flex flex-col items-center justify-center py-3 bg-primary hover:bg-primary-dark text-white rounded-lg font-black uppercase tracking-widest text-sm disabled:opacity-40 transition-colors shadow-sm">
           Checkout
         </button>
 
@@ -415,7 +415,7 @@ export default function OrderCart({ onSendKOT, onSettleBill, onBackToMenu }: Pro
         <button disabled className="flex flex-col items-center justify-center py-1.5 px-1 bg-cyan-600 hover:bg-cyan-700 text-white rounded-md gap-1 opacity-50 shadow-sm">
           <MessageSquareText size={16} strokeWidth={2.5}/> <span className="text-[8px] font-black uppercase tracking-wider leading-none">Remarks</span>
         </button>
-        <button onClick={printCartProforma} disabled={!hasBillableItems} className="flex flex-col items-center justify-center py-1.5 px-1 bg-indigo-500 hover:bg-indigo-600 text-white rounded-md gap-1 disabled:opacity-40 transition-colors shadow-sm">
+        <button title="Print proforma (F4)" onClick={printCartProforma} disabled={!hasBillableItems} className="flex flex-col items-center justify-center py-1.5 px-1 bg-indigo-500 hover:bg-indigo-600 text-white rounded-md gap-1 disabled:opacity-40 transition-colors shadow-sm">
           <FileText size={16} strokeWidth={2.5}/> <span className="text-[8px] font-black uppercase tracking-wider leading-none">Proforma</span>
         </button>
         <button onClick={onSettleBill} disabled={!hasBillableItems} className="flex flex-col items-center justify-center py-1.5 px-1 bg-amber-500 hover:bg-amber-600 text-white rounded-md gap-1 transition-colors shadow-sm disabled:opacity-40 disabled:hover:bg-amber-500">

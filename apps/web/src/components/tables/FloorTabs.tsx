@@ -3,7 +3,7 @@ import { Pencil, Settings2, Trash2 } from 'lucide-react'
 import { FLOOR_COLORS } from '../../lib/floorColors'
 
 interface Props {
-  floors: { id: string; name: string; priceAdjustmentType?: 'percentage' | 'amount'; priceAdjustmentValue?: number }[]
+  floors: { id: string; name: string; priceAdjustmentType?: 'percentage' | 'amount'; priceAdjustmentValue?: number; menuPriceOption?: string }[]
   activeFloorId: string
   onSelect: (id: string) => void
   onRename?: (id: string, name: string) => void
@@ -43,6 +43,9 @@ export default function FloorTabs({ floors, activeFloorId, onSelect, onRename, o
               className="px-3 py-1.5 text-xs font-black"
             >
               {floor.name}
+              {floor.menuPriceOption && floor.menuPriceOption !== 'regular' && (
+                <span className="ml-1.5 text-[10px] opacity-75">{floor.menuPriceOption.toUpperCase()}</span>
+              )}
               {Boolean(floor.priceAdjustmentValue && floor.priceAdjustmentValue > 0) && (
                 <span className="ml-1.5 text-[10px] opacity-75">
                   +{floor.priceAdjustmentType === 'amount' ? `₹${((floor.priceAdjustmentValue ?? 0) / 100).toFixed(2)}` : `${floor.priceAdjustmentValue}%`}

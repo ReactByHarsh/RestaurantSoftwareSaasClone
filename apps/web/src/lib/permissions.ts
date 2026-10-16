@@ -112,6 +112,7 @@ export function getNavItems(role: Role): string[] {
     { key: 'menu', perm: 'menu:view' },
     { key: 'inventory', perm: 'inventory:view' },
     { key: 'reports', perm: 'reports:view_today' },
+    { key: 'expenses', perm: 'reports:view_today' },
     { key: 'admin', perm: 'admin:manage_staff' },
     { key: 'printers', perm: 'settings:view' },
     { key: 'settings', perm: 'settings:view' },

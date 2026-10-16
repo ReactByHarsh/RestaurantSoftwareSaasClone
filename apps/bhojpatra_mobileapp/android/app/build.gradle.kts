@@ -16,7 +16,7 @@ android {
 
     defaultConfig {
         // TODO: Specify your own unique Application ID (https://developer.android.com/studio/build/application-id.html).
-        applicationId = "com.bhojpatra.bhojpatra_mobile"
+        applicationId = "com.bhojpatra.captain"
         // You can update the following values to match your application needs.
         // For more information, see: https://flutter.dev/to/review-gradle-config.
         minSdk = flutter.minSdkVersion
@@ -25,11 +25,20 @@ android {
         versionName = flutter.versionName
     }
 
+    signingConfigs {
+        create("captainRelease") {
+            val keystorePath = System.getenv("BHOJPATRA_ANDROID_KEYSTORE")
+            if (!keystorePath.isNullOrBlank()) {
+                storeFile = file(keystorePath)
+                storePassword = System.getenv("BHOJPATRA_ANDROID_STORE_PASSWORD")
+                keyAlias = "bhojpatra-captain"
+                keyPassword = System.getenv("BHOJPATRA_ANDROID_STORE_PASSWORD")
+            }
+        }
+    }
     buildTypes {
         release {
-            // TODO: Add your own signing config for the release build.
-            // Signing with the debug keys for now, so `flutter run --release` works.
-            signingConfig = signingConfigs.getByName("debug")
+            signingConfig = signingConfigs.getByName("captainRelease")
         }
     }
 }

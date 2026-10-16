@@ -1907,7 +1907,7 @@ const app = new Hono<{ Bindings: Bindings }>()
 app.use('*', cors({
   origin: (origin) => {
     if (!origin) return origin
-    if (origin === 'http://localhost:5173' || origin === 'http://127.0.0.1:5173') return origin
+    if (/^https?:\/\/(localhost|127\.0\.0\.1):\d+$/i.test(origin)) return origin
     if (origin === 'http://tauri.localhost' || origin === 'https://tauri.localhost' || origin === 'tauri://localhost') return origin
     if (/^https:\/\/[a-z0-9-]+\.workers\.dev$/i.test(origin)) return origin
     return undefined

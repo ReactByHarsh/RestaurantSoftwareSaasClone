@@ -1,8 +1,9 @@
-import { Routes, Route, Navigate } from 'react-router-dom'
+import { Routes, Route, Navigate, useLocation } from 'react-router-dom'
 import { useEffect } from 'react'
 import { useAuthStore } from './store/authStore'
 import LoginScreen from './components/auth/LoginScreen'
 import FirstRunSetup from './components/auth/FirstRunSetup'
+import DesktopLicenseGuard from './components/auth/DesktopLicenseGuard'
 import AppShell from './components/shell/AppShell'
 import BillingScreen from './components/billing/BillingScreen'
 import TableScreen from './components/tables/TableScreen'
@@ -12,6 +13,7 @@ import OrdersScreen from './components/orders/OrdersScreen'
 import MenuScreen from './components/menu/MenuScreen'
 import InventoryScreen from './components/inventory/InventoryScreen'
 import ReportsScreen from './components/reports/ReportsScreen'
+import ExpenseScreen from './components/expenses/ExpenseScreen'
 import OwnerScreen from './components/owner/OwnerScreen'
 import AdminScreen from './components/admin/AdminScreen'
 import SettingsScreen from './components/settings/SettingsScreen'
@@ -35,6 +37,7 @@ import {
   syncCloudStaff,
 } from './lib/cloudSync'
 import { getDeviceId, syncOrderDeltasNow } from './lib/orderSync'
+import { guardCloudSession } from './lib/cloudTransport'
 import { getLanBridgeState, syncLanBridge } from './lib/lanBridge'
 
 function getNormalizedSnapshotIfNeeded(state: ReturnType<typeof useBillingStore.getState>) {
@@ -84,8 +87,11 @@ function ProtectedRoute({ children, permission }: { children: React.ReactNode; p
 }
 
 export default function App() {
+  const location = useLocation()
   const { user, logout } = useAuthStore()
   const staffCount = useStaffStore((state) => state.staff.length)
+  const hasSavedCloudLogin = useBillingStore((state) => Boolean(state.cloudSync.accountLogin))
+  const cloudEnabled = useBillingStore((state) => state.cloudSync.enabled)
   const defaultRoute = user ? getDefaultRoute(user.role) : '/app/tables'
 
   useEffect(() => {
@@ -127,6 +133,7 @@ export default function App() {
     const cloud = useBillingStore.getState().cloudSync
     if (!cloud.enabled || !cloud.serverUrl || !cloud.outletId || !cloud.accountLogin || !cloud.accountSecret) return
     if (user.tenantId === 'platform') return
+    const isCurrent = guardCloudSession(cloud)
 
     const auth = { accountLogin: cloud.accountLogin, accountSecret: cloud.accountSecret }
     let cancelled = false
@@ -139,9 +146,7 @@ export default function App() {
       ...payload,
       cloudSync: {
         ...(payload.cloudSync ?? {}),
-        ...cloud,
-        enabled: true,
-        accountSecret: cloud.accountSecret,
+        ...useBillingStore.getState().cloudSync,
       },
     })
 
@@ -150,7 +155,7 @@ export default function App() {
         // Full snapshots are reserved for first bootstrap/recovery.
         if (getSnapshotDataScore(useBillingStore.getState().exportSnapshot()) > 0) return
         const remote = await fetchCloudSnapshot(cloud.outletId, cloud.serverUrl, auth)
-        if (cancelled) return
+        if (cancelled || !isCurrent()) return
         if (remote.exists) {
           const billing = useBillingStore.getState()
           const localSnapshot = billing.exportSnapshot()
@@ -175,6 +180,7 @@ export default function App() {
       if (cancelled || cloudSyncInFlight) return
       const current = useBillingStore.getState()
       const currentCloud = current.cloudSync
+      const isCurrent = guardCloudSession(currentCloud)
       if (!currentCloud.enabled || !currentCloud.autoSyncEnabled || !currentCloud.accountLogin || !currentCloud.accountSecret) return
       if (!isDailyCloudSyncDue(currentCloud)) {
         scheduleDailySync()
@@ -183,7 +189,7 @@ export default function App() {
       cloudSyncInFlight = true
       try {
         const result = await syncOrderDeltasNow(current.exportSnapshot(), currentCloud)
-        if (cancelled) return
+        if (cancelled || !isCurrent()) return
         if (result.changed) current.importSnapshot(withActiveCloudCredentials(result.snapshot), true)
         if (result.skipped || result.conflicts || result.pending) throw new Error('Cloud sync is incomplete; pending changes or conflicts need attention')
         if (['owner', 'admin', 'manager'].includes(useAuthStore.getState().user?.role ?? '')) {
@@ -193,9 +199,11 @@ export default function App() {
           await saveCloudDailyBackup(currentCloud.outletId, currentCloud.tenantId, snapshot, deviceId, currentCloud.serverUrl, auth)
         }
         const cloudStaff = await fetchCloudStaff(currentCloud.serverUrl, auth)
+        if (cancelled || !isCurrent()) return
         const mergedStaff = [...cloudStaff.staff, ...useStaffStore.getState().staff]
         useStaffStore.getState().replaceStaff(mergedStaff)
         await syncCloudStaff(useStaffStore.getState().staff, currentCloud.serverUrl, auth)
+        if (cancelled || !isCurrent()) return
         const syncedAt = new Date().toISOString()
         current.updateCloudSyncSettings({
           cloudMode: 'delta_v2',
@@ -208,6 +216,7 @@ export default function App() {
         })
         retryAttempt = 0
       } catch (error) {
+        if (cancelled || !isCurrent()) return
         console.error('Daily web cloud sync failed', error)
         const retryDelays = [60_000, 5 * 60_000, 15 * 60_000]
         if (!cancelled && retryAttempt < retryDelays.length) {
@@ -278,7 +287,7 @@ export default function App() {
       window.removeEventListener('online', catchUp)
       document.removeEventListener('visibilitychange', catchUp)
     }
-  }, [user?.id])
+  }, [user?.id, cloudEnabled])
 
   useEffect(() => {
     if (!user || user.tenantId === 'platform' || isTauriDesktop()) return
@@ -410,19 +419,19 @@ export default function App() {
     }
   }, [user?.id])
 
-  if (!isTauriDesktop() && staffCount === 0) {
+  if (staffCount === 0 && (!isTauriDesktop() || !hasSavedCloudLogin) && location.pathname !== '/login') {
     return (
-      <>
+      <DesktopLicenseGuard>
         <FirstRunSetup />
         <ToastContainer />
-      </>
+      </DesktopLicenseGuard>
     )
   }
 
   const fallbackRoute = user ? '/app' : '/login'
 
   return (
-    <>
+    <DesktopLicenseGuard>
       <Routes>
         <Route path="/login" element={<LoginScreen />} />
         <Route path="/print/receipt/:orderId" element={<PrintReceipt />} />
@@ -445,6 +454,7 @@ export default function App() {
           <Route path="menu" element={<ProtectedRoute permission="menu:view"><MenuScreen /></ProtectedRoute>} />
           <Route path="inventory" element={<ProtectedRoute permission="inventory:view"><InventoryScreen /></ProtectedRoute>} />
           <Route path="reports" element={<ProtectedRoute permission="reports:view_today"><ReportsScreen /></ProtectedRoute>} />
+          <Route path="expenses" element={<ProtectedRoute permission="reports:view_today"><ExpenseScreen /></ProtectedRoute>} />
           <Route path="admin" element={<ProtectedRoute permission="admin:manage_staff"><AdminScreen /></ProtectedRoute>} />
           <Route path="printers" element={<ProtectedRoute permission="settings:view"><PrinterSettingsScreen /></ProtectedRoute>} />
           <Route path="settings" element={<ProtectedRoute permission="settings:view"><SettingsScreen /></ProtectedRoute>} />
@@ -452,6 +462,6 @@ export default function App() {
         <Route path="*" element={<Navigate to={fallbackRoute} replace />} />
       </Routes>
       <ToastContainer />
-    </>
+    </DesktopLicenseGuard>
   )
 }

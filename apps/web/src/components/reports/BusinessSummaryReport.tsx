@@ -4,6 +4,8 @@ import { Printer, Download } from 'lucide-react'
 import { useUIStore } from '../../store/uiStore'
 import { describePrinterError, sendPrintJob } from '../../lib/printer'
 import { buildBusinessSummaryPrintText } from '../../lib/businessSummaryPrint'
+import { getBillableOrderTotalPaise } from '../../lib/money'
+import { Bar, BarChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts'
 
 interface Props {
   fromDate: string
@@ -11,7 +13,7 @@ interface Props {
 }
 
 export default function BusinessSummaryReport({ fromDate, toDate }: Props) {
-  const { outlet, printSettings, orders, orderItems, kots, menuItems, menuCategories, tables, floors, payments } = useBillingStore()
+  const { outlet, printSettings, orders, orderItems, kots, menuItems, menuCategories, tables, floors, payments, expenses, purchaseEntries } = useBillingStore()
   const { addToast } = useUIStore()
   const [showCategorySales, setShowCategorySales] = useState(true)
   const [showSubcategorySales, setShowSubcategorySales] = useState(true)
@@ -21,7 +23,7 @@ export default function BusinessSummaryReport({ fromDate, toDate }: Props) {
     // 1. Filter orders by date range
     // The dates are in YYYY-MM-DD. order.businessDate is also YYYY-MM-DD.
     const filteredOrders = orders.filter(
-      o => o.businessDate >= fromDate && o.businessDate <= toDate && o.paymentStatus === 'paid' && !['cancelled', 'void'].includes(o.status) && o.totalPaise > 0
+      o => o.businessDate >= fromDate && o.businessDate <= toDate && o.paymentStatus === 'paid' && !['cancelled', 'void'].includes(o.status) && getBillableOrderTotalPaise(o) > 0
     )
     const orderIds = new Set(filteredOrders.map(o => o.id))
 
@@ -37,7 +39,7 @@ export default function BusinessSummaryReport({ fromDate, toDate }: Props) {
     // Sales Summary
     const totalBills = filteredOrders.length
     const itemsSold = filteredItems.reduce((sum, item) => sum + item.quantity, 0)
-    const netSalesAmount = filteredOrders.reduce((sum, order) => sum + order.totalPaise, 0)
+    const netSalesAmount = filteredOrders.reduce((sum, order) => sum + getBillableOrderTotalPaise(order), 0)
 
     // Discount Summary
     const billsWithDiscount = filteredOrders.filter(o => o.discountPaise > 0).length
@@ -90,10 +92,10 @@ export default function BusinessSummaryReport({ fromDate, toDate }: Props) {
         const table = tables.find(t => t.id === order.tableId)
         const floor = table ? floors.find(f => f.id === table.floorId)?.name : 'Dine-In'
         const key = floor || 'Dine-In'
-        sectionSales[key] = (sectionSales[key] || 0) + order.totalPaise
+        sectionSales[key] = (sectionSales[key] || 0) + getBillableOrderTotalPaise(order)
       } else {
         const key = order.type === 'takeaway' ? 'Takeaway' : order.type === 'delivery' ? 'Delivery' : 'Other'
-        sectionSales[key] = (sectionSales[key] || 0) + order.totalPaise
+        sectionSales[key] = (sectionSales[key] || 0) + getBillableOrderTotalPaise(order)
       }
     })
 
@@ -101,7 +103,7 @@ export default function BusinessSummaryReport({ fromDate, toDate }: Props) {
     const counterTypeSales: Record<string, number> = {}
     filteredOrders.forEach(order => {
       const key = order.type === 'dine_in' ? 'Regular' : order.type === 'takeaway' ? 'Takeaway' : order.type === 'delivery' ? 'Delivery' : 'Online'
-      counterTypeSales[key] = (counterTypeSales[key] || 0) + order.totalPaise
+      counterTypeSales[key] = (counterTypeSales[key] || 0) + getBillableOrderTotalPaise(order)
     })
 
     // Tax Summary
@@ -117,7 +119,9 @@ export default function BusinessSummaryReport({ fromDate, toDate }: Props) {
       !['account', 'due'].includes(p.method)
     )
     const totalReceipts = collectedPayments.reduce((sum, p) => sum + p.amountPaise, 0)
-    const totalExpenses = 0
+    const expenseTotal = expenses.filter(expense => expense.expenseDate >= fromDate && expense.expenseDate <= toDate).reduce((sum, expense) => sum + expense.amountPaise, 0)
+    const purchaseTotal = purchaseEntries.filter(entry => entry.createdAt.slice(0, 10) >= fromDate && entry.createdAt.slice(0, 10) <= toDate).reduce((sum, entry) => sum + entry.totalPaise, 0)
+    const totalExpenses = expenseTotal + purchaseTotal
     const paymentModeTotals = collectedPayments.reduce<Record<string, { amountPaise: number; count: number }>>((acc, payment) => {
       acc[payment.method] ??= { amountPaise: 0, count: 0 }
       acc[payment.method].amountPaise += payment.amountPaise
@@ -155,8 +159,8 @@ export default function BusinessSummaryReport({ fromDate, toDate }: Props) {
     const itemsReturned = 0
     const amtReturned = 0
     const duplicatePrints = 0
-    const allOrdersInRange = orders.filter(o => o.businessDate >= fromDate && o.businessDate <= toDate && !['cancelled', 'void'].includes(o.status) && o.totalPaise > 0)
-    const duePayments = allOrdersInRange.filter(o => o.paymentStatus !== 'paid').reduce((sum, o) => sum + o.totalPaise, 0)
+    const allOrdersInRange = orders.filter(o => o.businessDate >= fromDate && o.businessDate <= toDate && !['cancelled', 'void'].includes(o.status) && getBillableOrderTotalPaise(o) > 0)
+    const duePayments = allOrdersInRange.filter(o => o.paymentStatus !== 'paid').reduce((sum, o) => sum + getBillableOrderTotalPaise(o), 0)
 
     // Customer summary
     const uniqueCustomers = new Set(filteredOrders.filter(o => o.customerPhone).map(o => o.customerPhone))
@@ -171,12 +175,12 @@ export default function BusinessSummaryReport({ fromDate, toDate }: Props) {
       sectionSales,
       counterTypeSales,
       taxes: { totalCGST, totalSGST, totalVAT, totalTax },
-      payments: { totalReceipts, totalExpenses, paymentModeTotals },
+      payments: { totalReceipts, totalExpenses, expenseTotal, purchaseTotal, paymentModeTotals },
       cash: { inwardCash, outwardCash, netCash },
       alerts: { itemsCancelled, amtCancelled, itemsReturned, amtReturned, duplicatePrints, duePayments },
       customer: { customerCount, walletBalance: 0 },
     }
-  }, [orders, orderItems, kots, menuItems, menuCategories, tables, floors, payments, fromDate, toDate])
+  }, [orders, orderItems, kots, menuItems, menuCategories, tables, floors, payments, expenses, purchaseEntries, fromDate, toDate])
 
   const handlePrint = async () => {
     if (printBusy) return
@@ -276,6 +280,16 @@ export default function BusinessSummaryReport({ fromDate, toDate }: Props) {
       </div>
 
       <div className="flex-1 overflow-auto p-4">
+        <div className="mb-4 grid grid-cols-1 gap-4 xl:grid-cols-2">
+          <div className="h-64 rounded-2xl border-2 border-slate-100 bg-gradient-to-br from-white to-blue-50/50 p-4 shadow-sm transition-all duration-500 hover:-translate-y-1 hover:shadow-lg">
+            <h3 className="mb-2 text-sm font-black text-slate-800">Category sales graph</h3>
+            <ResponsiveContainer width="100%" height="90%"><BarChart data={Object.entries(reportData.categorySales).sort(([, a], [, b]) => b - a).slice(0, 8).map(([name, amountPaise]) => ({ name, amountPaise }))}><CartesianGrid strokeDasharray="3 3" vertical={false} /><XAxis dataKey="name" tick={{ fontSize: 9 }} /><YAxis tick={{ fontSize: 10 }} tickFormatter={value => `₹${value / 100}`} /><Tooltip formatter={(value: number) => [(value / 100).toFixed(2), 'Sales']} /><Bar dataKey="amountPaise" fill="#2563EB" radius={[5, 5, 0, 0]} isAnimationActive animationDuration={900} /></BarChart></ResponsiveContainer>
+          </div>
+          <div className="h-64 rounded-2xl border-2 border-slate-100 bg-gradient-to-br from-white to-rose-50/50 p-4 shadow-sm transition-all duration-500 hover:-translate-y-1 hover:shadow-lg">
+            <h3 className="mb-2 text-sm font-black text-slate-800">Receipts vs expenses</h3>
+            <ResponsiveContainer width="100%" height="90%"><BarChart data={[{ name: 'Selected range', receipts: reportData.payments.totalReceipts, expenses: reportData.payments.totalExpenses }]}><CartesianGrid strokeDasharray="3 3" vertical={false} /><XAxis dataKey="name" tick={{ fontSize: 10 }} /><YAxis tick={{ fontSize: 10 }} tickFormatter={value => `₹${value / 100}`} /><Tooltip formatter={(value: number) => [(value / 100).toFixed(2), 'Amount']} /><Bar dataKey="receipts" name="Receipts" fill="#10B981" radius={[5, 5, 0, 0]} isAnimationActive animationDuration={900} /><Bar dataKey="expenses" name="Expenses" fill="#EF4444" radius={[5, 5, 0, 0]} isAnimationActive animationDuration={900} /></BarChart></ResponsiveContainer>
+          </div>
+        </div>
         <table className="w-full text-left border-collapse">
           <thead>
             <tr className="bg-[#B4C6E7] text-[#2F5496] text-sm uppercase tracking-wider">
@@ -324,6 +338,8 @@ export default function BusinessSummaryReport({ fromDate, toDate }: Props) {
               'Paytm amount': reportData.payments.paymentModeTotals.paytm?.amountPaise ?? 0,
               'Cheque amount': reportData.payments.paymentModeTotals.cheque?.amountPaise ?? 0,
               'Aggregator amount': reportData.payments.paymentModeTotals.aggregator?.amountPaise ?? 0,
+              'Direct expenses': reportData.payments.expenseTotal,
+              'Purchase expenses': reportData.payments.purchaseTotal,
               'Total expenses': reportData.payments.totalExpenses,
             })}
 

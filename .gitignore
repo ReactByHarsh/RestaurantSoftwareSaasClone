@@ -31,6 +31,7 @@ apps/worker/out_*.json
 
 # Sensitive / debug files
 CREDENTIALS_AND_BUILD_CONFIG_INVENTORY.md
+apps/web/BhojPatra-Credentials-Handoff-*/
 backups/
 cookiejar.txt
 headers.txt

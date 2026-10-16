@@ -1,5 +1,5 @@
 param(
-  [string]$Version = "0.1.21",
+  [string]$Version = "0.1.26",
   [string]$Bucket = "bhojpatra",
   [string]$PublicBaseUrl = "https://pub-99fc5ebb1fb24ce9a69d861fc420f8b2.r2.dev",
   [string]$SigningKeyPath = "$env:USERPROFILE\.tauri\bhojpatra-updater.key",
@@ -14,7 +14,6 @@ $ErrorActionPreference = "Stop"
 $repoRoot = Resolve-Path (Join-Path $PSScriptRoot "..")
 $webDir = Join-Path $repoRoot "apps\web"
 $tauriConfigPath = Join-Path $webDir "src-tauri\tauri.conf.json"
-$tauriWindows7ConfigPath = Join-Path $webDir "src-tauri\tauri.windows7.conf.json"
 $x64BundleDir = Join-Path $webDir "src-tauri\target\release\bundle\nsis"
 $x86BundleDir = Join-Path $webDir "src-tauri\target\i686-pc-windows-msvc\release\bundle\nsis"
 $x64App = Join-Path $webDir "src-tauri\target\release\app.exe"
@@ -36,9 +35,6 @@ $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
 if (!(Test-Path $tauriConfigPath)) {
   throw "Tauri config not found: $tauriConfigPath"
 }
-if (!(Test-Path $tauriWindows7ConfigPath)) {
-  throw "Windows 7 compatible Tauri config not found: $tauriWindows7ConfigPath"
-}
 $tauriConfig = Get-Content -Raw $tauriConfigPath | ConvertFrom-Json
 if ($tauriConfig.version -ne $Version) {
   Write-Host "Updating tauri.conf.json version from $($tauriConfig.version) to $Version"
@@ -53,9 +49,9 @@ if ($SigningKeyPassword -ne $null) {
 if (!$SkipBuild) {
   Push-Location $webDir
   try {
-    cargo tauri build --ci --bundles nsis -c src-tauri/tauri.windows7.conf.json
+    cargo tauri build --ci --bundles nsis
     if ($LASTEXITCODE -ne 0) { throw "x64 Tauri build failed with exit code $LASTEXITCODE." }
-    cargo tauri build --ci --target i686-pc-windows-msvc --bundles nsis -c src-tauri/tauri.windows7.conf.json
+    cargo tauri build --ci --target i686-pc-windows-msvc --bundles nsis
     if ($LASTEXITCODE -ne 0) { throw "x86 Tauri build failed with exit code $LASTEXITCODE." }
   } finally {
     Pop-Location
@@ -65,11 +61,15 @@ if (!$SkipBuild) {
 if (!(Test-Path $x64App) -or !(Test-Path $x64SourceInstaller) -or !(Test-Path $x64SourceSignature)) {
   throw "Signed x64 NSIS installer or updater signature was not produced."
 }
-if (!(Test-Path $x86App) -or !(Test-Path $x86SourceInstaller) -or !(Test-Path $x86SourceSignature)) {
+if (!$SkipX86Upload -and ((!(Test-Path $x86App)) -or (!(Test-Path $x86SourceInstaller)) -or (!(Test-Path $x86SourceSignature)))) {
   throw "Signed x86 NSIS installer or updater signature was not produced."
 }
 
-& $authenticodeScript -Path $x64App, $x86App, $x64SourceInstaller, $x86SourceInstaller -RequireAuthenticodeSigning:(!$AllowUnsignedAuthenticode)
+$authenticodePaths = @($x64App, $x64SourceInstaller)
+if (!$SkipX86Upload) {
+  $authenticodePaths += @($x86App, $x86SourceInstaller)
+}
+& $authenticodeScript -Path $authenticodePaths -RequireAuthenticodeSigning:(!$AllowUnsignedAuthenticode)
 
 # Authenticode changes installer bytes. Generate updater signatures only after
 # that step so Tauri verifies the exact files customers download from R2.
@@ -86,7 +86,7 @@ if (!$AllowUnsignedAuthenticode) {
     Pop-Location
   }
 }
-if (!(Test-Path $x64SourceSignature) -or !(Test-Path $x86SourceSignature)) {
+if (!(Test-Path $x64SourceSignature) -or (!$SkipX86Upload -and !(Test-Path $x86SourceSignature))) {
   throw "Final updater signatures were not produced."
 }
 

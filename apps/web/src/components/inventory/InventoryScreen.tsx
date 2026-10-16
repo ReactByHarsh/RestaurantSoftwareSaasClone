@@ -6,6 +6,7 @@ import { useBillingStore } from '../../store/billingStore'
 import { useUIStore } from '../../store/uiStore'
 import type { PurchaseEntry, StockUnit } from '../../lib/types'
 import { isInventoryMenuItem, normalizeProductType } from '../../lib/productTypes'
+import { useI18n } from '../../lib/i18n'
 
 type InventoryTab = 'stock' | 'purchase' | 'purchaseReport' | 'stockReport' | 'profitReport'
 type PurchasePaymentMode = 'cash' | 'card' | 'upi'
@@ -87,6 +88,7 @@ function inventoryProductTypeLabel(value?: string) {
 
 export default function InventoryScreen() {
   const { addToast } = useUIStore()
+  const { t } = useI18n()
   const {
     inventoryItems: items,
     purchaseEntries,
@@ -349,14 +351,14 @@ export default function InventoryScreen() {
       {activeTab !== 'purchase' && (
         <div className="mx-4 mt-3 p-2 bg-white border border-slate-200 rounded-xl shadow-sm flex flex-wrap items-center gap-2 flex-shrink-0">
           {activeTab === 'stock' && <div className="w-full sm:w-52 shrink-0"><SearchBox value={searchQuery} onChange={setSearchQuery} className="w-full" /></div>}
-          <StripStat label="Total Items" value={String(items.length)} />
-          <StripStat label="Stock Value" value={formatPaise(summary.total)} tone="primary" />
-          <StripStat label="Out Of Stock" value={String(summary.out)} tone="red" />
-          <StripStat label="Low Stock" value={String(summary.low)} tone="amber" />
+          <StripStat label={t('totalItems')} value={String(items.length)} />
+          <StripStat label={t('stockValue')} value={formatPaise(summary.total)} tone="primary" />
+          <StripStat label={t('outOfStock')} value={String(summary.out)} tone="red" />
+          <StripStat label={t('lowStock')} value={String(summary.low)} tone="amber" />
           <div className={clsx('flex min-h-12 flex-1 min-w-[220px] items-center gap-2 rounded-lg border px-3 py-1.5', summary.low > 0 || summary.out > 0 ? 'border-red-200 bg-red-50' : 'border-emerald-200 bg-emerald-50')}>
             <AlertTriangle size={16} className={summary.low > 0 || summary.out > 0 ? 'text-red-500' : 'text-emerald-600'} strokeWidth={2.5} />
             <p className={clsx('text-xs font-bold', summary.low > 0 || summary.out > 0 ? 'text-red-700' : 'text-emerald-700')}>
-              {summary.low > 0 || summary.out > 0 ? `${summary.out} out of stock. ${summary.low} running low.` : 'Stock levels are healthy.'}
+                {summary.low > 0 || summary.out > 0 ? summary.out + ' ' + t('outOfStockWords') + ' ' + summary.low + ' ' + t('runningLowWords') : t('stockLevelsHealthy')}
             </p>
           </div>
           {activeTab === 'stock' && <button onClick={handleSaveStockUpdate} className="flex shrink-0 items-center gap-1.5 px-4 py-2 bg-primary text-white text-xs font-black rounded-lg shadow-md shadow-primary/20 hover:bg-primary-dark"><Save size={14} /> SAVE STOCK</button>}

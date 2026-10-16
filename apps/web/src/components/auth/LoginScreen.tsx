@@ -4,12 +4,17 @@ import { Loader2, ChefHat, Eye, EyeOff, BarChart3, CreditCard, LayoutGrid, Recei
 import { useAuthStore } from '../../store/authStore'
 import { useBillingStore } from '../../store/billingStore'
 import { getDefaultRoute } from '../../lib/permissions'
+import { isTauriDesktop } from '../../lib/localDb'
+import { readSavedLicenseKey } from '../../lib/license'
 
 export default function LoginScreen() {
   const navigate = useNavigate()
   const { isAuthenticated, user, login } = useAuthStore()
   const [email, setEmail] = useState(() => useBillingStore.getState().cloudSync.accountLogin || '')
   const [password, setPassword] = useState('')
+  const [licenseKey, setLicenseKey] = useState(readSavedLicenseKey)
+  const [moveLicense, setMoveLicense] = useState(false)
+  const [showMoveLicense, setShowMoveLicense] = useState(false)
   const [showPass, setShowPass] = useState(false)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
@@ -22,12 +27,13 @@ export default function LoginScreen() {
     e.preventDefault()
     setLoading(true)
     setError('')
-    const result = await login(email, password)
+    const result = await login(email, password, licenseKey, moveLicense)
     setLoading(false)
     if (result.success) {
       const { user } = useAuthStore.getState()
       navigate(user ? getDefaultRoute(user.role) : '/app/billing')
     } else {
+      if (result.code === 'LICENSE_IN_USE') setShowMoveLicense(true)
       setError(result.error || 'Login failed')
     }
   }
@@ -111,6 +117,29 @@ export default function LoginScreen() {
                   </div>
                 </div>
 
+                {isTauriDesktop() && (
+                  <>
+                    <div>
+                      <label className="mb-1.5 block text-sm font-medium text-slate-700">BhojPatra desktop license key</label>
+                      <input
+                        type="text"
+                        value={licenseKey}
+                        onChange={e => setLicenseKey(e.target.value)}
+                        placeholder="Enter the key issued by License Desk"
+                        autoComplete="off"
+                        spellCheck={false}
+                        className="w-full rounded-lg border border-slate-200 px-3.5 py-2.5 text-sm uppercase transition-all focus:border-primary focus:outline-none focus:ring-2 focus:ring-primary/30"
+                      />
+                    </div>
+                    {showMoveLicense && (
+                      <label className="flex cursor-pointer items-start gap-2 rounded-lg border border-amber-300 bg-amber-50 p-3 text-xs leading-5 text-amber-950">
+                        <input type="checkbox" checked={moveLicense} onChange={e => setMoveLicense(e.target.checked)} className="mt-1 accent-amber-600" />
+                        <span><strong className="block">Move the single-computer license here</strong>Only select this if this is a replacement/reninstalled computer; it will stop the previous install at its next online check.</span>
+                      </label>
+                    )}
+                  </>
+                )}
+
                 {error && (
                   <div className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
                     {error}
@@ -119,7 +148,7 @@ export default function LoginScreen() {
 
                 <button
                   type="submit"
-                  disabled={loading || !email}
+                  disabled={loading || !email || (isTauriDesktop() && !licenseKey.trim())}
                   className="flex w-full items-center justify-center gap-2 rounded-lg bg-primary py-2.5 font-semibold text-white shadow-sm transition-all hover:bg-primary-dark disabled:opacity-50"
                 >
                   {loading ? <Loader2 size={16} className="animate-spin" /> : <ChefHat size={16} />}
@@ -128,8 +157,8 @@ export default function LoginScreen() {
               </form>
 
               <div className="mt-6 rounded-xl border border-slate-100 bg-slate-50 p-4">
-                <p className="mb-1 text-xs font-medium text-slate-500">Staff access</p>
-                <p className="text-xs text-slate-600">Use a staff login created from Admin Panel. This desktop login screen can be turned off again from Settings.</p>
+                <p className="mb-1 text-xs font-medium text-slate-500">Cloud Admin access</p>
+                <p className="text-xs text-slate-600">Use the restaurant account created in Cloud Admin. Your signed-in session stays on this computer until you log out; the desktop license is checked online whenever the app opens.</p>
               </div>
             </div>
 

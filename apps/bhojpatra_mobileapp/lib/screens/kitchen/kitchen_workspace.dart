@@ -74,10 +74,15 @@ class _KitchenWorkspaceState extends State<KitchenWorkspace> {
 
   @override
   Widget build(BuildContext context) {
-    final activeKots = listOf(widget.snapshot['kots'])
-        .where((kot) => !{'served', 'cancelled'}.contains(text(kot['status'])))
-        .toList()
-      ..sort((a, b) => text(a['createdAt']).compareTo(text(b['createdAt'])));
+    final activeKots =
+        listOf(widget.snapshot['kots'])
+            .where(
+              (kot) => !{'served', 'cancelled'}.contains(text(kot['status'])),
+            )
+            .toList()
+          ..sort(
+            (a, b) => text(a['createdAt']).compareTo(text(b['createdAt'])),
+          );
 
     if (activeKots.isEmpty) {
       return const Center(
@@ -86,11 +91,21 @@ class _KitchenWorkspaceState extends State<KitchenWorkspace> {
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-              Icon(Icons.soup_kitchen_outlined, size: 64, color: Colors.black26),
+              Icon(
+                Icons.soup_kitchen_outlined,
+                size: 64,
+                color: Colors.black26,
+              ),
               SizedBox(height: 14),
-              Text('Kitchen queue is clear', style: TextStyle(fontSize: 20, fontWeight: FontWeight.w900)),
+              Text(
+                'Kitchen queue is clear',
+                style: TextStyle(fontSize: 20, fontWeight: FontWeight.w900),
+              ),
               SizedBox(height: 6),
-              Text('New captain KOTs appear here in realtime.', textAlign: TextAlign.center),
+              Text(
+                'New captain KOTs appear here in realtime.',
+                textAlign: TextAlign.center,
+              ),
             ],
           ),
         ),
@@ -120,8 +135,16 @@ class _KitchenWorkspaceState extends State<KitchenWorkspace> {
                         child: Column(
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
-                            Text(text(kot['kotNo'], fallback: 'KOT'), style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w900)),
-                            Text('${text(kot['tableName'], fallback: 'Takeaway')} • ${text(kot['captainName'], fallback: 'Captain')}'),
+                            Text(
+                              text(kot['kotNo'], fallback: 'KOT'),
+                              style: const TextStyle(
+                                fontSize: 18,
+                                fontWeight: FontWeight.w900,
+                              ),
+                            ),
+                            Text(
+                              '${text(kot['tableName'], fallback: 'Takeaway')} • ${text(kot['captainName'], fallback: 'Captain')}',
+                            ),
                           ],
                         ),
                       ),
@@ -129,21 +152,38 @@ class _KitchenWorkspaceState extends State<KitchenWorkspace> {
                     ],
                   ),
                   const Divider(height: 24),
-                  ...items.map((item) => Padding(
-                    padding: const EdgeInsets.only(bottom: 8),
-                    child: Row(
-                      children: [
-                        CircleAvatar(radius: 15, child: Text('${intValue(item['quantity']) == 0 ? 1 : intValue(item['quantity'])}')),
-                        const SizedBox(width: 10),
-                        Expanded(child: Text(text(item['name'], fallback: 'Item'), style: const TextStyle(fontWeight: FontWeight.w800))),
-                        if (text(item['note']).isNotEmpty) const Icon(Icons.sticky_note_2_outlined, size: 18),
-                      ],
+                  ...items.map(
+                    (item) => Padding(
+                      padding: const EdgeInsets.only(bottom: 8),
+                      child: Row(
+                        children: [
+                          CircleAvatar(
+                            radius: 15,
+                            child: Text(
+                              '${intValue(item['quantity']) == 0 ? 1 : intValue(item['quantity'])}',
+                            ),
+                          ),
+                          const SizedBox(width: 10),
+                          Expanded(
+                            child: Text(
+                              text(item['name'], fallback: 'Item'),
+                              style: const TextStyle(
+                                fontWeight: FontWeight.w800,
+                              ),
+                            ),
+                          ),
+                          if (text(item['note']).isNotEmpty)
+                            const Icon(Icons.sticky_note_2_outlined, size: 18),
+                        ],
+                      ),
                     ),
-                  )),
+                  ),
                   const SizedBox(height: 8),
                   if (status == 'new')
                     FilledButton.icon(
-                      onPressed: busy ? null : () => _setStatus(kot, 'preparing'),
+                      onPressed: busy
+                          ? null
+                          : () => _setStatus(kot, 'preparing'),
                       icon: const Icon(Icons.local_fire_department),
                       label: const Text('START PREPARING'),
                     )

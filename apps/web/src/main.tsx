@@ -5,6 +5,7 @@ import App from './App'
 import './styles/globals.css'
 import { isTauriDesktop } from './lib/localDb'
 import DesktopBootstrap from './components/sync/DesktopBootstrap'
+import { I18nRuntime } from './lib/i18n'
 
 if (isTauriDesktop()) {
   void (async () => {
@@ -41,6 +42,7 @@ if (!isTauriDesktop() && 'serviceWorker' in navigator) {
 
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>
+    <I18nRuntime />
     <BrowserRouter>
       <DesktopBootstrap>
         <App />

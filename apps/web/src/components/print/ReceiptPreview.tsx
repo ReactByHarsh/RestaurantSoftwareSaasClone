@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import QRCode from 'qrcode'
-import { formatPaise } from '../../lib/money'
+import { formatPaise, getBillableOrderTotalPaise } from '../../lib/money'
 import type { Order, Outlet, Payment } from '../../lib/types'
 import type { ReceiptPrintPart } from '../../lib/printTemplates'
 import type { PrintSettings } from '../../store/billingStore'
@@ -29,6 +29,9 @@ export default function ReceiptPreview({
   className = '',
 }: Props) {
   const [upiQrByPart, setUpiQrByPart] = useState<Record<string, string>>({})
+  const totalBaseByWidth = printSettings.receiptWidth === '58mm' ? 10.75 : printSettings.receiptWidth === '72mm' ? 11.5 : 12
+  const totalFontAdjust = printSettings.fontSize === 'compact' ? -0.5 : printSettings.fontSize === 'large' ? 0.75 : 0
+  const finalAmountFontSize = `${(totalBaseByWidth + totalFontAdjust) * (Math.max(80, Math.min(180, printSettings.finalAmountScale ?? 100)) / 100)}px`
 
   useEffect(() => {
     let cancelled = false
@@ -138,12 +141,12 @@ export default function ReceiptPreview({
           {part.previousPartsNetPaise !== undefined && (
             <div className="thermal-row"><span>Previous Bills Total</span><strong>{formatPaise(part.previousPartsNetPaise)}</strong></div>
           )}
-          <div className="thermal-row thermal-total">
+          <div className="thermal-row thermal-total" style={{ fontSize: finalAmountFontSize }}>
             <span>{part.partCount > 1 ? `Net ${part.title.replace(/\s*BILL$/i, '')} Amount` : 'Net Payable'}</span>
-            <strong>{formatPaise(part.netPaise)}</strong>
+            <strong>{formatPaise(part.partCount === 1 ? getBillableOrderTotalPaise(order) : part.netPaise)}</strong>
           </div>
           {part.combinedNetPaise !== undefined && (
-            <div className="thermal-row thermal-total"><span>Grand Total</span><strong>{formatPaise(part.combinedNetPaise)}</strong></div>
+            <div className="thermal-row thermal-total" style={{ fontSize: finalAmountFontSize }}><span>Grand Total</span><strong>{formatPaise(part.combinedNetPaise)}</strong></div>
           )}
 
           {printSettings.showUpiQrOnBill && printSettings.upiId.trim() && upiQrByPart[part.section] && (
@@ -162,7 +165,7 @@ export default function ReceiptPreview({
             <>
               <div className="thermal-rule" />
               <div className="thermal-center"><p className="thermal-section-title">Payment Details</p></div>
-              <div className="thermal-row"><span>Paid Amount</span><strong>{formatPaise(Math.min(order.totalPaise, orderPayments.filter(payment => payment.status === 'success').reduce((sum, payment) => sum + payment.amountPaise, 0)))}</strong></div>
+              <div className="thermal-row"><span>Paid Amount</span><strong>{formatPaise(Math.min(getBillableOrderTotalPaise(order), orderPayments.filter(payment => payment.status === 'success').reduce((sum, payment) => sum + payment.amountPaise, 0)))}</strong></div>
               <div className="thermal-row"><span>Cash</span><strong>{formatPaise(orderPayments.filter(payment => payment.status === 'success' && payment.method === 'cash').reduce((sum, payment) => sum + payment.amountPaise, 0))}</strong></div>
               {orderPayments.filter(payment => payment.status === 'success' && payment.method !== 'cash').map((payment) => (
                 <div className="thermal-row" key={payment.id}>
@@ -170,7 +173,7 @@ export default function ReceiptPreview({
                   <strong>{formatPaise(payment.amountPaise)}</strong>
                 </div>
               ))}
-              <div className="thermal-row"><span>Pending</span><strong>{formatPaise(Math.max(0, order.totalPaise - Math.min(order.totalPaise, orderPayments.filter(payment => payment.status === 'success').reduce((sum, payment) => sum + payment.amountPaise, 0))))}</strong></div>
+              <div className="thermal-row"><span>Pending</span><strong>{formatPaise(Math.max(0, getBillableOrderTotalPaise(order) - Math.min(getBillableOrderTotalPaise(order), orderPayments.filter(payment => payment.status === 'success').reduce((sum, payment) => sum + payment.amountPaise, 0))))}</strong></div>
             </>
           )}
 

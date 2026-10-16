@@ -15,6 +15,8 @@ export interface PrinterTransportSettings {
   bridgeUrl?: string
   autoCut?: boolean
   openCashDrawer?: boolean
+  /** Kitchen tickets must never be guessed onto another installed printer. */
+  strictTarget?: boolean
 }
 
 export interface PrinterIdentity {
@@ -445,7 +447,7 @@ async function printBridge(settings: PrinterTransportSettings, job: PrintJob) {
     // A stale hostname can fail even while the bridge and the Windows queue are
     // healthy. Enumerate queues once and retry through the installed queue so the
     // cashier does not need to know the printer's IP address.
-    if (!networkTarget || !isHostResolutionError(error)) throw error
+    if (settings.strictTarget || !networkTarget || !isHostResolutionError(error)) throw error
     let fallback: string | undefined
     try {
       fallback = await findInstalledQueueFallback(settings.bridgeUrl, networkTarget)
@@ -518,7 +520,20 @@ function printTextWithDialog(job: PrintJob) {
   frame.srcdoc = `<!doctype html><html><head><title>${job.jobName}</title><style>@page{size:80mm auto;margin:6mm 4mm}body{margin:0;font:13px/1.5 'Courier New',Courier,monospace;white-space:pre-wrap;word-break:break-word}pre{margin:0;padding:0}</style></head><body><pre>${escaped}</pre><script>setTimeout(()=>window.print(),300)<\/script></body></html>`
 }
 
-export async function sendPrintJob(settings: PrinterTransportSettings, job: PrintJob): Promise<'direct' | 'dialog'> {
+const printerTails = new Map<string, Promise<'direct' | 'dialog'>>()
+
+export function sendPrintJob(settings: PrinterTransportSettings, job: PrintJob): Promise<'direct' | 'dialog'> {
+  if (!['native', 'bridge', 'webusb'].includes(settings.connectionMode)) return performPrintJob(settings, job)
+  const key = `${settings.connectionMode}:${normalizeNetworkPrinterAddress(settings.printerName) || settings.printerName}:${settings.usbVendorId ?? ''}:${settings.usbProductId ?? ''}`
+  const previous = printerTails.get(key)
+  const next = (previous ? previous.catch(() => undefined) : Promise.resolve()).then(() => performPrintJob(settings, job))
+  printerTails.set(key, next)
+  const clear = () => { if (printerTails.get(key) === next) printerTails.delete(key) }
+  void next.then(clear, clear)
+  return next
+}
+
+async function performPrintJob(settings: PrinterTransportSettings, job: PrintJob): Promise<'direct' | 'dialog'> {
   if (settings.connectionMode === 'native') {
     await printNative(settings, job)
     return 'direct'

@@ -6,7 +6,7 @@ import {
   PlayCircle, HandPlatter, Printer, CheckCircle, ArrowRightLeft,
   GitMerge, Users, PanelRightClose, PanelRightOpen, Table2,
 } from 'lucide-react'
-import { getSectionAdjustedPrice, useBillingStore } from '../../store/billingStore'
+import { getMenuItemPriceForSection, getSectionAdjustedPrice, useBillingStore } from '../../store/billingStore'
 import { useAuthStore } from '../../store/authStore'
 import { useUIStore } from '../../store/uiStore'
 import { hasPermission } from '../../lib/permissions'
@@ -230,11 +230,12 @@ function RadialMenu({
 interface Props {
   isModal?: boolean
   modalTableId?: string
+  autoOpenPayment?: boolean
   onCloseModal?: () => void
 }
 
 // ─────────────────────────────────────────────────────────────────────────
-export default function BillingScreen({ isModal = false, modalTableId, onCloseModal }: Props = {}) {
+export default function BillingScreen({ isModal = false, modalTableId, autoOpenPayment = false, onCloseModal }: Props = {}) {
   const navigate = useNavigate()
   const { user } = useAuthStore()
   const { addToast } = useUIStore()
@@ -246,7 +247,7 @@ export default function BillingScreen({ isModal = false, modalTableId, onCloseMo
     tables, floors, menuCategories, menuItems, outlet,
     addToCart, orders,
     transferTable, mergeTable,
-    updateTableStatus, printReceipt, getCustomerAccountDetails, setOrderCustomer
+    updateTableStatus, printReceipt, printCartProforma, getCustomerAccountDetails, setOrderCustomer
   } = useBillingStore()
 
   const canTransfer = user ? hasPermission(user.role, 'tables:transfer') : false
@@ -313,23 +314,32 @@ export default function BillingScreen({ isModal = false, modalTableId, onCloseMo
         } else if (isModal && onCloseModal) {
           onCloseModal()
         } else if (view === 'menu' && activeOrderType === 'dine_in' && !isModal) {
+          useBillingStore.getState().closeTableView()
           navigate('/app/tables')
         }
       }
       if (e.key === '/' && document.activeElement !== searchRef.current && view === 'menu') {
         e.preventDefault(); searchRef.current?.focus()
       }
+      const target = e.target as HTMLElement
+      const typing = target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable
+      if (!typing && !e.ctrlKey && !e.altKey && !e.metaKey) {
+        if (e.key === 'F2') { e.preventDefault(); handleSettleBill() }
+        if (e.key === 'F3') { e.preventDefault(); handleSendKOT() }
+        if (e.key === 'F4') { e.preventDefault(); if (hasBillableItems) printCartProforma() }
+      }
     }
     window.addEventListener('keydown', fn)
     return () => window.removeEventListener('keydown', fn)
-  }, [view, activeOrderType, isModal, radialTableState, tableOp])
+  }, [view, activeOrderType, isModal, radialTableState, tableOp, cart.length, user, currentOrder, printCartProforma])
 
   useEffect(() => {
     if (searchParams.get('settle') === '1' && currentOrder) {
       setShowPayment(true)
       setSearchParams({}, { replace: true })
     }
-  }, [currentOrder, searchParams, setSearchParams])
+    if (autoOpenPayment && currentOrder) setShowPayment(true)
+  }, [autoOpenPayment, currentOrder, searchParams, setSearchParams])
 
   // ── menu data ────────────────────────────────────────────────────────────
   const topSellingItemRank = useMemo(() => {
@@ -595,7 +605,7 @@ export default function BillingScreen({ isModal = false, modalTableId, onCloseMo
             <X size={16} strokeWidth={2.5} />
           </button>
         ) : activeOrderType === 'dine_in' && (
-          <button onClick={() => navigate('/app/tables')}
+          <button onClick={() => { useBillingStore.getState().closeTableView(); navigate('/app/tables') }}
             className="flex items-center gap-1.5 px-2 py-1.5 rounded-lg border border-slate-200 text-xs font-bold text-slate-600 hover:bg-slate-50 transition-all active:scale-95 flex-shrink-0">
             <ArrowLeft size={14} strokeWidth={2.5} />
             <span className="hidden sm:inline">Tables</span>
@@ -769,7 +779,7 @@ export default function BillingScreen({ isModal = false, modalTableId, onCloseMo
               <>
                 <div className="grid grid-cols-2 sm:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-5 gap-2 p-0.5">
                   {paginatedItems.map(item => (
-                    <MenuItemCard key={item.id} item={item} displayPricePaise={getSectionAdjustedPrice(item.pricePaise, selectedFloor)} cartQty={cartQtyById.get(item.id) ?? 0} isKotItem={kotMenuItemIds.has(item.id)} onAdd={() => handleAddItem(item)} />
+                    <MenuItemCard key={item.id} item={item} displayPricePaise={getSectionAdjustedPrice(getMenuItemPriceForSection(item, selectedFloor), selectedFloor)} cartQty={cartQtyById.get(item.id) ?? 0} isKotItem={kotMenuItemIds.has(item.id)} onAdd={() => handleAddItem(item)} />
                   ))}
                 </div>
                 {filteredItems.length > MENU_PAGE_SIZE && (
@@ -882,7 +892,8 @@ export default function BillingScreen({ isModal = false, modalTableId, onCloseMo
       {customizingItem && (() => {
         const modifiers = customizingItem.modifierGroups?.flatMap(g => g.modifiers) ?? []
         const selected  = modifiers.filter(m => selectedModifierIds.includes(m.id))
-        const total     = customizingItem.pricePaise + selected.reduce((s, m) => s + m.pricePaise, 0)
+        const sectionPrice = getSectionAdjustedPrice(getMenuItemPriceForSection(customizingItem, selectedFloor), selectedFloor)
+        const total     = sectionPrice + selected.reduce((s, m) => s + m.pricePaise, 0)
         return (
           <div className="fixed inset-0 z-50 bg-slate-900/45 backdrop-blur-sm flex items-center justify-center p-4">
             <div className="w-full max-w-lg bg-white rounded-2xl shadow-2xl overflow-hidden border border-slate-100">

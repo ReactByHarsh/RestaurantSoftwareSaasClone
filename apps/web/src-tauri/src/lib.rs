@@ -1,6 +1,6 @@
 use std::fs;
 use std::io::Write;
-use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpStream};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpStream, ToSocketAddrs};
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::{Arc, Mutex};
@@ -41,7 +41,7 @@ use windows_sys::Win32::{
     System::WindowsProgramming::DRIVE_FIXED,
 };
 
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -51,6 +51,11 @@ use tokio::{
     sync::broadcast,
 };
 use tower_http::cors::CorsLayer;
+
+#[cfg(windows)]
+use winreg::{enums::HKEY_LOCAL_MACHINE, RegKey};
+
+mod captain_orders;
 
 #[derive(Debug, Serialize)]
 struct LocalStatePayload {
@@ -343,6 +348,45 @@ fn copy_backup_file(
     Ok(destination)
 }
 
+fn create_verified_database_backup(
+    connection: &Connection,
+    target: &std::path::Path,
+) -> Result<(), String> {
+    let result = (|| {
+        connection
+            .execute_batch("PRAGMA wal_checkpoint(FULL);")
+            .map_err(to_error)?;
+        connection
+            .execute("VACUUM INTO ?1", [target.to_string_lossy().as_ref()])
+            .map_err(to_error)?;
+
+        let verification = Connection::open(target).map_err(to_error)?;
+        let integrity: String = verification
+            .query_row("PRAGMA integrity_check", [], |row| row.get(0))
+            .map_err(to_error)?;
+        if integrity != "ok" {
+            return Err(format!("Backup integrity check failed: {integrity}"));
+        }
+        let snapshot = read_snapshot(&verification)?;
+        if !snapshot.as_ref().is_some_and(is_valid_backup_snapshot) {
+            return Err(
+                "Backup verification failed: the local restaurant snapshot is missing or incomplete."
+                    .to_string(),
+            );
+        }
+        let staff = read_json(&verification, "staff")?;
+        if staff.as_ref().is_some_and(|value| !value.is_array()) {
+            return Err("Backup verification failed: the local staff data is invalid.".to_string());
+        }
+        Ok(())
+    })();
+
+    if result.is_err() {
+        let _ = fs::remove_file(target);
+    }
+    result
+}
+
 fn create_local_backup(app: &AppHandle, force: bool) -> Result<LocalBackupResult, String> {
     let date = chrono::Local::now().format("%Y-%m-%d").to_string();
     let file_name = local_backup_file_name(&date);
@@ -357,23 +401,8 @@ fn create_local_backup(app: &AppHandle, force: bool) -> Result<LocalBackupResult
             let _ = fs::remove_file(&temporary);
         }
         let connection = open_database(app)?;
-        connection
-            .execute_batch("PRAGMA wal_checkpoint(FULL);")
-            .map_err(to_error)?;
-        connection
-            .execute("VACUUM INTO ?1", [temporary.to_string_lossy().as_ref()])
-            .map_err(to_error)?;
+        create_verified_database_backup(&connection, &temporary)?;
         drop(connection);
-
-        let verification = Connection::open(&temporary).map_err(to_error)?;
-        let integrity: String = verification
-            .query_row("PRAGMA integrity_check", [], |row| row.get(0))
-            .map_err(to_error)?;
-        drop(verification);
-        if integrity != "ok" {
-            let _ = fs::remove_file(&temporary);
-            return Err(format!("Backup integrity check failed: {integrity}"));
-        }
         if protected_file.exists() {
             fs::remove_file(&protected_file).map_err(to_error)?;
         }
@@ -536,6 +565,7 @@ fn read_json(connection: &Connection, key: &str) -> Result<Option<Value>, String
 
 fn write_json(connection: &Connection, key: &str, value: &Value) -> Result<(), String> {
     let payload = serde_json::to_string(value).map_err(to_error)?;
+    let revision = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Nanos, true);
     connection
         .execute(
             "INSERT INTO app_state_history (key, value)
@@ -547,12 +577,12 @@ fn write_json(connection: &Connection, key: &str, value: &Value) -> Result<(), S
         .execute(
             "
         INSERT INTO app_state (key, value, updated_at)
-        VALUES (?1, ?2, CURRENT_TIMESTAMP)
+        VALUES (?1, ?2, ?3)
         ON CONFLICT(key) DO UPDATE SET
           value = excluded.value,
-          updated_at = CURRENT_TIMESTAMP
+          updated_at = excluded.updated_at
       ",
-            params![key, payload],
+            params![key, payload, revision],
         )
         .map_err(to_error)?;
     connection
@@ -1332,12 +1362,22 @@ fn print_tcp(target: (String, u16), bytes: &[u8]) -> Result<(), String> {
     } else {
         format!("{}:{}", target.0, target.1)
     };
-    let socket_address = address
-        .parse()
-        .map_err(|_| format!("Invalid LAN printer address: {address}"))?;
-    let mut stream =
-        TcpStream::connect_timeout(&socket_address, Duration::from_secs(10)).map_err(to_error)?;
-    stream.write_all(bytes).map_err(to_error)
+    let addresses = address.to_socket_addrs().map_err(to_error)?;
+    let mut last_error = format!("No addresses found for LAN printer: {address}");
+    for socket_address in addresses.take(4) {
+        match TcpStream::connect_timeout(&socket_address, Duration::from_secs(5)) {
+            Ok(mut stream) => {
+                stream
+                    .set_write_timeout(Some(Duration::from_secs(10)))
+                    .map_err(to_error)?;
+                // Do not retry a partially written job; it may already have printed.
+                stream.write_all(bytes).map_err(to_error)?;
+                return stream.flush().map_err(to_error);
+            }
+            Err(error) => last_error = error.to_string(),
+        }
+    }
+    Err(last_error)
 }
 
 #[cfg(windows)]
@@ -1536,11 +1576,212 @@ fn query_windows_printers() -> Result<Vec<NativePrinter>, String> {
 }
 
 #[tauri::command]
+fn get_desktop_machine_id() -> Result<String, String> {
+    #[cfg(windows)]
+    {
+        let output = Command::new("powershell.exe")
+            .args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                "$ErrorActionPreference='Stop'; (Get-CimInstance Win32_ComputerSystemProduct).UUID",
+            ])
+            .output()
+            .map_err(to_error)?;
+        if output.status.success() {
+            let machine_uuid = String::from_utf8_lossy(&output.stdout)
+                .trim()
+                .trim_matches('{')
+                .trim_matches('}')
+                .to_ascii_lowercase();
+            let normalized = machine_uuid.replace('-', "");
+            if normalized.len() >= 16
+                && normalized.bytes().any(|byte| byte != b'0')
+                && !machine_uuid.to_ascii_lowercase().contains("to be filled")
+            {
+                return Ok(format!("windows-hardware:{machine_uuid}"));
+            }
+        }
+
+        let machine_guid = RegKey::predef(HKEY_LOCAL_MACHINE)
+            .open_subkey("SOFTWARE\\Microsoft\\Cryptography")
+            .and_then(|key| key.get_value::<String, _>("MachineGuid"))
+            .map_err(to_error)?;
+        return Ok(format!("windows-install:{machine_guid}"));
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        return fs::read_to_string("/etc/machine-id")
+            .map(|value| format!("linux-machine:{}", value.trim()))
+            .map_err(to_error);
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        return Err("Stable machine licensing is not configured for macOS.".to_string());
+    }
+
+    #[cfg(any(target_os = "android", target_os = "ios"))]
+    {
+        return Err("Desktop licensing is not available on this mobile target.".to_string());
+    }
+}
+
+#[tauri::command]
 fn load_local_state(app: AppHandle) -> Result<LocalStatePayload, String> {
     let connection = open_database(&app)?;
     Ok(LocalStatePayload {
         snapshot: read_json(&connection, "snapshot")?,
         staff: read_json(&connection, "staff")?,
+    })
+}
+
+fn is_valid_backup_snapshot(snapshot: &Value) -> bool {
+    let Some(object) = snapshot.as_object() else {
+        return false;
+    };
+    if !object.get("outlet").is_some_and(Value::is_object)
+        || !object.get("printSettings").is_some_and(Value::is_object)
+    {
+        return false;
+    }
+    [
+        "menuCategories",
+        "menuItems",
+        "floors",
+        "tables",
+        "stations",
+        "inventoryItems",
+        "orders",
+        "orderItems",
+        "kots",
+        "payments",
+        "auditLogs",
+    ]
+    .iter()
+    .all(|key| object.get(*key).is_some_and(Value::is_array))
+}
+
+fn sqlite_table_exists(connection: &Connection, table: &str) -> Result<bool, String> {
+    connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1)",
+            [table],
+            |row| row.get(0),
+        )
+        .map_err(to_error)
+}
+
+fn read_local_backup_payload(backup_path: &PathBuf) -> Result<LocalStatePayload, String> {
+    if !backup_path.is_file() {
+        return Err("The selected backup file could not be found.".to_string());
+    }
+    let extension = backup_path
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    if !["sqlite", "sqlite3", "db"].contains(&extension.as_str()) {
+        return Err("Choose a BhojPatra SQLite backup (.sqlite or .db).".to_string());
+    }
+
+    let backup = Connection::open_with_flags(
+        &backup_path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .map_err(|_| "This file is not a readable SQLite database.".to_string())?;
+    let integrity: String = backup
+        .query_row("PRAGMA integrity_check", [], |row| row.get(0))
+        .map_err(|_| "The SQLite backup is damaged or incomplete.".to_string())?;
+    if integrity != "ok" {
+        return Err(format!(
+            "The SQLite backup failed its integrity check: {integrity}"
+        ));
+    }
+    if !sqlite_table_exists(&backup, "app_state")?
+        || !sqlite_table_exists(&backup, "app_state_history")?
+    {
+        return Err("This SQLite file is not a BhojPatra local database backup.".to_string());
+    }
+
+    let snapshot = read_snapshot(&backup)?
+        .ok_or_else(|| "No restaurant snapshot was found in this backup.".to_string())?;
+    if !is_valid_backup_snapshot(&snapshot) {
+        return Err(
+            "The backup database is readable, but its restaurant data is incomplete or unsupported."
+                .to_string(),
+        );
+    }
+    let staff = read_json(&backup, "staff")?;
+    if staff.as_ref().is_some_and(|value| !value.is_array()) {
+        return Err("The staff data in this backup is invalid.".to_string());
+    }
+
+    Ok(LocalStatePayload {
+        snapshot: Some(snapshot),
+        staff,
+    })
+}
+
+#[tauri::command]
+fn read_local_database_backup(path: String) -> Result<LocalStatePayload, String> {
+    read_local_backup_payload(&PathBuf::from(path.trim()))
+}
+
+#[tauri::command]
+fn restore_local_database_backup(
+    app: AppHandle,
+    write_lock: State<'_, DesktopStateWriteLock>,
+    broadcaster: State<'_, broadcast::Sender<String>>,
+    path: String,
+) -> Result<LocalStatePayload, String> {
+    let _write_guard = write_lock
+        .0
+        .lock()
+        .map_err(|_| "Desktop state restore lock was poisoned".to_string())?;
+    let backup = read_local_backup_payload(&PathBuf::from(path.trim()))?;
+    let restored_snapshot = backup
+        .snapshot
+        .ok_or_else(|| "No restaurant snapshot was found in this backup.".to_string())?;
+
+    // Keep a verified copy of the current database before replacing business data.
+    create_local_backup(&app, true)?;
+
+    let mut connection = open_database(&app)?;
+    let transaction = connection.transaction().map_err(to_error)?;
+    let existing = read_snapshot(&transaction)?;
+    let pending: Vec<String> = read_json(&transaction, "captain_pending_desktop")?
+        .and_then(|value| serde_json::from_value(value).ok())
+        .unwrap_or_default();
+    let (restored_snapshot, remaining) = existing
+        .as_ref()
+        .map(|current| captain_orders::protect_unseen(current, &restored_snapshot, &pending))
+        .unwrap_or((restored_snapshot, Vec::new()));
+    let staff = backup
+        .staff
+        .or(read_json(&transaction, "staff")?)
+        .unwrap_or_else(|| json!([]));
+
+    write_json(&transaction, "snapshot", &restored_snapshot)?;
+    write_json(&transaction, "captain_pending_desktop", &json!(remaining))?;
+    write_json(&transaction, "staff", &staff)?;
+    transaction.commit().map_err(to_error)?;
+
+    let outlet_id = snapshot_outlet(&restored_snapshot).id;
+    let event = json!({
+        "type": "STATE_UPDATED",
+        "outletId": outlet_id,
+        "payload": restored_snapshot,
+        "timestamp": chrono::Utc::now().to_rfc3339(),
+        "clientId": "desktop-backup-restore",
+    });
+    let _ = broadcaster.send(event.to_string());
+    let _ = app.emit("lan_state_updated", &restored_snapshot);
+
+    Ok(LocalStatePayload {
+        snapshot: Some(restored_snapshot),
+        staff: Some(staff),
     })
 }
 
@@ -1565,7 +1806,15 @@ fn save_local_state(
             "Refused to replace existing restaurant setup with an incomplete snapshot".to_string(),
         );
     }
+    let pending: Vec<String> = read_json(&connection, "captain_pending_desktop")?
+        .and_then(|v| serde_json::from_value(v).ok())
+        .unwrap_or_default();
+    let (snapshot, remaining) = existing
+        .as_ref()
+        .map(|existing| captain_orders::protect_unseen(existing, &snapshot, &pending))
+        .unwrap_or((snapshot, Vec::new()));
     write_json(&connection, "snapshot", &snapshot)?;
+    write_json(&connection, "captain_pending_desktop", &json!(remaining))?;
     write_json(&connection, "staff", &staff)?;
     let outlet_id = snapshot_outlet(&snapshot).id;
     let event = json!({
@@ -1576,6 +1825,9 @@ fn save_local_state(
       "clientId": "desktop-save",
     });
     let _ = broadcaster.send(event.to_string());
+    if !remaining.is_empty() {
+        let _ = app.emit("lan_state_updated", &snapshot);
+    }
     Ok(())
 }
 
@@ -1698,7 +1950,13 @@ fn list_native_printers() -> Result<Vec<NativePrinter>, String> {
 }
 
 #[tauri::command]
-fn print_native(payload: NativePrintPayload) -> Result<(), String> {
+async fn print_native(payload: NativePrintPayload) -> Result<(), String> {
+    tokio::task::spawn_blocking(move || print_native_job(payload))
+        .await
+        .map_err(to_error)?
+}
+
+fn print_native_job(payload: NativePrintPayload) -> Result<(), String> {
     let printer = payload.printer.trim();
     if printer.is_empty() {
         return Err("Select a printer before printing.".to_string());
@@ -1858,6 +2116,13 @@ async fn lan_put_state(
         return Err((StatusCode::FORBIDDEN, Json(json!({ "error": "Forbidden" }))));
     }
 
+    let lock = state.app.state::<DesktopStateWriteLock>();
+    let _guard = lock.0.lock().map_err(|_| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error":"Desktop write lock unavailable"})),
+        )
+    })?;
     let connection = open_database(&state.app).map_err(|error| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -1933,7 +2198,10 @@ async fn lan_put_state(
             Json(json!({ "error": error })),
         )
     })?;
-    let updated_at = chrono::Utc::now().to_rfc3339();
+    let updated_at = state_updated_at(&connection, "snapshot")
+        .ok()
+        .flatten()
+        .unwrap_or_default();
     let public_event = json!({
       "type": "STATE_UPDATED",
       "outletId": outlet_id,
@@ -1949,6 +2217,82 @@ async fn lan_put_state(
       "outletId": outlet_id,
       "updatedAt": updated_at,
     })))
+}
+
+async fn lan_captain_command(
+    AxumState(state): AxumState<LanServerState>,
+    Path(outlet_id): Path<String>,
+    headers: HeaderMap,
+    Json(command): Json<captain_orders::CaptainCommand>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let account = authenticate_basic(&headers, &state)?;
+    if !can_access_outlet(&account, &outlet_id, &state)
+        || !["captain", "owner", "admin", "manager"].contains(&account.role.as_str())
+    {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(json!({"error":"Captain access required"})),
+        ));
+    }
+    let lock = state.app.state::<DesktopStateWriteLock>();
+    let _guard = lock.0.lock().map_err(|_| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error":"Desktop write lock unavailable"})),
+        )
+    })?;
+    let mut connection = open_database(&state.app)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error":e}))))?;
+    let transaction = connection.transaction().map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error":e.to_string()})),
+        )
+    })?;
+    let snapshot = read_snapshot(&transaction)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error":e}))))?
+        .ok_or((
+            StatusCode::CONFLICT,
+            Json(json!({"error":"Open and set up BhojPatra Desk first"})),
+        ))?;
+    let now = chrono::Utc::now()
+        .with_timezone(&chrono::FixedOffset::east_opt(19800).unwrap())
+        .to_rfc3339();
+    let (next, duplicate) =
+        captain_orders::apply_command(&snapshot, &command, &account.id, &account.name, &now)
+            .map_err(|e| (StatusCode::CONFLICT, Json(json!({"error":e}))))?;
+    if !duplicate {
+        write_json(&transaction, "snapshot", &next)
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error":e}))))?;
+        let mut pending: Vec<String> = read_json(&transaction, "captain_pending_desktop")
+            .ok()
+            .flatten()
+            .and_then(|v| serde_json::from_value(v).ok())
+            .unwrap_or_default();
+        pending.push(format!("captain_{}", command.request_id));
+        write_json(&transaction, "captain_pending_desktop", &json!(pending))
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error":e}))))?;
+    }
+    let updated_at = state_updated_at(&transaction, "snapshot")
+        .ok()
+        .flatten()
+        .unwrap_or_default();
+    transaction.commit().map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error":e.to_string()})),
+        )
+    })?;
+    if !duplicate {
+        let event = json!({"type":"STATE_UPDATED", "outletId":outlet_id,
+            "payload":sanitize_snapshot_for_lan(&next), "timestamp":updated_at, "clientId":command.request_id});
+        let _ = state.broadcaster.send(event.to_string());
+        let _ = state.app.emit("lan_state_updated", &next);
+    }
+    Ok(Json(
+        json!({"ok":true, "duplicate":duplicate, "updatedAt":updated_at,
+        "requestId":command.request_id, "payload":sanitize_snapshot_for_lan(&next)}),
+    ))
 }
 
 async fn lan_realtime(
@@ -2081,6 +2425,10 @@ fn spawn_lan_server(
             .route("/api/v1/lan/hello", get(lan_hello))
             .route("/api/v1/auth/login", post(lan_login))
             .route(
+                "/api/v1/outlets/:outlet_id/captain/commands",
+                post(lan_captain_command),
+            )
+            .route(
                 "/api/v1/outlets/:outlet_id/state",
                 get(lan_get_state).put(lan_put_state),
             )
@@ -2117,6 +2465,7 @@ pub fn run() {
                 .build(),
         )
         .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             clear_desktop_webview_cache(app.handle());
             ensure_windows_firewall_rules();
@@ -2142,6 +2491,9 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             load_local_state,
+            read_local_database_backup,
+            restore_local_database_backup,
+            get_desktop_machine_id,
             save_local_state,
             load_sync_metadata,
             save_sync_metadata,
@@ -2159,6 +2511,65 @@ mod tests {
     use super::*;
 
     #[test]
+    fn creates_a_verified_restorable_sqlite_backup() {
+        let source = Connection::open_in_memory().unwrap();
+        source
+            .execute_batch(
+                "
+                CREATE TABLE app_state (
+                    key TEXT PRIMARY KEY,
+                    value TEXT NOT NULL,
+                    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                );
+                CREATE TABLE app_state_history (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    key TEXT NOT NULL,
+                    value TEXT NOT NULL,
+                    archived_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                );
+                ",
+            )
+            .unwrap();
+        let snapshot = json!({
+            "outlet": { "id": "test-outlet" },
+            "printSettings": {},
+            "menuCategories": [],
+            "menuItems": [],
+            "floors": [],
+            "tables": [],
+            "stations": [],
+            "inventoryItems": [],
+            "orders": [],
+            "orderItems": [],
+            "kots": [],
+            "payments": [],
+            "auditLogs": []
+        });
+        write_json(&source, "snapshot", &snapshot).unwrap();
+        write_json(&source, "staff", &json!([])).unwrap();
+
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let backup_path = std::env::temp_dir().join(format!(
+            "bhojpatra-backup-test-{}-{nonce}.sqlite",
+            std::process::id()
+        ));
+
+        create_verified_database_backup(&source, &backup_path).unwrap();
+        let backup = Connection::open(&backup_path).unwrap();
+        let integrity: String = backup
+            .query_row("PRAGMA integrity_check", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(integrity, "ok");
+        assert_eq!(read_snapshot(&backup).unwrap(), Some(snapshot));
+        assert_eq!(read_json(&backup, "staff").unwrap(), Some(json!([])));
+        drop(backup);
+        fs::remove_file(backup_path).unwrap();
+    }
+
+    #[test]
     fn parses_ipv4_and_ipv6_raw_printer_targets() {
         assert_eq!(
             network_target("tcp://192.168.1.50:9100"),
@@ -2168,6 +2579,24 @@ mod tests {
             network_target("[::1]:9100"),
             Some(("::1".to_string(), 9100))
         );
+    }
+
+    #[test]
+    fn kitchen_tcp_print_resolves_hostname_and_sends_exact_bytes() {
+        use std::io::Read;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let reader = std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            socket
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let mut bytes = Vec::new();
+            socket.read_to_end(&mut bytes).unwrap();
+            bytes
+        });
+        print_tcp(("localhost".to_string(), port), b"KOT test only\n").unwrap();
+        assert_eq!(reader.join().unwrap(), b"KOT test only\n");
     }
 
     #[test]

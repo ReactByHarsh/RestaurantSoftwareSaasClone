@@ -32,6 +32,8 @@ import {
   webUsbSupported,
 } from '../../lib/printer'
 import { buildKotPrintText, buildReceiptPrintParts } from '../../lib/printTemplates'
+import { desktopKotPrintQueue } from '../../lib/kotPrintQueue'
+import { planKotPrintJobs } from '../../lib/kotPrintRouting'
 import type { KOT, MenuCategory, MenuItem, Order, OrderItem, Payment } from '../../lib/types'
 
 const PREVIEW_CATEGORIES: MenuCategory[] = [
@@ -85,10 +87,11 @@ function createPreviewDraft(source: PrintSettings): PrintSettings {
     connectionMode: normalizePrinterConnectionMode(source.connectionMode),
     headingSize: source.headingSize ?? 'standard',
     fontSize: source.fontSize ?? 'standard',
+    finalAmountScale: source.finalAmountScale ?? 100,
   }
 }
 
-function preparePrintSettings(settings: PrintSettings): { value: PrintSettings } | { error: string } {
+function preparePrintSettings(settings: PrintSettings, hasKitchenRoute = false): { value: PrintSettings } | { error: string } {
   const connectionMode = normalizePrinterConnectionMode(settings.connectionMode)
   const trimmedPrinterName = settings.printerName.trim()
   const lanTarget = connectionMode === 'native'
@@ -97,7 +100,7 @@ function preparePrintSettings(settings: PrintSettings): { value: PrintSettings }
   const bridgeUrl = lanTarget ? DEFAULT_BRIDGE_URL : resolveBridgeUrlInput(settings.bridgeUrl)
   const printerName = connectionMode === 'native' ? trimmedPrinterName : (lanTarget || trimmedPrinterName)
 
-  if (connectionMode !== 'browser' && !printerName) {
+  if (connectionMode !== 'browser' && !printerName && !hasKitchenRoute) {
     return { error: 'Select or enter a printer before saving.' }
   }
 
@@ -113,7 +116,15 @@ function preparePrintSettings(settings: PrintSettings): { value: PrintSettings }
 
 export default function PrinterSettingsScreen() {
   const { addToast } = useUIStore()
-  const { outlet, printSettings, updatePrintSettings } = useBillingStore()
+  const { outlet, printSettings, updatePrintSettings, stations, updateStation } = useBillingStore()
+  const [routeTargets, setRouteTargets] = useState<Record<string, string>>({})
+  const [, refreshQueue] = useState(0)
+  useEffect(() => { setRouteTargets(Object.fromEntries(stations.map(s => [s.id, s.printerTarget || '']))) }, [stations])
+  useEffect(() => {
+    const refresh = () => refreshQueue(n => n + 1)
+    window.addEventListener('bhojpatra-kot-print-queue', refresh)
+    return () => window.removeEventListener('bhojpatra-kot-print-queue', refresh)
+  }, [])
   const [draftSettings, setDraftSettings] = useState<PrintSettings>(() => createPreviewDraft(printSettings))
   const [detectedPrinters, setDetectedPrinters] = useState<BridgePrinter[]>([])
   const [printerBusy, setPrinterBusy] = useState(false)
@@ -389,13 +400,18 @@ export default function PrinterSettingsScreen() {
   }
 
   const handleSave = () => {
-    const prepared = preparePrintSettings(draftSettings)
+    const prepared = preparePrintSettings(draftSettings, Boolean(draftSettings.kotPrinterName?.trim() || Object.values(routeTargets).some(target => target.trim())))
     if ('error' in prepared) {
       addToast('warning', prepared.error, 'Printer Setup')
       return
     }
 
     updatePrintSettings(prepared.value)
+    stations.forEach(station => {
+      const raw = (routeTargets[station.id] ?? '').trim()
+      const target = normalizeNetworkPrinterAddress(raw) || raw
+      updateStation(station.id, { printerTarget: target || undefined, printerMode: target.startsWith('tcp://') ? 'lan' : target ? 'wired' : 'default' })
+    })
     setDraftSettings(prepared.value)
     addToast('success', 'Printer settings saved successfully', 'Printer Setup')
   }
@@ -428,6 +444,24 @@ export default function PrinterSettingsScreen() {
       setPrinterBusy(false)
     }
   }
+
+  const testKitchenPrinter = async (target: string, stationName: string) => {
+    if (!target.trim()) {
+      addToast('warning', 'Choose a KOT / bill printer before testing.', 'Kitchen printer')
+      return
+    }
+    setPrinterBusy(true)
+    try {
+      await sendPrintJob({ ...draftSettings, connectionMode: draftSettings.connectionMode === 'bridge' ? 'bridge' : 'native',
+        printerName: normalizeNetworkPrinterAddress(target) || target.trim(), openCashDrawer: false },
+        { jobName: `Kitchen test ${stationName}`, text: `BHOJPATRA KITCHEN TEST\n${stationName}\n${outlet.name}\n\nThis is a test, not a food order.\n` })
+      addToast('success', `Test sent to ${stationName}`, 'Kitchen printer')
+    } catch (error) { addToast('error', String(error), 'Kitchen printer') }
+    finally { setPrinterBusy(false) }
+  }
+
+  const queuedKots = nativePrintSupported() ? desktopKotPrintQueue().list(outlet.id).filter(j => j.status !== 'sent') : []
+  const queueLoadError = nativePrintSupported() ? desktopKotPrintQueue().loadError : undefined
 
   const selectedModeLabel = draftSettings.connectionMode === 'native'
     ? 'Desktop built-in direct print'
@@ -585,6 +619,37 @@ export default function PrinterSettingsScreen() {
               </div>
             </section>
 
+            <section className="bg-white rounded-2xl border-2 border-slate-100 shadow-sm overflow-hidden">
+              <div className="px-5 py-3 border-b border-slate-100 flex items-center gap-2"><Printer size={18} className="text-primary" /><h2 className="text-sm font-black text-slate-800">Kitchen / KOT printer routes</h2></div>
+              <div className="p-5 space-y-4">
+                <p className="text-xs text-slate-500 font-semibold">Receipts use the active bill printer above. KOTs use the station printer first, then the KOT printer below, then the bill printer. LAN and Wi-Fi printers must be reachable from this desktop (raw ESC/POS TCP, usually port 9100).</p>
+                <label className="flex items-center gap-2 text-xs font-bold text-slate-700"><input type="checkbox" checked={draftSettings.autoPrintCaptainKot !== false} onChange={event => setDraftValue('autoPrintCaptainKot', event.target.checked)} /> Automatically print KOTs sent from phones</label>
+                <div className="flex gap-2 items-end">
+                  <label className="flex-1 min-w-0"><span className="block text-xs font-bold text-slate-700 mb-1">Default KOT printer (blank = same as bill)</span><input list="bhojpatra-printer-queues" value={draftSettings.kotPrinterName ?? ''} onChange={event => setDraftValue('kotPrinterName', event.target.value)} placeholder="Kitchen queue or 192.168.1.50:9100" className="w-full px-3 py-2 rounded-xl border-2 border-slate-200 text-sm font-semibold" /></label>
+                  <button disabled={printerBusy || !nativePrintSupported()} onClick={() => void testKitchenPrinter(draftSettings.kotPrinterName || draftSettings.printerName, 'Default KOT printer')} className="px-3 py-2 rounded-xl bg-slate-900 text-white text-xs font-bold disabled:opacity-40">Test KOT</button>
+                </div>
+                <datalist id="bhojpatra-printer-queues">{detectedPrinters.map(printer => <option key={printer.name} value={printer.name}>{printer.label}</option>)}</datalist>
+                {stations.map(station => <div key={station.id} className="flex gap-2 items-end">
+                  <label className="flex-1 min-w-0"><span className="block text-xs font-bold text-slate-700 mb-1">{station.name}</span><input list="bhojpatra-printer-queues" value={routeTargets[station.id] ?? ''} onChange={event => setRouteTargets(current => ({ ...current, [station.id]: event.target.value }))} placeholder="Blank uses default KOT / bill printer" className="w-full px-3 py-2 rounded-xl border-2 border-slate-200 text-sm font-semibold" /></label>
+                  <button disabled={printerBusy || !nativePrintSupported()} onClick={() => void testKitchenPrinter(routeTargets[station.id] || draftSettings.kotPrinterName || draftSettings.printerName, station.name)} className="px-3 py-2 rounded-xl bg-slate-100 text-slate-700 text-xs font-bold disabled:opacity-40">Test</button>
+                </div>)}
+                <p className="text-[11px] text-slate-500">Save Printer Settings to apply routes. Single-KOT mode combines only tickets for the same table order and physical printer. Different kitchens always receive their own items. KOTs never open the cash drawer.</p>
+                {queueLoadError && <p className="rounded-xl bg-rose-50 p-3 text-xs font-bold text-rose-700">{queueLoadError}</p>}
+                {queuedKots.length > 0 && <div className="rounded-xl border border-amber-200 bg-amber-50 p-3 space-y-2"><h3 className="text-xs font-black text-amber-800">Kitchen print queue · {queuedKots.length}</h3><p className="text-[11px] text-amber-800">A printer acknowledgment is not proof of paper output. Check the kitchen before retrying to avoid duplicate tickets.</p>{queuedKots.map(record => <div key={record.id} className="border-t border-amber-200 pt-2">
+                  <p className="text-xs font-bold">{record.job.jobName} · {record.status}</p><p className="text-[11px] break-all">{record.settings.printerName} · {record.error}</p>
+                  {['failed', 'uncertain'].includes(record.status) && <button className="mt-1 px-3 py-1 rounded-lg bg-white border border-amber-300 text-xs font-bold" onClick={() => {
+                    if (!window.confirm('Check the kitchen first. A failed network acknowledgment may still have printed. Retry this ticket?')) return
+                    const state = useBillingStore.getState()
+                    const currentJobs = planKotPrintJobs(state.kots.filter(k => record.kotIds.includes(k.id)), state.stations, state.printSettings, state.outlet)
+                    if (currentJobs.length > 1) { addToast('warning', 'Routes changed to multiple printers. Reprint individual KOTs from Kitchen instead.', 'Kitchen printer'); return }
+                    const queue = desktopKotPrintQueue()
+                    queue.retry(outlet.id, record.id, currentJobs[0]?.settings)
+                    void queue.flush(outlet.id).catch(error => addToast('error', String(error), 'Kitchen printer'))
+                  }}>Retry after checking</button>}
+                </div>)}</div>}
+              </div>
+            </section>
+
             <section className="bg-white rounded-2xl border-2 border-slate-100 shadow-[0_2px_10px_rgba(0,0,0,0.02)] overflow-hidden">
               <div className="px-5 py-3 border-b-2 border-slate-100 bg-slate-50/50 flex items-center gap-2">
                 <Settings2 size={18} className="text-primary" strokeWidth={2.5} />
@@ -629,6 +694,24 @@ export default function PrinterSettingsScreen() {
                     <option value="standard">Standard</option>
                     <option value="large">Large</option>
                   </select>
+                </div>
+                <div className="md:col-span-2 rounded-xl border-2 border-primary/15 bg-primary-50/40 p-3">
+                  <div className="flex items-center justify-between gap-3">
+                    <label htmlFor="final-amount-scale" className="text-xs font-black text-slate-700 uppercase tracking-wider">Final Amount Size</label>
+                    <span className="rounded-lg bg-white px-2 py-1 text-xs font-black text-primary border border-primary/15">{Math.round(draftSettings.finalAmountScale ?? 100)}%</span>
+                  </div>
+                  <input
+                    id="final-amount-scale"
+                    type="range"
+                    min="80"
+                    max="180"
+                    step="5"
+                    value={draftSettings.finalAmountScale ?? 100}
+                    onChange={(event) => setDraftValue('finalAmountScale', Number(event.target.value))}
+                    className="mt-3 w-full accent-primary"
+                  />
+                  <div className="mt-1 flex justify-between text-[10px] font-bold text-slate-500"><span>Smaller</span><span>Bigger</span></div>
+                  <p className="mt-2 text-[10px] font-bold text-slate-500">Controls the final payable amount line on browser/HTML bill prints.</p>
                 </div>
                 <div>
                   <label className="block text-xs font-black text-slate-700 mb-1.5 uppercase tracking-wider">Print Business Name</label>
