@@ -1,10 +1,18 @@
 import { Fragment, useMemo, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { ChevronDown, ChevronUp, Edit3, Printer, RefreshCw, Undo } from 'lucide-react'
+import { ArrowDown, ArrowUp, ChevronDown, ChevronUp, Edit3, Printer, RefreshCw, SlidersHorizontal, Undo } from 'lucide-react'
 import { clsx } from 'clsx'
 import { isClosedOrder, useBillingStore } from '../../store/billingStore'
 import { formatPaise } from '../../lib/money'
 import { getOrderHistoryTimestamp, isWithinLocalDateRange, localDateInputValue } from '../../lib/orderHistory'
+import {
+  defaultSortDirection,
+  loadOrdersTablePreferences,
+  ORDER_COLUMN_META,
+  saveOrdersTablePreferences,
+  type OrderSortField,
+  type OrdersTablePreferences,
+} from '../../lib/ordersTablePrefs'
 import { useAuthStore } from '../../store/authStore'
 import { useUIStore } from '../../store/uiStore'
 import ReasonDialog from '../shared/ReasonDialog'
@@ -13,6 +21,7 @@ import DiscountModal from '../billing/DiscountModal'
 import AddPaymentModal from './AddPaymentModal'
 import CancelOrderModal from './CancelOrderModal'
 import EditOrderModal from './EditOrderModal'
+import OrderTableSettingsModal from './OrderTableSettingsModal'
 
 interface Props {
   onBack?: () => void
@@ -62,6 +71,17 @@ export default function OrdersScreen({ onBack }: Props = {}) {
   const [addPaymentOrderId, setAddPaymentOrderId] = useState<string | null>(null)
   const [cancelPaymentsOrderId, setCancelPaymentsOrderId] = useState<string | null>(null)
   const [editOrderId, setEditOrderId] = useState<string | null>(null)
+  const [tableSettingsOpen, setTableSettingsOpen] = useState(false)
+  const [tablePreferences, setTablePreferences] = useState<OrdersTablePreferences>(() => loadOrdersTablePreferences())
+
+  const visibleColumns = useMemo(() => {
+    const metaByKey = new Map(ORDER_COLUMN_META.map(column => [column.key, column]))
+    const columns = tablePreferences.columns
+      .filter(column => column.visible)
+      .map(column => metaByKey.get(column.key))
+      .filter((column): column is NonNullable<typeof column> => Boolean(column))
+    return columns.length > 0 ? columns : ORDER_COLUMN_META
+  }, [tablePreferences.columns])
 
   const activeItemCountByOrder = useMemo(() => {
     const index = new Map<string, number>()
@@ -71,27 +91,6 @@ export default function OrdersScreen({ onBack }: Props = {}) {
     })
     return index
   }, [orderItems])
-
-  const filtered = useMemo(() => {
-    return orders.filter(o => {
-      if (['cancelled', 'void'].includes(o.status)) return false
-      if (o.totalPaise <= 0) return false
-      // Preserve completed bills in history even if an older/imported record
-      // is missing its child item rows; only hide empty open drafts.
-      if (!isClosedOrder(o) && (activeItemCountByOrder.get(o.id) ?? 0) <= 0) return false
-
-      const historyTime = getOrderHistoryTimestamp(o)
-      if (!isWithinLocalDateRange(historyTime, fromDate, toDate)) return false
-      
-      if (search) {
-        const q = search.toLowerCase()
-        if (!o.orderNo.toLowerCase().includes(q) &&
-            !(o.tableName?.toLowerCase().includes(q)) &&
-            !(o.customerName?.toLowerCase().includes(q))) return false
-      }
-      return true
-    }).sort((a, b) => Date.parse(getOrderHistoryTimestamp(b)) - Date.parse(getOrderHistoryTimestamp(a)))
-  }, [orders, fromDate, toDate, search, activeItemCountByOrder])
 
   const itemsByOrderId = useMemo(() => {
     const index = new Map<string, typeof orderItems>()
@@ -125,6 +124,74 @@ export default function OrdersScreen({ onBack }: Props = {}) {
     return orderPayments
       .filter(payment => !CREDIT_PAYMENT_METHODS.has(payment.method))
       .reduce((sum, payment) => sum + payment.amountPaise, 0)
+  }
+
+  const filtered = useMemo(() => {
+    const matches = orders.filter(o => {
+      if (['cancelled', 'void'].includes(o.status)) return false
+      if (o.totalPaise <= 0) return false
+      // Preserve completed bills in history even if an older/imported record
+      // is missing its child item rows; only hide empty open drafts.
+      if (!isClosedOrder(o) && (activeItemCountByOrder.get(o.id) ?? 0) <= 0) return false
+
+      const historyTime = getOrderHistoryTimestamp(o)
+      if (!isWithinLocalDateRange(historyTime, fromDate, toDate)) return false
+      
+      if (search) {
+        const q = search.toLowerCase()
+        if (!o.orderNo.toLowerCase().includes(q) &&
+            !(o.tableName?.toLowerCase().includes(q)) &&
+            !(o.customerName?.toLowerCase().includes(q))) return false
+      }
+      return true
+    })
+
+    const field = tablePreferences.sortField
+    const direction = tablePreferences.sortDirection === 'asc' ? 1 : -1
+    const numeric = field === 'net' || field === 'pendingAmt'
+    const sortValue = (order: typeof orders[number]) => {
+      switch (field) {
+        case 'businessDate': return order.businessDate
+        case 'receipt': return order.orderNo
+        case 'table': return getOrderTableName(order)
+        case 'customer': return order.customerName || 'Walk-in'
+        case 'net': return order.totalPaise
+        case 'pendingAmt': return Math.max(0, order.totalPaise - getCollectedPaidPaise(order.id))
+        default: return Date.parse(getOrderHistoryTimestamp(order))
+      }
+    }
+
+    return matches.sort((a, b) => {
+      const left = sortValue(a)
+      const right = sortValue(b)
+      let comparison = numeric
+        ? Number(left) - Number(right)
+        : String(left).localeCompare(String(right), undefined, { numeric: true })
+      if (comparison === 0) {
+        comparison = Date.parse(getOrderHistoryTimestamp(a)) - Date.parse(getOrderHistoryTimestamp(b))
+      }
+      return comparison * direction
+    })
+  }, [orders, fromDate, toDate, search, activeItemCountByOrder, tablePreferences.sortField, tablePreferences.sortDirection, paymentsByOrderId, tableNameById])
+
+  const handleSortColumn = (field: OrderSortField) => {
+    setTablePreferences(current => {
+      const next: OrdersTablePreferences = {
+        ...current,
+        sortField: field,
+        sortDirection: current.sortField === field
+          ? (current.sortDirection === 'asc' ? 'desc' : 'asc')
+          : defaultSortDirection(field),
+      }
+      saveOrdersTablePreferences(next)
+      return next
+    })
+  }
+
+  const handleApplyTableSettings = (next: OrdersTablePreferences) => {
+    setTablePreferences(next)
+    saveOrdersTablePreferences(next)
+    setTableSettingsOpen(false)
   }
 
   const getPendingPaise = (orderId: string, totalPaise: number) => {
@@ -187,6 +254,13 @@ export default function OrdersScreen({ onBack }: Props = {}) {
         <button className="h-[34px] px-6 bg-emerald-600 hover:bg-emerald-700 text-white font-bold rounded flex items-center gap-2 shadow-sm transition-colors">
           <RefreshCw size={16} /> Show
         </button>
+        <button
+          onClick={() => setTableSettingsOpen(true)}
+          className="h-[34px] px-4 bg-slate-700 hover:bg-slate-800 text-white font-bold rounded flex items-center gap-2 shadow-sm transition-colors"
+          title="Change column sequence, visibility and sorting"
+        >
+          <SlidersHorizontal size={16} /> Columns
+        </button>
       </div>
 
       {/* DATA GRID */}
@@ -195,23 +269,40 @@ export default function OrdersScreen({ onBack }: Props = {}) {
           <thead className="bg-[#f1f5f9] border-b border-slate-300 sticky top-[-1rem] z-20 shadow-[0_1px_0_#cbd5e1]">
             <tr>
               <th className="w-10 px-2 py-2" aria-label="Expand order" />
-              <th className="px-3 py-2 text-xs font-bold text-slate-600 uppercase">Receipt No</th>
-              <th className="px-3 py-2 text-xs font-bold text-slate-600 uppercase">Counter</th>
-              <th className="px-3 py-2 text-xs font-bold text-slate-600 uppercase">Customer</th>
-              <th className="px-3 py-2 text-xs font-bold text-slate-600 uppercase">Bsn Date</th>
-              <th className="px-3 py-2 text-xs font-bold text-slate-600 uppercase">Txn Time</th>
-              <th className="px-3 py-2 text-xs font-bold text-slate-600 uppercase text-center">Items</th>
-              <th className="px-3 py-1.5 text-xs font-bold text-slate-600 uppercase text-right">Bill Disc</th>
-              <th className="px-3 py-1.5 text-xs font-bold text-slate-600 uppercase text-right">Net</th>
-              <th className="px-3 py-1.5 text-xs font-bold text-slate-600 uppercase text-right">Pnding Amt</th>
-              <th className="px-3 py-1.5 text-xs font-bold text-slate-600 uppercase">Pymt Details</th>
-              <th className="px-3 py-1.5 text-xs font-bold text-slate-600 uppercase">Status</th>
+              {visibleColumns.map(column => {
+                const isActiveSort = Boolean(column.sortField) && column.sortField === tablePreferences.sortField
+                return (
+                  <th
+                    key={column.key}
+                    className={clsx(
+                      'px-3 py-2 text-xs font-bold text-slate-600 uppercase',
+                      column.align === 'right' && 'text-right',
+                      column.align === 'center' && 'text-center',
+                    )}
+                  >
+                    {column.sortField ? (
+                      <button
+                        type="button"
+                        onClick={() => handleSortColumn(column.sortField!)}
+                        className={clsx(
+                          'inline-flex items-center gap-1 uppercase transition-colors hover:text-slate-900',
+                          isActiveSort && 'text-blue-700',
+                        )}
+                        title={`Sort by ${column.label}`}
+                      >
+                        {column.label}
+                        {isActiveSort && (tablePreferences.sortDirection === 'asc' ? <ArrowUp size={12} /> : <ArrowDown size={12} />)}
+                      </button>
+                    ) : column.label}
+                  </th>
+                )
+              })}
             </tr>
           </thead>
           <tbody>
             {filtered.length === 0 ? (
               <tr>
-                <td colSpan={12} className="px-4 py-8 text-center text-slate-500 font-bold">No orders found for the selected dates.</td>
+                <td colSpan={visibleColumns.length + 1} className="px-4 py-8 text-center text-slate-500 font-bold">No orders found for the selected dates.</td>
               </tr>
             ) : filtered.map(order => {
               const isSelected = selectedOrderId === order.id
@@ -252,30 +343,49 @@ export default function OrdersScreen({ onBack }: Props = {}) {
                         {isExpanded ? <ChevronUp size={17} /> : <ChevronDown size={17} />}
                       </button>
                     </td>
-                    <td className="px-3 py-1 text-sm font-bold text-slate-800">{order.orderNo}</td>
-                    <td className="px-3 py-1 text-sm font-bold text-slate-600">{order.type.replace('_', ' ').toUpperCase()}</td>
-                    <td className="px-3 py-1 text-sm font-bold text-slate-800">{order.customerName || 'Walk-in'}</td>
-                    <td className="px-3 py-1 text-sm text-slate-600">{order.businessDate}</td>
-                    <td className="px-3 py-1 text-sm text-slate-600">{formatOrderTime(order.createdAt)}</td>
-                    <td className="px-3 py-1 text-sm font-black text-center">{items.length}</td>
-                    <td className="px-3 py-1 text-sm text-slate-600 text-right">{formatPaise(order.discountPaise)}</td>
-                    <td className="px-3 py-1 text-sm font-black text-slate-800 text-right">{formatPaise(order.totalPaise)}</td>
-                    <td className="px-3 py-1 text-sm font-black text-rose-600 text-right">{pendingAmt > 0 ? formatPaise(pendingAmt) : '0.00'}</td>
-                    <td className="px-3 py-1 text-xs font-bold text-slate-600 max-w-[150px] truncate" title={pymtDetails}>{pymtDetails}</td>
-                    <td className="px-3 py-1">
-                      <span className={clsx(
-                        "px-2 py-0.5 rounded text-[10px] font-black uppercase tracking-wider",
-                        order.status === 'cancelled' ? 'bg-red-100 text-red-700' :
-                        derivedPaymentStatus === 'paid' ? 'bg-emerald-100 text-emerald-700' :
-                        'bg-orange-100 text-orange-700'
-                      )}>
-                        {order.status === 'cancelled' ? 'Cancelled' : derivedPaymentStatus}
-                      </span>
-                    </td>
+                    {visibleColumns.map(column => {
+                      switch (column.key) {
+                        case 'receipt':
+                          return <td key={column.key} className="px-3 py-1 text-sm font-bold text-slate-800">{order.orderNo}</td>
+                        case 'table':
+                          return <td key={column.key} className="px-3 py-1 text-sm font-bold text-slate-600">{getOrderTableName(order)}</td>
+                        case 'customer':
+                          return <td key={column.key} className="px-3 py-1 text-sm font-bold text-slate-800">{order.customerName || 'Walk-in'}</td>
+                        case 'businessDate':
+                          return <td key={column.key} className="px-3 py-1 text-sm text-slate-600">{order.businessDate}</td>
+                        case 'txnTime':
+                          return <td key={column.key} className="px-3 py-1 text-sm text-slate-600">{formatOrderTime(order.createdAt)}</td>
+                        case 'items':
+                          return <td key={column.key} className="px-3 py-1 text-sm font-black text-center">{items.length}</td>
+                        case 'billDisc':
+                          return <td key={column.key} className="px-3 py-1 text-sm text-slate-600 text-right">{formatPaise(order.discountPaise)}</td>
+                        case 'net':
+                          return <td key={column.key} className="px-3 py-1 text-sm font-black text-slate-800 text-right">{formatPaise(order.totalPaise)}</td>
+                        case 'pendingAmt':
+                          return <td key={column.key} className="px-3 py-1 text-sm font-black text-rose-600 text-right">{pendingAmt > 0 ? formatPaise(pendingAmt) : '0.00'}</td>
+                        case 'paymentDetails':
+                          return <td key={column.key} className="px-3 py-1 text-xs font-bold text-slate-600 max-w-[150px] truncate" title={pymtDetails}>{pymtDetails}</td>
+                        case 'status':
+                          return (
+                            <td key={column.key} className="px-3 py-1">
+                              <span className={clsx(
+                                "px-2 py-0.5 rounded text-[10px] font-black uppercase tracking-wider",
+                                order.status === 'cancelled' ? 'bg-red-100 text-red-700' :
+                                derivedPaymentStatus === 'paid' ? 'bg-emerald-100 text-emerald-700' :
+                                'bg-orange-100 text-orange-700'
+                              )}>
+                                {order.status === 'cancelled' ? 'Cancelled' : derivedPaymentStatus}
+                              </span>
+                            </td>
+                          )
+                        default:
+                          return null
+                      }
+                    })}
                   </tr>
                   {isExpanded && (
                     <tr id={`order-details-${order.id}`} className="border-b border-slate-200 bg-slate-50">
-                      <td colSpan={12} className="px-5 py-4 whitespace-normal">
+                      <td colSpan={visibleColumns.length + 1} className="px-5 py-4 whitespace-normal">
                         <div className="rounded-lg border border-slate-200 bg-white p-4 shadow-sm">
                           <div className="grid gap-3 border-b border-slate-200 pb-4 sm:grid-cols-2 lg:grid-cols-4">
                             <div>
@@ -475,6 +585,14 @@ export default function OrdersScreen({ onBack }: Props = {}) {
           }
         }}
       />
+
+      {tableSettingsOpen && (
+        <OrderTableSettingsModal
+          preferences={tablePreferences}
+          onApply={handleApplyTableSettings}
+          onClose={() => setTableSettingsOpen(false)}
+        />
+      )}
     </div>
   )
 }

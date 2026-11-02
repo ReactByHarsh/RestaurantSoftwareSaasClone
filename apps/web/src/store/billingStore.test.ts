@@ -556,3 +556,46 @@ describe('billing store stale-state recovery', () => {
     expect(state.tables[0].activeOrderId).toBeUndefined()
   })
 })
+
+describe('whole-table transfers', () => {
+  beforeEach(() => {
+    const activeOrder = order('running')
+    useBillingStore.setState({
+      tables: [table(activeOrder.id), { ...table(), id: 'table-2', name: 'Table 2', sortOrder: 2 }],
+      orders: [activeOrder],
+      orderItems: [],
+      kots: [],
+      currentOrder: activeOrder,
+      selectedTableId: 'table-1',
+      activeOrderType: 'dine_in',
+      cart: [cartItem],
+      savedCarts: { 'table-1': [cartItem] },
+    })
+  })
+
+  it('transfers a table with unsent cart items even when it has no KOTs', () => {
+    const transferred = useBillingStore.getState().transferTable('table-1', 'table-2')
+    const state = useBillingStore.getState()
+
+    expect(transferred).toBe(true)
+    expect(state.tables.find(candidate => candidate.id === 'table-1')).toMatchObject({ status: 'available', activeOrderId: undefined })
+    expect(state.tables.find(candidate => candidate.id === 'table-2')).toMatchObject({ status: 'occupied', activeOrderId: 'order-1' })
+    expect(state.orders[0]).toMatchObject({ id: 'order-1', tableId: 'table-2', tableName: 'Table 2' })
+    expect(state.savedCarts).not.toHaveProperty('table-1')
+    expect(state.savedCarts['table-2']).toEqual([cartItem])
+    expect(state.selectedTableId).toBe('table-2')
+    expect(state.currentOrder).toMatchObject({ id: 'order-1', tableId: 'table-2', tableName: 'Table 2' })
+  })
+
+  it('does not overwrite unsent items already parked at the destination', () => {
+    const destinationCart = { ...cartItem, menuItemId: 'menu-2', name: 'Destination item' }
+    useBillingStore.setState(state => ({
+      savedCarts: { ...state.savedCarts, 'table-2': [destinationCart] },
+    }))
+
+    expect(useBillingStore.getState().transferTable('table-1', 'table-2')).toBe(false)
+    expect(useBillingStore.getState().tables.find(candidate => candidate.id === 'table-1')?.activeOrderId).toBe('order-1')
+    expect(useBillingStore.getState().savedCarts['table-1']).toEqual([cartItem])
+    expect(useBillingStore.getState().savedCarts['table-2']).toEqual([destinationCart])
+  })
+})

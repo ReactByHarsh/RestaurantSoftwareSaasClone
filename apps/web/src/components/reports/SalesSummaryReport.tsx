@@ -2,6 +2,9 @@ import { useMemo, useState } from 'react'
 import { Download, Printer, RefreshCw, Search } from 'lucide-react'
 import { useBillingStore } from '../../store/billingStore'
 import { formatPaise } from '../../lib/money'
+import { useUIStore } from '../../store/uiStore'
+import { describePrinterError, sendPrintJob } from '../../lib/printer'
+import { buildSalesSummaryPrintText } from '../../lib/salesSummaryPrint'
 
 interface Props {
   fromDate: string
@@ -12,11 +15,13 @@ type SortMode = 'volume' | 'net' | 'name'
 type ViewMode = 'product' | 'category'
 
 export default function SalesSummaryReport({ fromDate, toDate }: Props) {
-  const { orders, orderItems, menuItems, menuCategories } = useBillingStore()
+  const { orders, orderItems, menuItems, menuCategories, outlet, printSettings } = useBillingStore()
+  const { addToast } = useUIStore()
   const [productSearch, setProductSearch] = useState('')
   const [categorySearch, setCategorySearch] = useState('')
   const [sortMode, setSortMode] = useState<SortMode>('volume')
   const [viewMode, setViewMode] = useState<ViewMode>('product')
+  const [printBusy, setPrintBusy] = useState(false)
 
   const productRows = useMemo(() => {
     const paidOrders = orders.filter((order) =>
@@ -187,6 +192,36 @@ export default function SalesSummaryReport({ fromDate, toDate }: Props) {
     URL.revokeObjectURL(url)
   }
 
+  const handlePrint = async () => {
+    if (printBusy) return
+    setPrintBusy(true)
+    try {
+      const result = await sendPrintJob(printSettings, {
+        jobName: `BhojPatra ${viewMode === 'category' ? 'Category' : 'Product'} Sales Summary ${fromDate} to ${toDate}`,
+        text: buildSalesSummaryPrintText(rows, totals, fromDate, toDate, viewMode, {
+          name: outlet.name,
+          businessName: printSettings.businessName || outlet.name,
+          address: outlet.address,
+          phone: outlet.phone,
+          gstin: outlet.gstin,
+          receiptWidth: printSettings.receiptWidth,
+          showGstin: printSettings.showGstin,
+        }),
+      })
+      addToast(
+        'success',
+        result === 'direct'
+          ? 'Sales summary sent directly to the printer'
+          : 'Sales summary opened in the system print dialog',
+        'Sales Summary Print',
+      )
+    } catch (error) {
+      addToast('error', describePrinterError(error), 'Sales Summary Print')
+    } finally {
+      setPrintBusy(false)
+    }
+  }
+
   return (
     <div className="overflow-hidden rounded-2xl border-2 border-slate-100 bg-white shadow-[0_2px_10px_rgba(0,0,0,0.02)]">
       <div className="border-b-2 border-slate-100 bg-gradient-to-r from-slate-50 to-cyan-50/50 px-5 py-4">
@@ -203,8 +238,8 @@ export default function SalesSummaryReport({ fromDate, toDate }: Props) {
             <button onClick={handleCsv} className="inline-flex items-center gap-1.5 rounded-xl bg-amber-400 px-4 py-2 text-xs font-black text-amber-950 shadow-sm hover:bg-amber-500">
               <Download size={14} /> Csv
             </button>
-            <button onClick={() => window.print()} className="inline-flex items-center gap-1.5 rounded-xl bg-amber-400 px-4 py-2 text-xs font-black text-amber-950 shadow-sm hover:bg-amber-500">
-              <Printer size={14} /> Print
+            <button onClick={handlePrint} disabled={printBusy} className="inline-flex items-center gap-1.5 rounded-xl bg-amber-400 px-4 py-2 text-xs font-black text-amber-950 shadow-sm hover:bg-amber-500 disabled:cursor-wait disabled:opacity-60">
+              <Printer size={14} /> {printBusy ? 'Printing...' : 'Print'}
             </button>
           </div>
         </div>

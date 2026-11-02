@@ -188,6 +188,7 @@ interface BillingStore {
   deleteCategory: (id: string) => boolean
   addMenuItem: (item: Omit<MenuItem, 'id' | 'outletId' | 'sortOrder'>) => void
   updateMenuItem: (id: string, updates: Partial<MenuItem>) => void
+  applyMenuItemImages: (updates: Record<string, string>) => void
   deleteMenuItem: (id: string) => void
   addStation: (name: string, settings?: Partial<Station>) => Station
   updateStation: (id: string, updates: Partial<Station>) => void
@@ -1265,6 +1266,15 @@ export const useBillingStore = create<BillingStore>()(
         }
       }),
 
+      applyMenuItemImages: (updates) => set((state) => {
+        const count = Object.keys(updates).length
+        if (count === 0) return {}
+        return {
+          menuItems: state.menuItems.map((item) => updates[item.id] ? { ...item, imageUrl: updates[item.id] } : item),
+          auditLogs: addAudit(state, 'menu.item.images_updated', 'menu_item', `Attached images to ${count} menu items`),
+        }
+      }),
+
       deleteMenuItem: (id) => set((state) => ({
         menuItems: state.menuItems.filter((item) => item.id !== id),
         auditLogs: addAudit(state, 'menu.item.deleted', 'menu_item', 'Deleted menu item', id),
@@ -1367,20 +1377,81 @@ export const useBillingStore = create<BillingStore>()(
         const state = get()
         const fromTable = state.tables.find(t => t.id === fromTableId)
         const toTable = state.tables.find(t => t.id === toTableId)
-        if (!fromTable?.activeOrderId || !toTable || toTable.status !== 'available') return false
-        const orderId = fromTable.activeOrderId
-        set(s => ({
-          tables: s.tables.map(t => {
-            if (t.id === fromTableId) return { ...t, status: 'available' as TableStatus, activeOrderId: undefined }
-            if (t.id === toTableId) return { ...t, status: fromTable.status, activeOrderId: orderId }
-            return t
-          }),
-          orders: s.orders.map(o => o.id === orderId ? { ...o, tableId: toTableId, tableName: toTable.name, updatedAt: now() } : o),
-          kots: s.kots.map(k => k.orderId === orderId ? { ...k, tableName: toTable.name } : k),
-          currentOrder: s.currentOrder?.id === orderId ? { ...s.currentOrder, tableId: toTableId, tableName: toTable.name, updatedAt: now() } : s.currentOrder,
-          selectedTableId: s.selectedTableId === fromTableId ? toTableId : s.selectedTableId,
-          auditLogs: addAudit(s, 'table.transferred', 'restaurant_table', `Transferred order from ${fromTable.name} to ${toTable.name}`, orderId),
-        }))
+        if (!fromTable || fromTableId === toTableId || !toTable || toTable.status !== 'available' || toTable.activeOrderId) return false
+
+        const sourceCart = state.selectedTableId === fromTableId && state.activeOrderType === 'dine_in' && state.cart.length > 0
+          ? state.cart
+          : state.savedCarts[fromTableId] ?? []
+        const targetCart = state.selectedTableId === toTableId && state.activeOrderType === 'dine_in' && state.cart.length > 0
+          ? state.cart
+          : state.savedCarts[toTableId] ?? []
+        // Never silently replace a destination's parked, unsent items.
+        if (targetCart.length > 0) return false
+
+        const orderId = fromTable.activeOrderId ?? (state.currentOrder?.tableId === fromTableId ? state.currentOrder.id : undefined)
+        const sourceOrder = orderId
+          ? state.orders.find(order => order.id === orderId) ?? (state.currentOrder?.id === orderId ? state.currentOrder : undefined)
+          : undefined
+        if (!sourceOrder && sourceCart.length === 0) return false
+
+        const timestamp = now()
+        let movedOrder: Order
+        if (sourceOrder) {
+          movedOrder = { ...sourceOrder, tableId: toTableId, tableName: toTable.name, updatedAt: timestamp }
+        } else {
+          const createdOrderId = newId('ord')
+          movedOrder = {
+            id: createdOrderId,
+            orderUuid: createdOrderId,
+            version: 1,
+            isClosed: false,
+            outletId: state.outlet.id,
+            orderNo: orderNo(state.orders),
+            businessDate: today(),
+            type: 'dine_in',
+            status: 'running',
+            tableId: toTableId,
+            tableName: toTable.name,
+            cashierUserId: 'system',
+            cashierName: 'Operator',
+            subtotalPaise: 0,
+            discountPaise: 0,
+            taxPaise: 0,
+            chargePaise: 0,
+            totalPaise: 0,
+            paidPaise: 0,
+            paymentStatus: 'unpaid',
+            createdAt: timestamp,
+            updatedAt: timestamp,
+          }
+        }
+
+        set(s => {
+          const savedCarts = { ...s.savedCarts }
+          delete savedCarts[fromTableId]
+          if (sourceCart.length > 0) savedCarts[toTableId] = sourceCart
+          else delete savedCarts[toTableId]
+
+          const movedOrderIsStored = s.orders.some(order => order.id === movedOrder.id)
+          return {
+            tables: s.tables.map(t => {
+              if (t.id === fromTableId) return { ...t, status: 'available' as TableStatus, activeOrderId: undefined }
+              if (t.id === toTableId) return { ...t, status: fromTable.status === 'available' ? 'occupied' as TableStatus : fromTable.status, activeOrderId: movedOrder.id }
+              return t
+            }),
+            orders: movedOrderIsStored
+              ? s.orders.map(order => order.id === movedOrder.id ? movedOrder : order)
+              : [movedOrder, ...s.orders],
+            kots: s.kots.map(kot => orderId && kot.orderId === orderId ? { ...kot, tableName: toTable.name } : kot),
+            savedCarts,
+            cart: s.selectedTableId === fromTableId || s.selectedTableId === toTableId ? sourceCart : s.cart,
+            currentOrder: s.currentOrder?.id === movedOrder.id || (!s.currentOrder && s.selectedTableId === fromTableId)
+              ? movedOrder
+              : s.currentOrder,
+            selectedTableId: s.selectedTableId === fromTableId ? toTableId : s.selectedTableId,
+            auditLogs: addAudit(s, 'table.transferred', 'restaurant_table', `Transferred order from ${fromTable.name} to ${toTable.name}`, movedOrder.id),
+          }
+        })
         return true
       },
 

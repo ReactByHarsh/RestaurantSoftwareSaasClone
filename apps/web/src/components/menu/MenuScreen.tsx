@@ -1,11 +1,14 @@
 import { useMemo, useRef, useState } from 'react'
-import { ChefHat, ChevronLeft, ChevronRight, Download, Edit2, FileDown, FileText, Percent, Plus, Search, Trash2, Upload } from 'lucide-react'
+import { ChefHat, ChevronLeft, ChevronRight, Download, Edit2, FileDown, FileText, Globe, Loader2, Percent, Plus, Search, Trash2, Upload } from 'lucide-react'
 import type { MenuCategory, MenuItem, ProductUsageType, RecipeItem, StockUnit } from '../../lib/types'
 import { formatPaise } from '../../lib/money'
 import { useUIStore } from '../../store/uiStore'
 import { useBillingStore } from '../../store/billingStore'
 import { clsx } from 'clsx'
 import { convertRecipeQuantity, exportProducts, generateTemplate, parseCsvRows, parseRecipeField } from '../../lib/csv'
+import { fetchMenuItemImageUrl, MENU_IMAGE_ACCEPT, MENU_IMAGE_FORMATS_LABEL, readMenuImageFile } from '../../lib/menuItemImages'
+import MenuItemThumb from './MenuItemThumb'
+import FetchMenuImagesModal from './FetchMenuImagesModal'
 
 const PAGE_SIZE = 25
 const UNITS: StockUnit[] = ['kg', 'g', 'l', 'ml', 'pcs', 'nos', 'plate', 'portion']
@@ -66,6 +69,7 @@ export default function MenuScreen() {
     addInventoryItem,
     addMenuItem,
     updateMenuItem,
+    applyMenuItemImages,
     deleteMenuItem,
     updateCategory,
   } = useBillingStore()
@@ -77,11 +81,28 @@ export default function MenuScreen() {
   const [showItemModal, setShowItemModal] = useState(false)
   const [showTaxModal, setShowTaxModal] = useState(false)
   const [showBillingRuleModal, setShowBillingRuleModal] = useState(false)
+  const [showImageFetch, setShowImageFetch] = useState(false)
   const [editingItem, setEditingItem] = useState<MenuItem | null>(null)
+  const [imagePreview, setImagePreview] = useState('')
+  const [imageBusy, setImageBusy] = useState(false)
   const [recipeItem, setRecipeItem] = useState<MenuItem | null>(null)
   const [draftRecipe, setDraftRecipe] = useState<RecipeItem[]>([])
   const [recipeIngredientName, setRecipeIngredientName] = useState('')
   const fileInputRef = useRef<HTMLInputElement>(null)
+
+  const openItemModal = (item: MenuItem | null) => {
+    setEditingItem(item)
+    setImagePreview(item?.imageUrl ?? '')
+    setImageBusy(false)
+    setShowItemModal(true)
+  }
+
+  const closeItemModal = () => {
+    setShowItemModal(false)
+    setEditingItem(null)
+    setImagePreview('')
+    setImageBusy(false)
+  }
 
   const categoriesById = useMemo(() => new Map(categories.map(category => [category.id, category])), [categories])
   const parentCategories = useMemo(() => categories.filter(category => !category.parentId && category.isActive), [categories])
@@ -213,6 +234,40 @@ export default function MenuScreen() {
     addToast('success', `Tax set to ${taxPercent}% for ${updatedProducts} product${updatedProducts === 1 ? '' : 's'}`)
   }
 
+  const handleImageSelect = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0]
+    event.target.value = ''
+    if (!file) return
+    try {
+      setImagePreview(await readMenuImageFile(file))
+      addToast('success', 'Product image attached')
+    } catch (error) {
+      addToast('error', error instanceof Error ? error.message : 'Could not read the selected image')
+    }
+  }
+
+  const handleFetchItemImage = async (event: React.MouseEvent<HTMLButtonElement>) => {
+    const form = event.currentTarget.closest('form')
+    const name = form?.querySelector<HTMLInputElement>('input[name="name"]')?.value.trim() || editingItem?.name || ''
+    if (!name) {
+      addToast('warning', 'Enter a product name before fetching an image')
+      return
+    }
+    if (imageBusy) return
+    setImageBusy(true)
+    try {
+      const url = await fetchMenuItemImageUrl(name)
+      if (url) {
+        setImagePreview(url)
+        addToast('success', `Image found for ${name}`)
+      } else {
+        addToast('warning', 'No close image match found. Try a clearer name or paste an image link.')
+      }
+    } finally {
+      setImageBusy(false)
+    }
+  }
+
   const handleSaveItem = (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault()
     const fd = new FormData(e.currentTarget)
@@ -292,6 +347,11 @@ export default function MenuScreen() {
     const productType = String(fd.get('productType') ?? 'sale_only') as ProductUsageType
     const primaryUnit = String(fd.get('primaryUnit') ?? 'pcs') as StockUnit
     const taxType = String(fd.get('taxType') ?? 'GST') as 'GST' | 'VAT' | 'None'
+    const imageUrl = imagePreview.trim()
+    if (imageUrl && !imageUrl.startsWith('data:image/') && !/^https?:\/\//i.test(imageUrl)) {
+      addToast('error', 'Image link must start with https:// or upload an image file')
+      return
+    }
 
     const newItem: MenuItem = {
       id: editingItem?.id || '',
@@ -301,6 +361,7 @@ export default function MenuScreen() {
       shortCode: shortCode || undefined,
       barcode: barcode || undefined,
       description: String(fd.get('description') ?? '').trim() || undefined,
+      imageUrl: imageUrl || undefined,
       productType,
       itemType: fd.get('itemType') as 'veg' | 'nonveg' | 'egg' | 'other',
       pricePaise,
@@ -343,8 +404,7 @@ export default function MenuScreen() {
       addMenuItem(newItem)
       addToast('success', 'New product added successfully')
     }
-    setShowItemModal(false)
-    setEditingItem(null)
+    closeItemModal()
   }
 
   const handleImportCsv = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -706,13 +766,16 @@ export default function MenuScreen() {
           <button onClick={() => fileInputRef.current?.click()} className="flex items-center gap-1.5 px-3 py-1.5 border border-emerald-200 bg-emerald-50 text-emerald-700 hover:bg-emerald-100 rounded-lg text-xs font-bold transition-colors">
             <Upload size={14} /> Import
           </button>
+          <button onClick={() => setShowImageFetch(true)} className="flex items-center gap-1.5 px-3 py-1.5 border border-sky-200 bg-sky-50 text-sky-700 hover:bg-sky-100 rounded-lg text-xs font-bold transition-colors">
+            <Globe size={14} /> Web Images
+          </button>
           <button onClick={() => setShowBillingRuleModal(true)} className="flex items-center gap-1.5 px-3 py-1.5 border border-fuchsia-200 bg-fuchsia-50 text-fuchsia-700 hover:bg-fuchsia-100 rounded-lg text-xs font-bold transition-colors">
             <FileText size={14} /> Bill Rules
           </button>
           <button onClick={() => setShowTaxModal(true)} className="flex items-center gap-1.5 px-3 py-1.5 border border-violet-200 bg-violet-50 text-violet-700 hover:bg-violet-100 rounded-lg text-xs font-bold transition-colors">
             <Percent size={14} /> Set Tax
           </button>
-          <button onClick={() => { setEditingItem(null); setShowItemModal(true) }} className="flex items-center gap-1.5 px-4 py-1.5 bg-primary text-white rounded-lg text-xs font-black hover:bg-primary-dark transition-colors shadow-sm ml-2">
+          <button onClick={() => openItemModal(null)} className="flex items-center gap-1.5 px-4 py-1.5 bg-primary text-white rounded-lg text-xs font-black hover:bg-primary-dark transition-colors shadow-sm ml-2">
             <Plus size={16} strokeWidth={2.5} /> ADD ITEM
           </button>
         </div>
@@ -774,7 +837,12 @@ export default function MenuScreen() {
                     <tr key={item.id} className={clsx('hover:bg-blue-50/30 transition-colors', !item.isAvailable && 'opacity-60 bg-slate-50/50')}>
                       <td className="px-3 py-2 text-[11px] font-bold text-slate-400 border-r border-slate-100 text-center">{globalIndex}</td>
                       <td className="px-3 py-2 text-xs font-bold text-slate-600 border-r border-slate-100">{item.barcode || item.shortCode || '-'}</td>
-                      <td className="px-3 py-2 text-sm font-black text-slate-800 border-r border-slate-100">{item.name}</td>
+                      <td className="px-3 py-2 text-sm font-black text-slate-800 border-r border-slate-100">
+                        <div className="flex items-center gap-2">
+                          <MenuItemThumb src={item.imageUrl} alt={item.name} className="h-9 w-9 shrink-0 rounded-lg border border-slate-200" iconSize={15} />
+                          <span className="min-w-0 truncate">{item.name}</span>
+                        </div>
+                      </td>
                       <td className="px-3 py-2 text-xs font-bold text-slate-600 border-r border-slate-100">{categoryLabel}</td>
                       <td className="px-3 py-2 text-xs font-bold text-slate-600 border-r border-slate-100">{productTypeLabel(item.productType)}</td>
                       <td className="px-3 py-2 border-r border-slate-100">
@@ -800,7 +868,7 @@ export default function MenuScreen() {
                       </td>
                       <td className="px-3 py-2 text-center">
                         <div className="flex justify-center gap-1">
-                          <button onClick={() => { setEditingItem(item); setShowItemModal(true) }} className="p-1.5 text-slate-400 hover:text-blue-600 hover:bg-blue-50 rounded transition-colors" title="Edit product">
+                          <button onClick={() => openItemModal(item)} className="p-1.5 text-slate-400 hover:text-blue-600 hover:bg-blue-50 rounded transition-colors" title="Edit product">
                             <Edit2 size={14} strokeWidth={2.5} />
                           </button>
                           <button onClick={() => openRecipe(item)} className="p-1.5 text-slate-400 hover:text-amber-600 hover:bg-amber-50 rounded transition-colors" title="Recipe setup">
@@ -838,7 +906,7 @@ export default function MenuScreen() {
       {showItemModal && (
         <div className="fixed inset-0 z-50 bg-slate-900/40 backdrop-blur-sm flex items-center justify-center p-4 animate-fade-in">
           <div className="bg-white rounded-2xl shadow-2xl w-full max-w-5xl max-h-[92dvh] overflow-hidden animate-slide-in-up border border-slate-100 flex flex-col">
-            <ModalHeader title={editingItem ? 'Edit Product Details' : 'Create Product Details'} onClose={() => { setShowItemModal(false); setEditingItem(null) }} />
+            <ModalHeader title={editingItem ? 'Edit Product Details' : 'Create Product Details'} onClose={closeItemModal} />
             <form onSubmit={handleSaveItem} className="p-5 space-y-4 overflow-y-auto">
               <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
                 <Field label="Name" className="md:col-span-2">
@@ -971,6 +1039,53 @@ export default function MenuScreen() {
                 </Field>
               </div>
 
+              <SectionTitle title="Product image" />
+              <div className="grid grid-cols-1 gap-3 md:grid-cols-[170px_1fr]">
+                <MenuItemThumb
+                  src={imagePreview || undefined}
+                  alt="Product image preview"
+                  className="h-[120px] w-full rounded-xl border-2 border-dashed border-slate-200"
+                  iconSize={30}
+                />
+                <div className="space-y-2">
+                  <Field label="Image link">
+                    <input
+                      value={imagePreview.startsWith('data:') ? '' : imagePreview}
+                      onChange={(event) => setImagePreview(event.target.value.trim())}
+                      placeholder={imagePreview.startsWith('data:') ? 'Uploaded image file attached' : 'https://example.com/product.jpg'}
+                      className={FIELD_CLASS}
+                    />
+                  </Field>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <label className="inline-flex cursor-pointer items-center gap-1.5 rounded-xl bg-primary px-3 py-2 text-xs font-black text-white shadow-sm transition-colors hover:bg-primary-dark">
+                      <Upload size={14} /> Upload image
+                      <input type="file" accept={MENU_IMAGE_ACCEPT} onChange={handleImageSelect} className="hidden" />
+                    </label>
+                    <button
+                      type="button"
+                      onClick={handleFetchItemImage}
+                      disabled={imageBusy}
+                      className="inline-flex items-center gap-1.5 rounded-xl border border-sky-200 bg-sky-50 px-3 py-2 text-xs font-black text-sky-700 transition-colors hover:bg-sky-100 disabled:cursor-wait disabled:opacity-60"
+                    >
+                      {imageBusy ? <Loader2 size={14} className="animate-spin" /> : <Globe size={14} />}
+                      {imageBusy ? 'Searching...' : 'Fetch from web'}
+                    </button>
+                    {imagePreview && (
+                      <button
+                        type="button"
+                        onClick={() => setImagePreview('')}
+                        className="inline-flex items-center gap-1.5 rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-xs font-black text-rose-600 transition-colors hover:bg-rose-100"
+                      >
+                        <Trash2 size={14} /> Remove
+                      </button>
+                    )}
+                  </div>
+                  <p className="text-[11px] font-bold text-slate-400">
+                    Supported: {MENU_IMAGE_FORMATS_LABEL} · max 2 MB. Uploads are resized automatically. Web links must start with https://.
+                  </p>
+                </div>
+              </div>
+
               <div className="flex flex-wrap items-center gap-4">
                 {[
                   ['isFavorite', 'Favorite', editingItem?.isFavorite],
@@ -985,7 +1100,7 @@ export default function MenuScreen() {
               </div>
 
               <div className="pt-3 flex gap-3">
-                <button type="button" onClick={() => { setShowItemModal(false); setEditingItem(null) }} className="flex-1 py-2.5 bg-slate-100 text-slate-600 text-sm font-black rounded-xl hover:bg-slate-200 transition-colors">
+                <button type="button" onClick={closeItemModal} className="flex-1 py-2.5 bg-slate-100 text-slate-600 text-sm font-black rounded-xl hover:bg-slate-200 transition-colors">
                   CANCEL
                 </button>
                 <button type="submit" className="flex-1 py-2.5 bg-primary text-white text-sm font-black rounded-xl hover:bg-primary-dark transition-all shadow-md shadow-primary/30">
@@ -995,6 +1110,14 @@ export default function MenuScreen() {
             </form>
           </div>
         </div>
+      )}
+
+      {showImageFetch && (
+        <FetchMenuImagesModal
+          items={items}
+          onApply={applyMenuItemImages}
+          onClose={() => setShowImageFetch(false)}
+        />
       )}
 
       {recipeItem && (

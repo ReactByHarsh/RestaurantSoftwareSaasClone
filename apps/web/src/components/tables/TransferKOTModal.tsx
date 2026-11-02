@@ -1,6 +1,6 @@
 import { useState, useMemo } from 'react'
 import { X, ArrowRightLeft } from 'lucide-react'
-import type { RestaurantTable, KOT } from '../../lib/types'
+import type { RestaurantTable } from '../../lib/types'
 import { useBillingStore } from '../../store/billingStore'
 import { useUIStore } from '../../store/uiStore'
 
@@ -11,7 +11,7 @@ interface Props {
 }
 
 export default function TransferKOTModal({ sourceTable, onClose, onSuccess }: Props) {
-  const { tables, getActiveKOTs, transferKOTs } = useBillingStore()
+  const { tables, savedCarts, cart, selectedTableId, activeOrderType, getActiveKOTs, transferKOTs, transferTable } = useBillingStore()
   const { addToast } = useUIStore()
   
   const [targetTableId, setTargetTableId] = useState<string>('')
@@ -27,6 +27,18 @@ export default function TransferKOTModal({ sourceTable, onClose, onSuccess }: Pr
   const availableTables = useMemo(() => {
     return tables.filter(t => t.id !== sourceTable.id).sort((a, b) => a.sortOrder - b.sortOrder)
   }, [tables, sourceTable.id])
+
+  const unsentItems = selectedTableId === sourceTable.id && activeOrderType === 'dine_in' && cart.length > 0
+    ? cart
+    : savedCarts[sourceTable.id] ?? []
+  const targetTable = tables.find(table => table.id === targetTableId)
+  const targetHasUnsentItems = targetTable
+    ? (selectedTableId === targetTable.id && activeOrderType === 'dine_in' && cart.length > 0)
+      || (savedCarts[targetTable.id]?.length ?? 0) > 0
+    : false
+  const canTransferWholeTable = Boolean(
+    targetTable && targetTable.status === 'available' && !targetTable.activeOrderId && !targetHasUnsentItems,
+  )
 
   const handleToggleKOT = (kotId: string) => {
     const next = new Set(selectedKotIds)
@@ -65,6 +77,24 @@ export default function TransferKOTModal({ sourceTable, onClose, onSuccess }: Pr
     }
   }
 
+  const handleTransferWholeTable = () => {
+    if (!targetTableId) {
+      addToast('error', 'Please select a destination table')
+      return
+    }
+    if (!canTransferWholeTable) {
+      addToast('error', 'Choose an available table without an active order or unsent items')
+      return
+    }
+
+    if (transferTable(sourceTable.id, targetTableId)) {
+      addToast('success', `Table transferred to ${targetTable?.name}`)
+      onSuccess()
+    } else {
+      addToast('error', 'Could not transfer this table. Check that the destination is empty.')
+    }
+  }
+
   return (
     <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4">
       <div className="bg-white rounded-xl shadow-2xl w-full max-w-2xl overflow-hidden flex flex-col max-h-[90vh]">
@@ -95,12 +125,23 @@ export default function TransferKOTModal({ sourceTable, onClose, onSuccess }: Pr
                 onChange={(e) => setTargetTableId(e.target.value)}
                 className="w-full sm:w-1/2 px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-primary/20 focus:border-primary outline-none text-slate-700 font-medium"
               >
-                <option value="">--Select Counter--</option>
+                <option value="">--Select Table--</option>
                 {availableTables.map(t => (
                   <option key={t.id} value={t.id}>{t.name} {t.status !== 'available' ? '(Occupied)' : ''}</option>
                 ))}
               </select>
             </div>
+
+            {unsentItems.length > 0 && (
+              <div className="rounded-xl border border-blue-200 bg-blue-50 px-4 py-3">
+                <p className="text-sm font-black text-blue-900">
+                  {unsentItems.length} unsent {unsentItems.length === 1 ? 'item' : 'items'} on {sourceTable.name}
+                </p>
+                <p className="mt-1 text-xs font-medium text-blue-800">
+                  These items have not been sent as a KOT. Use “Transfer full table” to move the order and these items together.
+                </p>
+              </div>
+            )}
 
             {/* KOT List */}
             <div>
@@ -124,7 +165,7 @@ export default function TransferKOTModal({ sourceTable, onClose, onSuccess }: Pr
                     {orderKOTs.length === 0 ? (
                       <tr>
                         <td colSpan={3} className="py-8 text-center text-slate-500 font-medium bg-slate-50/50">
-                          No active KOTs to transfer.
+                          No active KOTs to transfer. You can still transfer the full table, including unsent items.
                         </td>
                       </tr>
                     ) : (
@@ -167,13 +208,25 @@ export default function TransferKOTModal({ sourceTable, onClose, onSuccess }: Pr
           >
             Cancel
           </button>
-          <button
-            onClick={handleTransfer}
-            className="px-8 py-2.5 bg-amber-500 text-white font-bold rounded-xl shadow-lg shadow-amber-500/30 hover:bg-amber-600 transition-colors flex items-center gap-2"
-          >
-            <ArrowRightLeft size={18} strokeWidth={3} />
-            Transfer
-          </button>
+          <div className="flex flex-wrap justify-end gap-3">
+            <button
+              onClick={handleTransfer}
+              disabled={selectedKotIds.size === 0}
+              className="px-5 py-2.5 bg-amber-500 text-white font-bold rounded-xl shadow-lg shadow-amber-500/30 hover:bg-amber-600 transition-colors flex items-center gap-2 disabled:cursor-not-allowed disabled:opacity-45"
+            >
+              <ArrowRightLeft size={18} strokeWidth={3} />
+              Transfer selected KOTs
+            </button>
+            <button
+              onClick={handleTransferWholeTable}
+              disabled={!canTransferWholeTable}
+              className="px-5 py-2.5 bg-blue-600 text-white font-bold rounded-xl shadow-lg shadow-blue-600/25 hover:bg-blue-700 transition-colors flex items-center gap-2 disabled:cursor-not-allowed disabled:opacity-45"
+              title={targetHasUnsentItems ? 'Destination table has unsent items' : 'Move the entire table order, including unsent items'}
+            >
+              <ArrowRightLeft size={18} strokeWidth={3} />
+              Transfer full table
+            </button>
+          </div>
         </div>
       </div>
     </div>

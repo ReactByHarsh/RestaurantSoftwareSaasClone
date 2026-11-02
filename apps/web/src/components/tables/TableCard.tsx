@@ -209,15 +209,14 @@ export default function TableCard({ table, activeOrder, compact = false, canMana
             <ArrowRightLeft size={16} className="mb-1 text-blue-600" strokeWidth={2.5}/>
             <span className="text-[8px] font-black uppercase text-slate-600">Trnsfr</span>
           </button>
-          {isSharedTable ? (
+          <button onClick={handleShareClick} disabled={!onShare} className="flex flex-col items-center justify-center w-14 py-2 hover:bg-slate-50 rounded-lg transition-colors disabled:opacity-30">
+            <GitMerge size={16} className="mb-1 text-violet-600" strokeWidth={2.5}/>
+            <span className="text-[8px] font-black uppercase text-slate-600">Split</span>
+          </button>
+          {isSharedTable && (
             <button onClick={handleRemoveClick} disabled={!onRemove} className="flex flex-col items-center justify-center w-14 py-2 hover:bg-slate-50 rounded-lg transition-colors disabled:opacity-30">
               <X size={16} className="mb-1 text-red-600" strokeWidth={2.5}/>
               <span className="text-[8px] font-black uppercase text-slate-600">Remove</span>
-            </button>
-          ) : (
-            <button onClick={handleShareClick} disabled={!onShare} className="flex flex-col items-center justify-center w-14 py-2 hover:bg-slate-50 rounded-lg transition-colors disabled:opacity-30">
-              <GitMerge size={16} className="mb-1 text-violet-600" strokeWidth={2.5}/>
-              <span className="text-[8px] font-black uppercase text-slate-600">Share</span>
             </button>
           )}
           <button onClick={handleEmpty} className="flex flex-col items-center justify-center w-14 py-2 hover:bg-slate-50 rounded-lg transition-colors">

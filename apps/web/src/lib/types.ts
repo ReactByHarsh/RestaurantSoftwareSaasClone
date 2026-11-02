@@ -96,6 +96,8 @@ export interface MenuItem {
   shortCode?: string
   barcode?: string
   description?: string
+  /** Uploaded product image (data URL) or a web image link. */
+  imageUrl?: string
   productType?: ProductUsageType
   itemType: ItemType
   pricePaise: number

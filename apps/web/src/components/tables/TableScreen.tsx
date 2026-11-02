@@ -15,6 +15,7 @@ import FloorTabs from './FloorTabs'
 import TableCard from './TableCard'
 import BillingScreen from '../billing/BillingScreen'
 import TransferKOTModal from './TransferKOTModal'
+import SplitTableModal from './SplitTableModal'
 
 const SECTION_PRESETS = ['Ground Floor', 'AC Section', 'Non-AC Section', 'Family', 'Rooftop', 'Outdoor']
 
@@ -39,7 +40,7 @@ export default function TableScreen() {
   } = useUIStore()
   const { user } = useAuthStore()
   const {
-    tables, orders, floors,
+    tables, orders, floors, savedCarts,
     addFloor, updateFloor, deleteFloor,
     addTable, updateTable, deleteTable,
     transferTable, mergeTable, getActiveKOTs, closeTableView,
@@ -60,6 +61,7 @@ export default function TableScreen() {
   const [tableOpModal, setTableOpModal] = useState<TableModalType>(null)
   const [sourceTable, setSourceTable] = useState<RestaurantTable | null>(null)
   const [targetTableId, setTargetTableId] = useState<string>('')
+  const [splitTableTarget, setSplitTableTarget] = useState<RestaurantTable | null>(null)
 
   const canManageTables = user ? hasPermission(user.role, 'tables:manage') : false
   const canEditTables = canManageTables && editMode
@@ -242,37 +244,44 @@ export default function TableScreen() {
     }
   }
 
-  const handleShareTable = (table: RestaurantTable) => {
-    // Determine the base name and current parts
+  const getSplitInfo = (table: RestaurantTable) => {
     const match = table.name.trim().match(/^(.*?)(?:\s+\(([a-z])\))?$/)
-    if (!match) return
+    if (!match) return null
     const baseName = match[1].trim()
     const currentLetter = match[2]
+    const letters = new Set<string>()
+    tables.forEach(candidate => {
+      if (candidate.id === table.id || candidate.floorId !== table.floorId) return
+      const name = candidate.name.trim()
+      if (!name.startsWith(`${baseName} (`)) return
+      const letterMatch = name.match(/\(([a-z])\)$/)
+      if (letterMatch) letters.add(letterMatch[1])
+    })
+    letters.add(currentLetter ?? 'a')
+    return { baseName, currentLetter, letters, parts: letters.size }
+  }
 
+  const splitInfo = splitTableTarget ? getSplitInfo(splitTableTarget) : null
+
+  const handleSplitTable = (parts: number) => {
+    if (!splitTableTarget || !splitInfo) return
+    const { baseName, currentLetter, letters } = splitInfo
     if (!currentLetter) {
-      // First time sharing: rename original to (a) and create (b)
-      updateTable(table.id, { name: `${baseName} (a)` })
-      addTable({ floorId: table.floorId, name: `${baseName} (b)`, seats: table.seats })
-      addToast('success', 'Table shared')
-    } else {
-      // Already shared, find the next available letter
-      const existingTables = tables.filter(t => t.name.startsWith(baseName + ' ('))
-      const letters = existingTables.map(t => {
-        const m = t.name.match(/\(([a-z])\)$/)
-        return m ? m[1] : ''
-      }).filter(Boolean).sort()
-      
-      let nextLetter = 'b'
-      for (let i = 0; i < 26; i++) {
-        const char = String.fromCharCode(97 + i)
-        if (!letters.includes(char)) {
-          nextLetter = char
-          break
-        }
-      }
-      addTable({ floorId: table.floorId, name: `${baseName} (${nextLetter})`, seats: table.seats })
-      addToast('success', 'Table shared')
+      updateTable(splitTableTarget.id, { name: `${baseName} (a)` })
     }
+    const created: string[] = []
+    for (let index = 0; index < Math.min(parts, 26); index++) {
+      const letter = String.fromCharCode(97 + index)
+      if (letters.has(letter)) continue
+      addTable({ floorId: splitTableTarget.floorId, name: `${baseName} (${letter})`, seats: splitTableTarget.seats })
+      created.push(letter)
+    }
+    const total = letters.size + created.length
+    addToast(
+      created.length > 0 ? 'success' : 'warning',
+      created.length > 0 ? `${baseName} split into ${total} tables` : `${baseName} already has ${total} tables`,
+    )
+    setSplitTableTarget(null)
   }
 
   const handleRemoveTable = (table: RestaurantTable) => {
@@ -400,9 +409,11 @@ export default function TableScreen() {
                 floorBadge={floorColorScheme?.badge}
                 floorName={floors.find(f => f.id === table.floorId)?.name}
                 onEdit={() => setEditingTable(table)}
-                onTransfer={canTransfer && table.activeOrderId ? () => openTransfer(table) : undefined}
+                onTransfer={canTransfer && (table.activeOrderId || savedCarts[table.id]?.length)
+                  ? () => openTransfer(table)
+                  : undefined}
                 onMerge={canMerge && table.activeOrderId ? () => openMerge(table) : undefined}
-                onShare={() => handleShareTable(table)}
+                onShare={() => setSplitTableTarget(table)}
                 onRemove={() => handleRemoveTable(table)}
                 onCheckout={table.activeOrderId ? () => setCheckoutTableId(table.id) : undefined}
                 onClick={() => setBillingModalTableId(table.id)}
@@ -487,6 +498,17 @@ export default function TableScreen() {
           sourceTable={sourceTable} 
           onClose={() => setTableOpModal(null)} 
           onSuccess={() => setTableOpModal(null)} 
+        />
+      )}
+
+      {/* ── SPLIT TABLE MODAL ─────────────────────────────────────── */}
+      {splitTableTarget && splitInfo && (
+        <SplitTableModal
+          table={splitTableTarget}
+          baseName={splitInfo.baseName}
+          currentParts={splitInfo.parts}
+          onClose={() => setSplitTableTarget(null)}
+          onSplit={handleSplitTable}
         />
       )}
 
