@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { buildImageSearchQueries, imageSearchRelevance, pickCommonsImage } from './menuItemImages'
+import { buildImageQueryHints, buildImageSearchQueries, enlargeImageUrl, imageSearchRelevance, pickCommonsImage } from './menuItemImages'
 
 describe('menu item image lookup', () => {
   it('accepts close Commons matches', () => {
@@ -41,5 +41,17 @@ describe('menu item image lookup', () => {
     expect(buildImageSearchQueries('Antiquity Nip')).toContain('Antiquity')
     expect(buildImageSearchQueries('100 Pipers 90 ml')).toContain('100 Pipers')
     expect(buildImageSearchQueries('Chicken 65')[0]).toBe('Chicken 65')
+  })
+
+  it('uses category and subcategory hints to disambiguate brands', () => {
+    expect(buildImageQueryHints('American Pride Nip', { category: 'Bar', subcategory: 'Whisky' })).toEqual(['whisky'])
+    expect(buildImageSearchQueries('American Pride Nip', { category: 'Bar', subcategory: 'Whisky' })[0]).toBe('American Pride Nip whisky')
+    expect(buildImageSearchQueries('Butter scotch cone', { category: 'Food', subcategory: 'Ice Cream' })[0]).toBe('Butter scotch cone Ice Cream')
+    expect(buildImageQueryHints('Curd', { category: 'Food', subcategory: 'Cold & Hot Bev' })).toEqual([])
+  })
+
+  it('requests a larger Bing thumbnail for the image preview', () => {
+    expect(enlargeImageUrl('https://ts1.mm.bing.net/th?id=OIP.abc&pid=15.1')).toBe('https://ts1.mm.bing.net/th?id=OIP.abc&pid=15.1&w=1200&h=1200&c=7&rs=1&pid=ImgDetMain')
+    expect(enlargeImageUrl('https://upload.wikimedia.org/photo.jpg')).toBe('https://upload.wikimedia.org/photo.jpg')
   })
 })

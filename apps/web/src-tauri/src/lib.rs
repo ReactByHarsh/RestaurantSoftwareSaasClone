@@ -1976,6 +1976,62 @@ fn print_native_job(payload: NativePrintPayload) -> Result<(), String> {
 }
 
 #[tauri::command]
+async fn search_web_images(query: String, limit: Option<u32>) -> Result<Vec<String>, String> {
+    let trimmed = query.trim();
+    if trimmed.is_empty() {
+        return Ok(Vec::new());
+    }
+    let limit = limit.unwrap_or(8).clamp(1, 20) as usize;
+    let client = reqwest::Client::builder()
+        .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
+        .timeout(Duration::from_secs(12))
+        .build()
+        .map_err(to_error)?;
+    let response = client
+        .get("https://www.bing.com/images/search")
+        .query(&[
+            ("q", trimmed),
+            ("form", "HDRSC2"),
+            ("first", "1"),
+            ("adlt", "moderate"),
+        ])
+        .header("Accept-Language", "en-US,en;q=0.9")
+        .send()
+        .await
+        .map_err(to_error)?;
+    if !response.status().is_success() {
+        return Err(format!("Image search failed with status {}", response.status()));
+    }
+    let html = response.text().await.map_err(to_error)?;
+    Ok(extract_bing_image_urls(&html, limit))
+}
+
+fn extract_bing_image_urls(html: &str, limit: usize) -> Vec<String> {
+    let mut urls: Vec<String> = Vec::new();
+    // Bing embeds image metadata as HTML-escaped JSON. Thumbnail URLs are
+    // small, stable and hotlink-friendly, so prefer them over the originals.
+    for marker in ["&quot;turl&quot;:&quot;", "&quot;murl&quot;:&quot;"] {
+        let mut rest = html;
+        while let Some(index) = rest.find(marker) {
+            rest = &rest[index + marker.len()..];
+            let Some(end) = rest.find("&quot;") else { break };
+            let url = rest[..end].replace("&amp;", "&").replace("\\/", "/");
+            if url.starts_with("https://") && !urls.contains(&url) {
+                urls.push(url);
+            }
+            if urls.len() >= limit {
+                break;
+            }
+            rest = &rest[end..];
+        }
+        if !urls.is_empty() {
+            break;
+        }
+    }
+    urls
+}
+
+#[tauri::command]
 fn get_lan_server_status(
     state: State<'_, Arc<Mutex<LanServerStatusPayload>>>,
 ) -> Result<LanServerStatusPayload, String> {
@@ -2500,7 +2556,8 @@ pub fn run() {
             create_daily_local_backup,
             get_lan_server_status,
             list_native_printers,
-            print_native
+            print_native,
+            search_web_images
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
@@ -2509,6 +2566,18 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn extracts_bing_thumbnail_urls() {
+        let html = r#"<a m="{&quot;murl&quot;:&quot;https://shop.example/full.jpg&quot;,&quot;turl&quot;:&quot;https://ts1.mm.bing.net/th?id=OIP.abc&amp;pid=15.1&quot;}" another="{&quot;turl&quot;:&quot;https://ts2.mm.bing.net/th?id=OIP.def&amp;pid=15.1&quot;}"></a>"#;
+        assert_eq!(
+            extract_bing_image_urls(html, 5),
+            vec![
+                "https://ts1.mm.bing.net/th?id=OIP.abc&pid=15.1".to_string(),
+                "https://ts2.mm.bing.net/th?id=OIP.def&pid=15.1".to_string(),
+            ]
+        );
+    }
 
     #[test]
     fn creates_a_verified_restorable_sqlite_backup() {

@@ -1,12 +1,12 @@
 import { useMemo, useRef, useState } from 'react'
-import { ChefHat, ChevronLeft, ChevronRight, Download, Edit2, FileDown, FileText, Globe, Loader2, Percent, Plus, Search, Trash2, Upload } from 'lucide-react'
+import { ChefHat, ChevronLeft, ChevronRight, Download, Edit2, FileDown, FileText, Globe, Loader2, Percent, Plus, Search, Trash2, Upload, X } from 'lucide-react'
 import type { MenuCategory, MenuItem, ProductUsageType, RecipeItem, StockUnit } from '../../lib/types'
 import { formatPaise } from '../../lib/money'
 import { useUIStore } from '../../store/uiStore'
 import { useBillingStore } from '../../store/billingStore'
 import { clsx } from 'clsx'
 import { convertRecipeQuantity, exportProducts, generateTemplate, parseCsvRows, parseRecipeField } from '../../lib/csv'
-import { fetchMenuItemImageUrl, MENU_IMAGE_ACCEPT, MENU_IMAGE_FORMATS_LABEL, readMenuImageFile } from '../../lib/menuItemImages'
+import { fetchMenuItemImageUrl, enlargeImageUrl, MENU_IMAGE_ACCEPT, MENU_IMAGE_FORMATS_LABEL, readMenuImageFile } from '../../lib/menuItemImages'
 import MenuItemThumb from './MenuItemThumb'
 import FetchMenuImagesModal from './FetchMenuImagesModal'
 
@@ -82,6 +82,7 @@ export default function MenuScreen() {
   const [showTaxModal, setShowTaxModal] = useState(false)
   const [showBillingRuleModal, setShowBillingRuleModal] = useState(false)
   const [showImageFetch, setShowImageFetch] = useState(false)
+  const [imageViewer, setImageViewer] = useState<{ url: string; name: string } | null>(null)
   const [editingItem, setEditingItem] = useState<MenuItem | null>(null)
   const [imagePreview, setImagePreview] = useState('')
   const [imageBusy, setImageBusy] = useState(false)
@@ -254,9 +255,14 @@ export default function MenuScreen() {
       return
     }
     if (imageBusy) return
+    const categoryInput = form?.querySelector<HTMLInputElement>('input[name="categoryName"]')?.value.trim()
+    const subcategoryInput = form?.querySelector<HTMLInputElement>('input[name="subcategoryName"]')?.value.trim()
     setImageBusy(true)
     try {
-      const url = await fetchMenuItemImageUrl(name)
+      const url = await fetchMenuItemImageUrl(name, {
+        category: categoryInput || editingParentCategory?.name,
+        subcategory: subcategoryInput || (editingCategory?.parentId ? editingCategory.name : undefined),
+      })
       if (url) {
         setImagePreview(url)
         addToast('success', `Image found for ${name}`)
@@ -839,7 +845,14 @@ export default function MenuScreen() {
                       <td className="px-3 py-2 text-xs font-bold text-slate-600 border-r border-slate-100">{item.barcode || item.shortCode || '-'}</td>
                       <td className="px-3 py-2 text-sm font-black text-slate-800 border-r border-slate-100">
                         <div className="flex items-center gap-2">
-                          <MenuItemThumb src={item.imageUrl} alt={item.name} className="h-9 w-9 shrink-0 rounded-lg border border-slate-200" iconSize={15} />
+                          <button
+                            type="button"
+                            onClick={() => { if (item.imageUrl) setImageViewer({ url: item.imageUrl, name: item.name }) }}
+                            className={clsx('shrink-0 rounded-lg', item.imageUrl ? 'cursor-zoom-in' : 'cursor-default')}
+                            title={item.imageUrl ? 'View image' : undefined}
+                          >
+                            <MenuItemThumb src={item.imageUrl} alt={item.name} className="h-9 w-9 rounded-lg border border-slate-200" iconSize={15} />
+                          </button>
                           <span className="min-w-0 truncate">{item.name}</span>
                         </div>
                       </td>
@@ -1115,9 +1128,40 @@ export default function MenuScreen() {
       {showImageFetch && (
         <FetchMenuImagesModal
           items={items}
+          categories={categories}
           onApply={applyMenuItemImages}
           onClose={() => setShowImageFetch(false)}
         />
+      )}
+
+      {imageViewer && (
+        <div
+          className="fixed inset-0 z-[120] flex items-center justify-center bg-slate-950/80 p-4 backdrop-blur-sm"
+          onClick={() => setImageViewer(null)}
+        >
+          <div
+            className="flex max-h-[92vh] w-full max-w-4xl flex-col overflow-hidden rounded-2xl bg-white shadow-2xl"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="flex items-center justify-between gap-3 border-b border-slate-200 px-4 py-3">
+              <h3 className="truncate text-sm font-black text-slate-800">{imageViewer.name}</h3>
+              <button
+                onClick={() => setImageViewer(null)}
+                className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-slate-100 text-slate-500 hover:bg-slate-200"
+                aria-label="Close image preview"
+              >
+                <X size={16} />
+              </button>
+            </div>
+            <div className="flex min-h-[240px] flex-1 items-center justify-center bg-slate-100 p-3">
+              <img
+                src={enlargeImageUrl(imageViewer.url)}
+                alt={imageViewer.name}
+                className="max-h-[76vh] w-auto max-w-full object-contain"
+              />
+            </div>
+          </div>
+        </div>
       )}
 
       {recipeItem && (

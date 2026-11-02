@@ -1,13 +1,13 @@
-import { useRef, useState } from 'react'
+import { useMemo, useRef, useState } from 'react'
 import { CheckCircle2, Globe, Loader2, Square, X } from 'lucide-react'
-import { clsx } from 'clsx'
-import type { MenuItem } from '../../lib/types'
-import { fetchMenuItemImageUrl } from '../../lib/menuItemImages'
+import type { MenuCategory, MenuItem } from '../../lib/types'
+import { fetchMenuItemImageUrl, type MenuImageContext } from '../../lib/menuItemImages'
 import { useUIStore } from '../../store/uiStore'
 import MenuItemThumb from './MenuItemThumb'
 
 interface Props {
   items: MenuItem[]
+  categories: MenuCategory[]
   onApply: (updates: Record<string, string>) => void
   onClose: () => void
 }
@@ -18,9 +18,11 @@ interface RecentImage {
   url: string
 }
 
-export default function FetchMenuImagesModal({ items, onApply, onClose }: Props) {
+export default function FetchMenuImagesModal({ items, categories, onApply, onClose }: Props) {
   const { addToast } = useUIStore()
   const [replaceExisting, setReplaceExisting] = useState(false)
+  const [parentFilter, setParentFilter] = useState('all')
+  const [subcategoryFilter, setSubcategoryFilter] = useState('all')
   const [running, setRunning] = useState(false)
   const [stopping, setStopping] = useState(false)
   const [started, setStarted] = useState(false)
@@ -31,15 +33,40 @@ export default function FetchMenuImagesModal({ items, onApply, onClose }: Props)
   const [recent, setRecent] = useState<RecentImage[]>([])
   const cancelledRef = useRef(false)
 
-  const pending = items.filter(item => replaceExisting || !item.imageUrl).length
-  const withImages = items.filter(item => item.imageUrl).length
+  const categoryById = useMemo(() => new Map(categories.map(category => [category.id, category])), [categories])
+  const parentCategories = useMemo(
+    () => categories.filter(category => !category.parentId).sort((a, b) => a.name.localeCompare(b.name)),
+    [categories],
+  )
+  const subcategories = useMemo(
+    () => categories
+      .filter(category => category.parentId && (parentFilter === 'all' || category.parentId === parentFilter))
+      .sort((a, b) => a.name.localeCompare(b.name)),
+    [categories, parentFilter],
+  )
+
+  const scopedItems = useMemo(() => items.filter((item) => {
+    if (subcategoryFilter !== 'all') return item.categoryId === subcategoryFilter
+    if (parentFilter === 'all') return true
+    if (item.categoryId === parentFilter) return true
+    return categoryById.get(item.categoryId)?.parentId === parentFilter
+  }), [items, subcategoryFilter, parentFilter, categoryById])
+
+  const withImages = scopedItems.filter(item => item.imageUrl).length
+  const pending = scopedItems.filter(item => replaceExisting || !item.imageUrl).length
   const percent = total > 0 ? Math.round((processed / total) * 100) : 0
+
+  const imageContext = (item: MenuItem): MenuImageContext => {
+    const leaf = categoryById.get(item.categoryId)
+    const parent = leaf?.parentId ? categoryById.get(leaf.parentId) : leaf
+    return { category: parent?.name, subcategory: leaf?.parentId ? leaf.name : undefined }
+  }
 
   const handleStart = async () => {
     if (running) return
-    const targets = items.filter(item => replaceExisting || !item.imageUrl)
+    const targets = scopedItems.filter(item => replaceExisting || !item.imageUrl)
     if (targets.length === 0) {
-      addToast('warning', 'Every product already has an image. Enable replace to look them up again.', 'Product Images')
+      addToast('warning', 'Every product in this scope already has an image. Enable replace to look them up again.', 'Product Images')
       return
     }
 
@@ -66,7 +93,7 @@ export default function FetchMenuImagesModal({ items, onApply, onClose }: Props)
 
     for (const item of targets) {
       if (cancelledRef.current) break
-      const url = await fetchMenuItemImageUrl(item.name)
+      const url = await fetchMenuItemImageUrl(item.name, imageContext(item))
       processedCount += 1
       if (url) {
         batch[item.id] = url
@@ -104,10 +131,7 @@ export default function FetchMenuImagesModal({ items, onApply, onClose }: Props)
             <div className="flex h-10 w-10 items-center justify-center rounded-xl border border-sky-200 bg-sky-100 text-sky-600">
               <Globe size={20} />
             </div>
-            <div>
-              <h2 className="text-base font-black text-slate-900">Fetch product images from the web</h2>
-              <p className="text-xs font-bold text-slate-500">Look up each product name and attach the best matching image link</p>
-            </div>
+            <h2 className="text-base font-black text-slate-900">Fetch product images from the web</h2>
           </div>
           <button
             onClick={onClose}
@@ -120,10 +144,37 @@ export default function FetchMenuImagesModal({ items, onApply, onClose }: Props)
         </div>
 
         <div className="space-y-4 p-5">
+          <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+            <label className="block">
+              <span className="mb-1 block text-[10px] font-black uppercase tracking-wider text-slate-500">Category</span>
+              <select
+                value={parentFilter}
+                disabled={running}
+                onChange={(event) => { setParentFilter(event.target.value); setSubcategoryFilter('all') }}
+                className="w-full rounded-xl border-2 border-slate-200 bg-white px-3 py-2 text-sm font-bold outline-none focus:border-sky-400 focus:ring-4 focus:ring-sky-100 disabled:bg-slate-100"
+              >
+                <option value="all">All categories</option>
+                {parentCategories.map(category => <option key={category.id} value={category.id}>{category.name}</option>)}
+              </select>
+            </label>
+            <label className="block">
+              <span className="mb-1 block text-[10px] font-black uppercase tracking-wider text-slate-500">Subcategory</span>
+              <select
+                value={subcategoryFilter}
+                disabled={running}
+                onChange={(event) => setSubcategoryFilter(event.target.value)}
+                className="w-full rounded-xl border-2 border-slate-200 bg-white px-3 py-2 text-sm font-bold outline-none focus:border-sky-400 focus:ring-4 focus:ring-sky-100 disabled:bg-slate-100"
+              >
+                <option value="all">All subcategories</option>
+                {subcategories.map(category => <option key={category.id} value={category.id}>{category.name}</option>)}
+              </select>
+            </label>
+          </div>
+
           <div className="grid grid-cols-3 gap-2">
             <div className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2">
               <p className="text-[10px] font-black uppercase tracking-wider text-slate-400">Without image</p>
-              <p className="mt-1 text-xl font-black text-slate-800">{items.length - withImages}</p>
+              <p className="mt-1 text-xl font-black text-slate-800">{scopedItems.length - withImages}</p>
             </div>
             <div className="rounded-xl border border-emerald-200 bg-emerald-50 px-3 py-2">
               <p className="text-[10px] font-black uppercase tracking-wider text-emerald-600">With image</p>
@@ -148,11 +199,6 @@ export default function FetchMenuImagesModal({ items, onApply, onClose }: Props)
               <span className="mt-0.5 block text-[11px] font-semibold text-slate-400">Leave this off to only fill products without an image.</span>
             </span>
           </label>
-
-          <p className="rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-[11px] font-semibold text-amber-700">
-            Images are searched on Wikimedia Commons and Wikipedia using the product name. Only close matches are attached.
-            Large menus can take several minutes — you can stop at any time and the images found so far are saved.
-          </p>
 
           {(running || started) && (
             <div className="space-y-2 rounded-xl border border-slate-200 p-3">
@@ -200,9 +246,7 @@ export default function FetchMenuImagesModal({ items, onApply, onClose }: Props)
               </button>
               <button
                 onClick={handleStart}
-                className={clsx(
-                  'flex flex-1 items-center justify-center gap-2 rounded-xl bg-sky-600 py-2.5 text-sm font-black text-white shadow-lg shadow-sky-200 transition-colors hover:bg-sky-700',
-                )}
+                className="flex flex-1 items-center justify-center gap-2 rounded-xl bg-sky-600 py-2.5 text-sm font-black text-white shadow-lg shadow-sky-200 transition-colors hover:bg-sky-700"
               >
                 {started ? <CheckCircle2 size={16} /> : <Globe size={16} />}
                 {started ? 'Search again' : `Fetch ${pending} images`}

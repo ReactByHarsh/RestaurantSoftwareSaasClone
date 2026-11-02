@@ -1,3 +1,5 @@
+import { invoke } from '@tauri-apps/api/core'
+
 const COMMONS_ENDPOINT = 'https://commons.wikimedia.org/w/api.php'
 const WIKIPEDIA_ENDPOINT = 'https://en.wikipedia.org/w/api.php'
 const REQUEST_TIMEOUT_MS = 9000
@@ -21,6 +23,13 @@ const STOP_WORDS = new Set([
 const BLOCKED_TITLE_WORDS = /\b(logo|icon|map|diagram|chart|poster|cover|label|screenshot|document|stamp|sign|banner|template)\b/i
 const VOLUME_WORDS = /\b(nip|pint|quts|quarter|bottle|can|pcs|pc|ml|cl|litre|liter)\b/gi
 const LIQUOR_HINTS = /\b(whisky|whiskey|scotch|rum|vodka|gin|brandy|beer|wine|liquor|malt)\b/i
+const LIQUOR_WORDS = ['whisky', 'whiskey', 'scotch', 'wine', 'beer', 'rum', 'vodka', 'gin', 'brandy', 'liqueur', 'tequila']
+const GENERIC_HINTS = /^(food|bar|cold\s*&\s*hot\s*bev|cold and hot bev|beverages?|drinks?|others?|misc|menu|all)$/i
+
+export interface MenuImageContext {
+  category?: string
+  subcategory?: string
+}
 
 type CommonsPage = {
   title?: string
@@ -107,25 +116,69 @@ export function imageSearchRelevance(title: string, itemName: string) {
   return (exactMatches + fuzzyMatches * 0.5) / meaningfulTokens.length + numericBonus
 }
 
-export function buildImageSearchQueries(name: string) {
+export function buildImageQueryHints(name: string, context?: MenuImageContext) {
+  const hints: string[] = []
+  const subcategory = (context?.subcategory ?? '').trim()
+  const category = (context?.category ?? '').trim()
+  const combined = `${subcategory} ${category}`.toLowerCase()
+  const liquor = LIQUOR_WORDS.find((word) => combined.includes(word))
+  if (liquor) return [liquor]
+  const nameLower = name.toLowerCase()
+  ;[subcategory, category].forEach((value) => {
+    if (!value || GENERIC_HINTS.test(value)) return
+    if (nameLower.includes(value.toLowerCase())) return
+    if (!hints.some((hint) => hint.toLowerCase() === value.toLowerCase())) hints.push(value)
+  })
+  return hints
+}
+
+export function buildImageSearchQueries(name: string, context?: MenuImageContext) {
   const cleaned = name.trim().replace(/\s+/g, ' ')
   if (!cleaned) return []
-  const queries = [cleaned]
+  const queries: string[] = []
+  const add = (value: string) => {
+    const normalized = value.trim().replace(/\s+/g, ' ')
+    if (normalized && !queries.some((query) => query.toLowerCase() === normalized.toLowerCase())) queries.push(normalized)
+  }
+
+  buildImageQueryHints(cleaned, context).forEach((hint) => add(`${cleaned} ${hint}`))
+  add(cleaned)
+
   const withoutVolume = cleaned
     .replace(/\b\d+(?:\.\d+)?\s*(?:ml|cl|l|litre|liter)\b/gi, ' ')
     .replace(VOLUME_WORDS, ' ')
     .replace(/\s+/g, ' ')
     .trim()
-  if (withoutVolume && !queries.includes(withoutVolume)) queries.push(withoutVolume)
+  add(withoutVolume)
+
   if (LIQUOR_HINTS.test(cleaned)) {
-    const withoutSize = cleaned.replace(/\s+\d{2,4}$/, '').trim()
-    if (withoutSize && !queries.includes(withoutSize)) queries.push(withoutSize)
+    add(cleaned.replace(/\s+\d{2,4}$/, '').trim())
   }
   const withoutTrailingNumber = cleaned.replace(/\s+\d{2,4}$/, '').trim()
-  if (withoutTrailingNumber && withoutTrailingNumber.length >= 3 && !queries.includes(withoutTrailingNumber)) {
-    queries.push(withoutTrailingNumber)
+  if (withoutTrailingNumber.length >= 3) add(withoutTrailingNumber)
+
+  return queries.slice(0, 6)
+}
+
+export function enlargeImageUrl(url?: string) {
+  if (!url) return ''
+  if (!/mm\.bing\.net|bing\.com\/th/i.test(url)) return url
+  const separator = url.includes('?') ? '&' : '?'
+  return `${url}${separator}w=1200&h=1200&c=7&rs=1&pid=ImgDetMain`
+}
+
+function tauriAvailable() {
+  return typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window
+}
+
+async function searchBingImages(query: string) {
+  if (!tauriAvailable()) return []
+  try {
+    const urls = await invoke<string[]>('search_web_images', { query, limit: 8 })
+    return Array.isArray(urls) ? urls.filter((url) => typeof url === 'string' && url.startsWith('https://')) : []
+  } catch {
+    return []
   }
-  return queries.slice(0, 4)
 }
 
 export function pickCommonsImage(pages: CommonsPage[], itemName: string) {
@@ -193,18 +246,32 @@ async function fetchWikipediaImage(itemName: string) {
   return null
 }
 
-export async function fetchMenuItemImageUrl(name: string) {
+export async function fetchMenuItemImageUrl(name: string, context?: MenuImageContext) {
   const cleaned = name.trim().replace(/\s+/g, ' ')
   if (!cleaned) return null
-  const cacheKey = cleaned.toLowerCase()
+  const cacheKey = `${cleaned}|${context?.category ?? ''}|${context?.subcategory ?? ''}`.toLowerCase()
   if (imageCache.has(cacheKey)) return imageCache.get(cacheKey) ?? null
 
+  const queries = buildImageSearchQueries(cleaned, context)
   let found: string | null = null
-  for (const query of buildImageSearchQueries(cleaned)) {
-    const image = pickCommonsImage(await fetchCommonsPages(query), cleaned)
-    if (image) {
-      found = image
+
+  // Desktop builds use a native Bing image search: far better product-name
+  // relevance than Wikimedia, and Bing hosts small hotlink-friendly thumbs.
+  for (const query of queries) {
+    const results = await searchBingImages(query)
+    if (results.length > 0) {
+      found = results[0]
       break
+    }
+  }
+
+  if (!found) {
+    for (const query of queries.slice(0, 3)) {
+      const image = pickCommonsImage(await fetchCommonsPages(query), cleaned)
+      if (image) {
+        found = image
+        break
+      }
     }
   }
   if (!found) found = await fetchWikipediaImage(cleaned)
