@@ -59,6 +59,17 @@ function scoreMenuItem(item: MenuItem, rawQuery: string) {
   if (compactQuery.length >= 2 && isSubsequence(compactQuery, initials)) return 900
   if (compactQuery.length >= 2 && isSubsequence(compactQuery, compactName)) return 860
 
+  const translatedNames = Object.values(item.nameTranslations ?? {})
+  for (const translated of translatedNames) {
+    const normalizedTranslated = normalizeSearchValue(translated)
+    if (!normalizedTranslated) continue
+    const compactTranslated = compactSearchValue(translated)
+    if (normalizedTranslated === normalizedQuery) return 1160
+    if (normalizedTranslated.startsWith(normalizedQuery)) return 1000
+    if (normalizedTranslated.includes(normalizedQuery)) return 960
+    if (compactQuery.length >= 2 && compactTranslated.includes(compactQuery)) return 920
+  }
+
   return -1
 }
 

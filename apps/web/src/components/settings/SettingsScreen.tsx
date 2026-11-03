@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { Settings as SettingsIcon, Save, Store, Printer, Bell, Wifi, Sparkles, Download, Upload, Cloud, ShieldCheck, ArrowUpCircle, Image as ImageIcon, Trash2, PanelRight, Database } from 'lucide-react'
+import { Settings as SettingsIcon, Save, Store, Printer, Bell, Wifi, Sparkles, Download, Upload, Cloud, ShieldCheck, ArrowUpCircle, Image as ImageIcon, Trash2, PanelRight, Database, Languages } from 'lucide-react'
 import QRCode from 'qrcode'
 import { open as openFileDialog } from '@tauri-apps/plugin-dialog'
 import { useUIStore } from '../../store/uiStore'
@@ -27,6 +27,7 @@ import { guardCloudSession } from '../../lib/cloudTransport'
 import { createDailyLocalBackup, getLanServerStatus, isTauriDesktop, readLocalDatabaseBackup, restoreLocalDatabaseBackup, saveDesktopState, type LanServerStatus, type LocalBackupResult } from '../../lib/localDb'
 import { getLanBridgeStatus, type LanBridgeStatus } from '../../lib/lanBridge'
 import { getDictionary, LANGUAGE_OPTIONS, useI18n } from '../../lib/i18n'
+import { MENU_LANGUAGES, menuLanguageDisplay } from '../../lib/menuTranslate'
 
 type DisplayLanStatus = LanServerStatus | LanBridgeStatus
 
@@ -75,10 +76,15 @@ export default function SettingsScreen() {
   const [lanQrDataUrl, setLanQrDataUrl] = useState('')
   const [syncHealth, setSyncHealth] = useState<{ pending: number; conflicts: number; oldestPendingAt?: string }>({ pending: 0, conflicts: 0 })
   const [selectedLanguage, setSelectedLanguage] = useState(language)
+  const [menuLanguageDraft, setMenuLanguageDraft] = useState(outlet.menuLanguage ?? 'en')
 
   useEffect(() => {
     setSelectedLanguage(language)
   }, [language])
+
+  useEffect(() => {
+    setMenuLanguageDraft(outlet.menuLanguage ?? 'en')
+  }, [outlet.menuLanguage])
 
   useEffect(() => {
     let active = true
@@ -179,10 +185,16 @@ export default function SettingsScreen() {
 
   const handleSaveAllSettings = () => {
     saveLanguagePreference()
+    updateOutlet({ menuLanguage: menuLanguageDraft })
     if (outletFormRef.current) saveOutletForm(outletFormRef.current)
     if (appUpdateFormRef.current) saveAppUpdateForm(appUpdateFormRef.current)
     if (cloudSyncFormRef.current) saveCloudSyncForm(cloudSyncFormRef.current)
     addToast('success', 'All settings saved successfully')
+  }
+
+  const saveMenuLanguage = () => {
+    updateOutlet({ menuLanguage: menuLanguageDraft })
+    addToast('success', `Menu language set to ${menuLanguageDisplay(menuLanguageDraft)}`, 'Menu language')
   }
 
   const handleBackupDownload = () => {
@@ -605,6 +617,38 @@ export default function SettingsScreen() {
               </div>
               <button type="submit" className="inline-flex items-center justify-center gap-1.5 rounded-xl bg-primary px-4 py-2.5 text-xs font-black text-white shadow-sm hover:bg-primary-dark">
                 <Save size={14} strokeWidth={2.5} /> {t('saveLanguage')}
+              </button>
+            </form>
+          </section>
+
+          {/* MENU LANGUAGE */}
+          <section className="bg-white rounded-2xl border-2 border-slate-100 shadow-[0_2px_10px_rgba(0,0,0,0.02)] overflow-hidden">
+            <div className="px-5 py-3 border-b-2 border-slate-100 bg-slate-50/50 flex items-center gap-2">
+              <Languages size={18} className="text-violet-600" />
+              <h2 className="text-sm font-black text-slate-800 tracking-tight">Menu language</h2>
+            </div>
+            <form
+              className="p-5 flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between"
+              onSubmit={(event) => { event.preventDefault(); saveMenuLanguage() }}
+            >
+              <div className="max-w-2xl">
+                <p className="text-sm font-black text-slate-800">Product and category language</p>
+                <p className="mt-1 text-[11px] font-bold leading-5 text-slate-500">
+                  English stays the base language. Select an Indian language to show a translated name field on every product, and use the Language button in Products Menu to translate whole categories and subcategories.
+                </p>
+                <select
+                  value={menuLanguageDraft}
+                  onChange={(event) => setMenuLanguageDraft(event.target.value)}
+                  className="mt-3 min-w-56 rounded-xl border-2 border-slate-200 bg-white px-3 py-2 text-sm font-bold text-slate-800 outline-none focus:border-primary/60 focus:ring-4 focus:ring-primary/10"
+                  aria-label="Menu language"
+                >
+                  {MENU_LANGUAGES.map((option) => (
+                    <option key={option.code} value={option.code}>{menuLanguageDisplay(option.code)}</option>
+                  ))}
+                </select>
+              </div>
+              <button type="submit" className="inline-flex items-center justify-center gap-1.5 rounded-xl bg-primary px-4 py-2.5 text-xs font-black text-white shadow-sm hover:bg-primary-dark">
+                <Save size={14} strokeWidth={2.5} /> Save menu language
               </button>
             </form>
           </section>

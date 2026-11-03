@@ -1,5 +1,5 @@
 import { useMemo, useRef, useState } from 'react'
-import { ChefHat, ChevronLeft, ChevronRight, Download, Edit2, FileDown, FileText, Globe, Loader2, Percent, Plus, Search, Trash2, Upload, X } from 'lucide-react'
+import { ChefHat, ChevronLeft, ChevronRight, Download, Edit2, FileDown, FileText, Globe, Languages, Loader2, Percent, Plus, Search, Trash2, Upload, X } from 'lucide-react'
 import type { MenuCategory, MenuItem, ProductUsageType, RecipeItem, StockUnit } from '../../lib/types'
 import { formatPaise } from '../../lib/money'
 import { useUIStore } from '../../store/uiStore'
@@ -7,8 +7,10 @@ import { useBillingStore } from '../../store/billingStore'
 import { clsx } from 'clsx'
 import { convertRecipeQuantity, exportProducts, generateTemplate, parseCsvRows, parseRecipeField } from '../../lib/csv'
 import { fetchMenuItemImageUrl, enlargeImageUrl, MENU_IMAGE_ACCEPT, MENU_IMAGE_FORMATS_LABEL, readMenuImageFile } from '../../lib/menuItemImages'
+import { isAutoTranslatableLanguage, menuLanguageLabel, translateMenuTexts } from '../../lib/menuTranslate'
 import MenuItemThumb from './MenuItemThumb'
 import FetchMenuImagesModal from './FetchMenuImagesModal'
+import TranslateMenuModal from './TranslateMenuModal'
 
 const PAGE_SIZE = 25
 const UNITS: StockUnit[] = ['kg', 'g', 'l', 'ml', 'pcs', 'nos', 'plate', 'portion']
@@ -64,15 +66,21 @@ export default function MenuScreen() {
     menuItems: items,
     inventoryItems,
     stations,
+    outlet,
     addCategory,
     addStation,
     addInventoryItem,
     addMenuItem,
     updateMenuItem,
     applyMenuItemImages,
+    applyMenuItemTranslations,
+    applyMenuCategoryTranslations,
     deleteMenuItem,
     updateCategory,
   } = useBillingStore()
+
+  const menuLanguage = outlet.menuLanguage ?? 'en'
+  const menuLanguageName = menuLanguageLabel(menuLanguage)
 
   const [page, setPage] = useState(1)
   const [searchCode, setSearchCode] = useState('')
@@ -82,10 +90,13 @@ export default function MenuScreen() {
   const [showTaxModal, setShowTaxModal] = useState(false)
   const [showBillingRuleModal, setShowBillingRuleModal] = useState(false)
   const [showImageFetch, setShowImageFetch] = useState(false)
+  const [showTranslate, setShowTranslate] = useState(false)
   const [imageViewer, setImageViewer] = useState<{ url: string; name: string } | null>(null)
   const [editingItem, setEditingItem] = useState<MenuItem | null>(null)
   const [imagePreview, setImagePreview] = useState('')
   const [imageBusy, setImageBusy] = useState(false)
+  const [translatedName, setTranslatedName] = useState('')
+  const [translatingName, setTranslatingName] = useState(false)
   const [recipeItem, setRecipeItem] = useState<MenuItem | null>(null)
   const [draftRecipe, setDraftRecipe] = useState<RecipeItem[]>([])
   const [recipeIngredientName, setRecipeIngredientName] = useState('')
@@ -95,6 +106,8 @@ export default function MenuScreen() {
     setEditingItem(item)
     setImagePreview(item?.imageUrl ?? '')
     setImageBusy(false)
+    setTranslatedName(item && menuLanguage !== 'en' ? item.nameTranslations?.[menuLanguage] ?? '' : '')
+    setTranslatingName(false)
     setShowItemModal(true)
   }
 
@@ -103,6 +116,8 @@ export default function MenuScreen() {
     setEditingItem(null)
     setImagePreview('')
     setImageBusy(false)
+    setTranslatedName('')
+    setTranslatingName(false)
   }
 
   const categoriesById = useMemo(() => new Map(categories.map(category => [category.id, category])), [categories])
@@ -274,6 +289,30 @@ export default function MenuScreen() {
     }
   }
 
+  const handleTranslateName = async (event: React.MouseEvent<HTMLButtonElement>) => {
+    const form = event.currentTarget.closest('form')
+    const name = form?.querySelector<HTMLInputElement>('input[name="name"]')?.value.trim()
+    if (!name) {
+      addToast('warning', 'Enter the product name first')
+      return
+    }
+    if (translatingName) return
+    setTranslatingName(true)
+    try {
+      const [value] = await translateMenuTexts([name], menuLanguage)
+      if (value && value.trim()) {
+        setTranslatedName(value.trim())
+        addToast('success', `${menuLanguageName} name filled`)
+      } else {
+        addToast('warning', 'No translation was returned. You can type it manually.')
+      }
+    } catch (error) {
+      addToast('error', error instanceof Error ? error.message : 'Could not translate the product name')
+    } finally {
+      setTranslatingName(false)
+    }
+  }
+
   const handleSaveItem = (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault()
     const fd = new FormData(e.currentTarget)
@@ -359,6 +398,13 @@ export default function MenuScreen() {
       return
     }
 
+    const nameTranslations = { ...(editingItem?.nameTranslations ?? {}) }
+    if (menuLanguage !== 'en') {
+      const value = translatedName.trim()
+      if (value) nameTranslations[menuLanguage] = value
+      else delete nameTranslations[menuLanguage]
+    }
+
     const newItem: MenuItem = {
       id: editingItem?.id || '',
       outletId: latestStore.outlet.id,
@@ -368,6 +414,7 @@ export default function MenuScreen() {
       barcode: barcode || undefined,
       description: String(fd.get('description') ?? '').trim() || undefined,
       imageUrl: imageUrl || undefined,
+      nameTranslations: Object.keys(nameTranslations).length > 0 ? nameTranslations : undefined,
       productType,
       itemType: fd.get('itemType') as 'veg' | 'nonveg' | 'egg' | 'other',
       pricePaise,
@@ -775,6 +822,9 @@ export default function MenuScreen() {
           <button onClick={() => setShowImageFetch(true)} className="flex items-center gap-1.5 px-3 py-1.5 border border-sky-200 bg-sky-50 text-sky-700 hover:bg-sky-100 rounded-lg text-xs font-bold transition-colors">
             <Globe size={14} /> Web Images
           </button>
+          <button onClick={() => setShowTranslate(true)} className="flex items-center gap-1.5 px-3 py-1.5 border border-violet-200 bg-violet-50 text-violet-700 hover:bg-violet-100 rounded-lg text-xs font-bold transition-colors">
+            <Languages size={14} /> Language
+          </button>
           <button onClick={() => setShowBillingRuleModal(true)} className="flex items-center gap-1.5 px-3 py-1.5 border border-fuchsia-200 bg-fuchsia-50 text-fuchsia-700 hover:bg-fuchsia-100 rounded-lg text-xs font-bold transition-colors">
             <FileText size={14} /> Bill Rules
           </button>
@@ -853,7 +903,12 @@ export default function MenuScreen() {
                           >
                             <MenuItemThumb src={item.imageUrl} alt={item.name} className="h-9 w-9 rounded-lg border border-slate-200" iconSize={15} />
                           </button>
-                          <span className="min-w-0 truncate">{item.name}</span>
+                          <div className="min-w-0">
+                            <span className="block truncate">{item.name}</span>
+                            {menuLanguage !== 'en' && item.nameTranslations?.[menuLanguage] && (
+                              <span className="block truncate text-[11px] font-bold text-slate-400">{item.nameTranslations[menuLanguage]}</span>
+                            )}
+                          </div>
                         </div>
                       </td>
                       <td className="px-3 py-2 text-xs font-bold text-slate-600 border-r border-slate-100">{categoryLabel}</td>
@@ -922,9 +977,30 @@ export default function MenuScreen() {
             <ModalHeader title={editingItem ? 'Edit Product Details' : 'Create Product Details'} onClose={closeItemModal} />
             <form onSubmit={handleSaveItem} className="p-5 space-y-4 overflow-y-auto">
               <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-                <Field label="Name" className="md:col-span-2">
+                <Field label="Name" className={menuLanguage === 'en' ? 'md:col-span-2' : ''}>
                   <input required name="name" defaultValue={editingItem?.name} className={FIELD_CLASS} placeholder="Product name" />
                 </Field>
+                {menuLanguage !== 'en' && (
+                  <Field label={`${menuLanguageName} name`}>
+                    <div className="flex gap-2">
+                      <input
+                        value={translatedName}
+                        onChange={(event) => setTranslatedName(event.target.value)}
+                        className={FIELD_CLASS}
+                        placeholder={`${menuLanguageName} name`}
+                      />
+                      <button
+                        type="button"
+                        onClick={handleTranslateName}
+                        disabled={translatingName || !isAutoTranslatableLanguage(menuLanguage)}
+                        title="Translate from the English name"
+                        className="inline-flex h-[38px] w-[38px] shrink-0 items-center justify-center rounded-xl border border-violet-200 bg-violet-50 text-violet-700 transition-colors hover:bg-violet-100 disabled:cursor-not-allowed disabled:opacity-40"
+                      >
+                        {translatingName ? <Loader2 size={15} className="animate-spin" /> : <Languages size={15} />}
+                      </button>
+                    </div>
+                  </Field>
+                )}
                 <Field label="Product Type">
                   <select name="productType" defaultValue={editingItem?.productType ?? 'sale_only'} className={FIELD_CLASS}>
                     {PRODUCT_TYPES.map(option => <option key={option.value} value={option.value}>{option.label}</option>)}
@@ -1131,6 +1207,17 @@ export default function MenuScreen() {
           categories={categories}
           onApply={applyMenuItemImages}
           onClose={() => setShowImageFetch(false)}
+        />
+      )}
+
+      {showTranslate && (
+        <TranslateMenuModal
+          items={items}
+          categories={categories}
+          defaultLanguage={menuLanguage}
+          onApplyItems={applyMenuItemTranslations}
+          onApplyCategories={applyMenuCategoryTranslations}
+          onClose={() => setShowTranslate(false)}
         />
       )}
 

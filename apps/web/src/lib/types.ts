@@ -73,6 +73,8 @@ export interface MenuCategory {
   outletId: string
   parentId?: string
   name: string
+  /** Localized category names keyed by language code (for example mr, hi). */
+  nameTranslations?: Record<string, string>
   color?: string
   billGroup?: string
   separateBill?: boolean
@@ -93,6 +95,8 @@ export interface MenuItem {
   outletId: string
   categoryId: string
   name: string
+  /** Localized product names keyed by language code (for example mr, hi). English stays in name. */
+  nameTranslations?: Record<string, string>
   shortCode?: string
   barcode?: string
   description?: string

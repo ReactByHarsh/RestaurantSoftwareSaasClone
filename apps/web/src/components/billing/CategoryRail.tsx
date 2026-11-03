@@ -9,9 +9,10 @@ interface Props {
   items: MenuItem[]
   activeCategoryId: string
   onSelect: (id: string) => void
+  menuLanguage?: string
 }
 
-export default function CategoryRail({ categories, items, activeCategoryId, onSelect }: Props) {
+export default function CategoryRail({ categories, items, activeCategoryId, onSelect, menuLanguage }: Props) {
   const scrollRef = useRef<HTMLDivElement>(null)
   const closeTimerRef = useRef<number | null>(null)
   const [canScrollLeft, setCanScrollLeft] = useState(false)
@@ -74,8 +75,10 @@ export default function CategoryRail({ categories, items, activeCategoryId, onSe
     }
   }, [])
 
+  const categoryName = (category: MenuCategory) =>
+    menuLanguage && menuLanguage !== 'en' ? category.nameTranslations?.[menuLanguage] || category.name : category.name
   const sortByName = <T extends { name: string }>(rows: T[]) => [...rows].sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: 'base' }))
-  const activeCategories = sortByName(categories.filter(c => c.isActive))
+  const activeCategories = [...categories.filter(c => c.isActive)].sort((a, b) => categoryName(a).localeCompare(categoryName(b), undefined, { sensitivity: 'base' }))
   const itemCounts = new Map<string, number>()
   items.forEach((item) => itemCounts.set(item.categoryId, (itemCounts.get(item.categoryId) ?? 0) + 1))
   const hasItemsDeep = (category: MenuCategory) => {
@@ -153,7 +156,7 @@ export default function CategoryRail({ categories, items, activeCategoryId, onSe
                     : 'bg-white border-slate-100 text-slate-500 hover:border-slate-300 hover:text-slate-700 hover:shadow-sm'
                 )}
               >
-                {cat.name}
+                {categoryName(cat)}
                 {children.length > 0 && <ChevronDown size={12} />}
               </button>
               {openCategoryId === cat.id && children.length > 0 && popupRect && createPortal(
@@ -170,11 +173,11 @@ export default function CategoryRail({ categories, items, activeCategoryId, onSe
                   onMouseLeave={scheduleClosePopup}
                 >
                   <button onClick={() => selectAndClose(cat.id)} className={clsx('w-full rounded-lg px-3 py-2 text-left text-[11px] font-black uppercase tracking-wider', activeCategoryId === cat.id ? 'bg-primary text-white' : 'text-slate-600 hover:bg-slate-50')}>
-                    All {cat.name}
+                    All {categoryName(cat)}
                   </button>
                   {children.map(child => (
                     <button key={child.id} onClick={() => selectAndClose(child.id)} className={clsx('w-full rounded-lg px-3 py-2 text-left text-[11px] font-black uppercase tracking-wider', activeCategoryId === child.id ? 'bg-slate-900 text-white' : 'text-slate-600 hover:bg-slate-50')}>
-                      {child.name}
+                      {categoryName(child)}
                     </button>
                   ))}
                 </div>,

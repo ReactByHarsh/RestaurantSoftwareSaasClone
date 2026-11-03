@@ -2032,6 +2032,57 @@ fn extract_bing_image_urls(html: &str, limit: usize) -> Vec<String> {
 }
 
 #[tauri::command]
+async fn translate_texts(texts: Vec<String>, target: String) -> Result<Vec<String>, String> {
+    let language = target.trim();
+    if language.is_empty() || language.eq_ignore_ascii_case("en") {
+        return Ok(texts);
+    }
+    if texts.is_empty() {
+        return Ok(Vec::new());
+    }
+    if texts.len() > 20 {
+        return Err("Translate at most 20 texts per request.".to_string());
+    }
+    let client = reqwest::Client::builder()
+        .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
+        .timeout(Duration::from_secs(15))
+        .build()
+        .map_err(to_error)?;
+    let mut request = client
+        .get("https://translate.googleapis.com/translate_a/t")
+        .query(&[("client", "gtx"), ("sl", "en"), ("tl", language)]);
+    for text in &texts {
+        request = request.query(&[("q", text.as_str())]);
+    }
+    let response = request.send().await.map_err(to_error)?;
+    if !response.status().is_success() {
+        return Err(format!("Translation failed with status {}", response.status()));
+    }
+    let data: serde_json::Value = response.json().await.map_err(to_error)?;
+    parse_translation_response(&data, texts.len())
+}
+
+fn parse_translation_response(data: &serde_json::Value, expected: usize) -> Result<Vec<String>, String> {
+    let mut values = Vec::new();
+    match data {
+        serde_json::Value::Array(items) => {
+            for item in items {
+                let Some(text) = item.as_str() else {
+                    return Err("Unexpected translation response".to_string());
+                };
+                values.push(text.to_string());
+            }
+        }
+        serde_json::Value::String(text) if expected == 1 => values.push(text.clone()),
+        _ => return Err("Unexpected translation response".to_string()),
+    }
+    if values.len() != expected {
+        return Err("Translation response did not match the request".to_string());
+    }
+    Ok(values)
+}
+
+#[tauri::command]
 fn get_lan_server_status(
     state: State<'_, Arc<Mutex<LanServerStatusPayload>>>,
 ) -> Result<LanServerStatusPayload, String> {
@@ -2557,7 +2608,8 @@ pub fn run() {
             get_lan_server_status,
             list_native_printers,
             print_native,
-            search_web_images
+            search_web_images,
+            translate_texts
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
@@ -2577,6 +2629,18 @@ mod tests {
                 "https://ts2.mm.bing.net/th?id=OIP.def&pid=15.1".to_string(),
             ]
         );
+    }
+
+    #[test]
+    fn parses_translation_response() {
+        let data: serde_json::Value =
+            serde_json::from_str(r#"["मसाला पापड","ग्रीन सॅलड"]"#).unwrap();
+        assert_eq!(
+            parse_translation_response(&data, 2).unwrap(),
+            vec!["मसाला पापड".to_string(), "ग्रीन सॅलड".to_string()]
+        );
+        assert!(parse_translation_response(&serde_json::Value::String("one".to_string()), 1).is_ok());
+        assert!(parse_translation_response(&serde_json::Value::String("one".to_string()), 2).is_err());
     }
 
     #[test]

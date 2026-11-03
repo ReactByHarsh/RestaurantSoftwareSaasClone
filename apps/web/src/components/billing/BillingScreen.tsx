@@ -250,6 +250,8 @@ export default function BillingScreen({ isModal = false, modalTableId, autoOpenP
     updateTableStatus, printReceipt, printCartProforma, getCustomerAccountDetails, setOrderCustomer
   } = useBillingStore()
 
+  const menuLanguage = outlet.menuLanguage ?? 'en'
+
   const canTransfer = user ? hasPermission(user.role, 'tables:transfer') : false
   const canMerge    = user ? hasPermission(user.role, 'tables:merge')    : false
 
@@ -730,7 +732,7 @@ export default function BillingScreen({ isModal = false, modalTableId, autoOpenP
           // Mobile: show/hide based on tab
           mobileTab === 'menu' ? 'flex flex-1' : 'hidden'
         )}>
-          <CategoryRail categories={menuCategories} items={menuItems.filter(isSaleableMenuItem)} activeCategoryId={activeCategoryId} onSelect={setActiveCategoryId} />
+          <CategoryRail categories={menuCategories} items={menuItems.filter(isSaleableMenuItem)} activeCategoryId={activeCategoryId} onSelect={setActiveCategoryId} menuLanguage={menuLanguage} />
 
           {/* Search */}
           <div className="px-2.5 py-1.5 bg-white border-b border-slate-100 flex-shrink-0 shadow-sm">
@@ -779,7 +781,7 @@ export default function BillingScreen({ isModal = false, modalTableId, autoOpenP
               <>
                 <div className="grid grid-cols-2 sm:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-5 gap-2 p-0.5">
                   {paginatedItems.map(item => (
-                    <MenuItemCard key={item.id} item={item} displayPricePaise={getSectionAdjustedPrice(getMenuItemPriceForSection(item, selectedFloor), selectedFloor)} cartQty={cartQtyById.get(item.id) ?? 0} isKotItem={kotMenuItemIds.has(item.id)} onAdd={() => handleAddItem(item)} />
+                    <MenuItemCard key={item.id} item={item} displayPricePaise={getSectionAdjustedPrice(getMenuItemPriceForSection(item, selectedFloor), selectedFloor)} displayName={menuLanguage !== 'en' ? item.nameTranslations?.[menuLanguage] : undefined} cartQty={cartQtyById.get(item.id) ?? 0} isKotItem={kotMenuItemIds.has(item.id)} onAdd={() => handleAddItem(item)} />
                   ))}
                 </div>
                 {filteredItems.length > MENU_PAGE_SIZE && (

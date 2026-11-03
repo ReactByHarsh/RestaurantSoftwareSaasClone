@@ -70,6 +70,8 @@ export interface OutletSettings {
   enableCreditAccounts: boolean
   enableOrderMenuPanelToggle: boolean
   enableOrderTablesDrawer: boolean
+  /** Secondary language used for translated menu and category names. English is always the base. */
+  menuLanguage: string
 }
 
 export interface PrintSettings {
@@ -185,10 +187,12 @@ interface BillingStore {
 
   addCategory: (name: string, color?: string, settings?: Partial<MenuCategory>) => void
   updateCategory: (id: string, updates: Partial<MenuCategory>) => void
+  applyMenuCategoryTranslations: (language: string, updates: Record<string, string>) => void
   deleteCategory: (id: string) => boolean
   addMenuItem: (item: Omit<MenuItem, 'id' | 'outletId' | 'sortOrder'>) => void
   updateMenuItem: (id: string, updates: Partial<MenuItem>) => void
   applyMenuItemImages: (updates: Record<string, string>) => void
+  applyMenuItemTranslations: (language: string, updates: Record<string, string>) => void
   deleteMenuItem: (id: string) => void
   addStation: (name: string, settings?: Partial<Station>) => Station
   updateStation: (id: string, updates: Partial<Station>) => void
@@ -336,6 +340,7 @@ const DEFAULT_OUTLET: OutletSettings = {
   enableCreditAccounts: false,
   enableOrderMenuPanelToggle: false,
   enableOrderTablesDrawer: false,
+  menuLanguage: 'en',
 }
 
 const DEFAULT_PRINT_SETTINGS: PrintSettings = {
@@ -1217,6 +1222,17 @@ export const useBillingStore = create<BillingStore>()(
         auditLogs: addAudit(state, 'menu.category.updated', 'menu_category', 'Updated menu category', id),
       })),
 
+      applyMenuCategoryTranslations: (language, updates) => set((state) => {
+        const count = Object.keys(updates).length
+        if (count === 0) return {}
+        return {
+          menuCategories: state.menuCategories.map((category) => updates[category.id]
+            ? { ...category, nameTranslations: { ...category.nameTranslations, [language]: updates[category.id] } }
+            : category),
+          auditLogs: addAudit(state, 'menu.category.translated', 'menu_category', `Translated ${count} categories to ${language}`),
+        }
+      }),
+
       deleteCategory: (id) => {
         const hasItems = get().menuItems.some((item) => item.categoryId === id)
         if (hasItems) return false
@@ -1272,6 +1288,17 @@ export const useBillingStore = create<BillingStore>()(
         return {
           menuItems: state.menuItems.map((item) => updates[item.id] ? { ...item, imageUrl: updates[item.id] } : item),
           auditLogs: addAudit(state, 'menu.item.images_updated', 'menu_item', `Attached images to ${count} menu items`),
+        }
+      }),
+
+      applyMenuItemTranslations: (language, updates) => set((state) => {
+        const count = Object.keys(updates).length
+        if (count === 0) return {}
+        return {
+          menuItems: state.menuItems.map((item) => updates[item.id]
+            ? { ...item, nameTranslations: { ...item.nameTranslations, [language]: updates[item.id] } }
+            : item),
+          auditLogs: addAudit(state, 'menu.item.translated', 'menu_item', `Translated ${count} menu items to ${language}`),
         }
       }),
 
@@ -3255,7 +3282,7 @@ export const useBillingStore = create<BillingStore>()(
         const persisted = persistedState as Partial<BillingStore> | undefined
         if (!persisted) return currentState
         const normalizedBase = stripLegacyDemoData(reconcileSnapshot({
-          outlet: persisted.outlet ?? DEFAULT_OUTLET,
+          outlet: { ...DEFAULT_OUTLET, ...(persisted.outlet ?? {}) },
           printSettings: persisted.printSettings ?? DEFAULT_PRINT_SETTINGS,
           menuCategories: persisted.menuCategories ?? [],
           menuItems: persisted.menuItems ?? [],

@@ -9,10 +9,11 @@ interface Props {
   cartQty: number
   isKotItem?: boolean
   displayPricePaise?: number
+  displayName?: string
   onAdd: () => void
 }
 
-export default function MenuItemCard({ item, cartQty, isKotItem = false, displayPricePaise, onAdd }: Props) {
+export default function MenuItemCard({ item, cartQty, isKotItem = false, displayPricePaise, displayName, onAdd }: Props) {
   const [imageFailed, setImageFailed] = useState(false)
 
   useEffect(() => {
@@ -20,6 +21,7 @@ export default function MenuItemCard({ item, cartQty, isKotItem = false, display
   }, [item.imageUrl])
 
   const showImage = Boolean(item.imageUrl) && !imageFailed
+  const primaryName = displayName?.trim() || item.name
 
   return (
     <button
@@ -35,7 +37,7 @@ export default function MenuItemCard({ item, cartQty, isKotItem = false, display
         {showImage ? (
           <img
             src={item.imageUrl}
-            alt={item.name}
+            alt={primaryName}
             loading="lazy"
             className="h-full w-full object-cover transition-transform duration-300 group-hover:scale-105"
             onError={() => setImageFailed(true)}
@@ -70,9 +72,14 @@ export default function MenuItemCard({ item, cartQty, isKotItem = false, display
       </div>
 
       <div className="flex min-w-0 flex-1 flex-col p-2">
-        <p className="mb-1 line-clamp-2 flex-1 text-[13px] font-black leading-snug tracking-tight text-slate-900 sm:text-sm">
-          {item.name}
-        </p>
+        <div className="mb-1 min-w-0 flex-1">
+          <p className="line-clamp-2 text-[13px] font-black leading-snug tracking-tight text-slate-900 sm:text-sm">
+            {primaryName}
+          </p>
+          {primaryName !== item.name && (
+            <p className="mt-0.5 truncate text-[10px] font-bold text-slate-400">{item.name}</p>
+          )}
+        </div>
 
         <div className="mt-auto flex w-full items-end justify-between">
           <span className="text-xs font-black tracking-tight text-slate-700">
