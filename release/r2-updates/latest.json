@@ -1,15 +1,15 @@
 {
-    "version":  "0.1.38",
-    "notes":  "BhojPatra Desk 0.1.38: Instant checkout. Tap the lightning button in the order cart to settle the full bill in cash and return to Tables.",
-    "pub_date":  "2026-11-06T14:32:26Z",
+    "version":  "0.1.39",
+    "notes":  "BhojPatra Desk 0.1.39: Category cards for the order menu, safer cancel and delete behavior, resilient Settings, and faster mobile LAN pairing with login ID/PIN fixes.",
+    "pub_date":  "2026-11-06T15:25:28Z",
     "platforms":  {
                       "windows-x86_64-nsis":  {
-                                                  "signature":  "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVTS2hzdHZqVXVkNTVEZW5ucXlxeDdQRWRFRXcvVXFGd0dkRTdFa0xNejlVVlFWNXRqam9HVHVYL3BRc0tFa0prdU5Bekw0djhwbkJJVUxKK1FZN0ZsZzI1bnVTWWJ2V0FVPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkzOTc1MjM0CWZpbGU6QmhvalBhdHJhIERlc2tfMC4xLjM4X3g2NC1zZXR1cC5leGUKL0dlV2doYld1Nk5OTmVMYzNwUW1VL0dsa2dvVFB1MTZWRGpjdm0zUGpHQXN1elFlcmY2dFUrcVVkdEUxSlV6RE5pQVdUTG80bHRQQWRRd25SdDRmRFE9PQo=",
-                                                  "url":  "https://pub-99fc5ebb1fb24ce9a69d861fc420f8b2.r2.dev/BhojPatra-Desk_0.1.38_x64-setup.exe"
+                                                  "signature":  "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVTS2hzdHZqVXVkNTUxbWg5WktkWjA4MCtjakVHWWQvOVlGYy9DcjZJUXIvb2lyblR3Tmc0eHhEZ3BONWVuUEtiS1Vsa3BENXczTTJyZHozMThOWkZ2TXp4eGkvVUkwUndvPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkzOTc4MzU4CWZpbGU6QmhvalBhdHJhIERlc2tfMC4xLjM5X3g2NC1zZXR1cC5leGUKVW5FODFueFVBckkyWktGZDVNcSsvNlN0LzluZHNUSkRDWTRWWWxoam9qQjNtSVl4MldhNEVFZFlsZytBcnNuZlQwenZpQWh2RXhoNGxxWWpITUR5QXc9PQo=",
+                                                  "url":  "https://pub-99fc5ebb1fb24ce9a69d861fc420f8b2.r2.dev/BhojPatra-Desk_0.1.39_x64-setup.exe"
                                               },
                       "windows-x86_64":  {
-                                             "signature":  "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVTS2hzdHZqVXVkNTVEZW5ucXlxeDdQRWRFRXcvVXFGd0dkRTdFa0xNejlVVlFWNXRqam9HVHVYL3BRc0tFa0prdU5Bekw0djhwbkJJVUxKK1FZN0ZsZzI1bnVTWWJ2V0FVPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkzOTc1MjM0CWZpbGU6QmhvalBhdHJhIERlc2tfMC4xLjM4X3g2NC1zZXR1cC5leGUKL0dlV2doYld1Nk5OTmVMYzNwUW1VL0dsa2dvVFB1MTZWRGpjdm0zUGpHQXN1elFlcmY2dFUrcVVkdEUxSlV6RE5pQVdUTG80bHRQQWRRd25SdDRmRFE9PQo=",
-                                             "url":  "https://pub-99fc5ebb1fb24ce9a69d861fc420f8b2.r2.dev/BhojPatra-Desk_0.1.38_x64-setup.exe"
+                                             "signature":  "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVTS2hzdHZqVXVkNTUxbWg5WktkWjA4MCtjakVHWWQvOVlGYy9DcjZJUXIvb2lyblR3Tmc0eHhEZ3BONWVuUEtiS1Vsa3BENXczTTJyZHozMThOWkZ2TXp4eGkvVUkwUndvPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkzOTc4MzU4CWZpbGU6QmhvalBhdHJhIERlc2tfMC4xLjM5X3g2NC1zZXR1cC5leGUKVW5FODFueFVBckkyWktGZDVNcSsvNlN0LzluZHNUSkRDWTRWWWxoam9qQjNtSVl4MldhNEVFZFlsZytBcnNuZlQwenZpQWh2RXhoNGxxWWpITUR5QXc9PQo=",
+                                             "url":  "https://pub-99fc5ebb1fb24ce9a69d861fc420f8b2.r2.dev/BhojPatra-Desk_0.1.39_x64-setup.exe"
                                          }
                   }
 }
