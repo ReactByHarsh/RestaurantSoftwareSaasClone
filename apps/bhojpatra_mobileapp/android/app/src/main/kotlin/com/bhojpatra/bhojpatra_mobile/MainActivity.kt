@@ -17,7 +17,7 @@ class MainActivity : FlutterActivity() {
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "bhojpatra/lan").setMethodCallHandler { call, result ->
             when (call.method) {
                 "prepareDiscovery" -> {
-                    if (Build.VERSION.SDK_INT >= 37 && applicationInfo.targetSdkVersion >= 37 && checkSelfPermission("android.permission.ACCESS_LOCAL_NETWORK") != PackageManager.PERMISSION_GRANTED) {
+                    if (Build.VERSION.SDK_INT >= 36 && applicationInfo.targetSdkVersion >= 36 && checkSelfPermission("android.permission.ACCESS_LOCAL_NETWORK") != PackageManager.PERMISSION_GRANTED) {
                         if (permissionResult != null) { result.success(false) } else {
                             permissionResult = result
                             requestPermissions(arrayOf("android.permission.ACCESS_LOCAL_NETWORK"), 3001)

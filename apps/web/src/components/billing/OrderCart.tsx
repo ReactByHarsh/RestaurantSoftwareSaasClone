@@ -24,7 +24,7 @@ const QUICK_INSTRUCTIONS = ['Add sugar', 'No sugar', 'More spice', 'Less spice',
 
 export default function OrderCart({ onSendKOT, onSettleBill, onInstantCheckout, instantCheckoutBusy = false, onBackToMenu }: Props) {
   const {
-    cart, currentOrder, orderItems, menuItems, kots, addToCart, payments, orders, activeOrderType, tables,
+    cart, currentOrder, orderItems, menuItems, kots, addToCart, payments, orders, activeOrderType, tables, selectedTableId,
     updateQty, removeFromCart, getCartTotal, printKOT, printCartProforma, cancelKOT, cancelOrderItemQty, cancelOrderItems, clearCart, applyGlobalDiscount, applyDiscountToOrderItem,
     setItemNote, setItemPrice, setItemModifiers, setOrderCustomer, startNewOrder, cancelOrder
   } = useBillingStore()
@@ -80,6 +80,8 @@ export default function OrderCart({ onSendKOT, onSettleBill, onInstantCheckout, 
       )
 
       if (exactMatch) {
+        if (!canAddWithoutTable()) return
+        ensureOrder()
         addToCart(exactMatch, { note: quickNote })
         setQuickSearch('')
         setQuickQty('1')
@@ -116,6 +118,72 @@ export default function OrderCart({ onSendKOT, onSettleBill, onInstantCheckout, 
   const editingMenuItem = editingItem ? menuItems.find(item => item.id === editingItem.menuItemId) : null
   const availableModifiers = useMemo(() => editingMenuItem?.modifierGroups?.flatMap(group => group.modifiers) ?? [], [editingMenuItem])
 
+  type RowRef = { kind: 'saved'; id: string } | { kind: 'cart'; id: string }
+  const rowRefs: RowRef[] = [
+    ...savedItems.map(item => ({ kind: 'saved' as const, id: item.id })),
+    ...cart.map(item => ({ kind: 'cart' as const, id: item.menuItemId })),
+  ]
+  const focusedRowIndex = rowRefs.findIndex(row =>
+    row.kind === 'saved' ? row.id === selectedSavedItemId : row.id === selectedCartItemId
+  )
+
+  useEffect(() => {
+    if (selectedCartItemId && !cart.some(item => item.menuItemId === selectedCartItemId)) setSelectedCartItemId(null)
+    if (selectedSavedItemId && !savedItems.some(item => item.id === selectedSavedItemId)) setSelectedSavedItemId(null)
+  }, [cart, savedItems, selectedCartItemId, selectedSavedItemId])
+
+  const selectAfterRemoval = (removedIndex: number) => {
+    const remaining = rowRefs.filter((_, index) => index !== removedIndex)
+    const next = remaining[Math.min(removedIndex, remaining.length - 1)]
+    if (next?.kind === 'saved') { setSelectedSavedItemId(next.id); setSelectedCartItemId(null) }
+    else if (next?.kind === 'cart') { setSelectedCartItemId(next.id); setSelectedSavedItemId(null) }
+    else { setSelectedSavedItemId(null); setSelectedCartItemId(null) }
+  }
+
+  const removeFocusedRow = () => {
+    if (focusedRowIndex < 0) return
+    const row = rowRefs[focusedRowIndex]
+    if (row.kind === 'cart') {
+      removeFromCart(row.id)
+      addToast('success', 'Item removed from cart')
+    } else {
+      const item = savedItems.find(candidate => candidate.id === row.id)
+      if (!item) return
+      cancelOrderItemQty(item.id, item.quantity, 'Removed from order screen')
+      addToast('success', `${item.nameSnapshot} removed`)
+    }
+    selectAfterRemoval(focusedRowIndex)
+  }
+
+  const changeFocusedQty = (delta: number) => {
+    if (focusedRowIndex < 0) return
+    const row = rowRefs[focusedRowIndex]
+    if (row.kind === 'cart') {
+      const item = cart.find(candidate => candidate.menuItemId === row.id)
+      if (!item) return
+      if (item.quantity + delta <= 0) removeFocusedRow()
+      else updateQty(row.id, delta)
+      return
+    }
+    if (delta > 0) return
+    const item = savedItems.find(candidate => candidate.id === row.id)
+    if (!item) return
+    if (item.quantity <= 1) removeFocusedRow()
+    else cancelOrderItemQty(item.id, 1, 'Quantity reduced from order screen')
+  }
+
+  const canAddWithoutTable = () => {
+    if (activeOrderType === 'dine_in' && !selectedTableId && !currentOrder) {
+      addToast('warning', 'Select a table first')
+      return false
+    }
+    return true
+  }
+
+  const ensureOrder = () => {
+    if (!currentOrder && user) startNewOrder(user.id, user.name)
+  }
+
   const openEditor = (menuItemId: string) => {
     const item = cart.find(candidate => candidate.menuItemId === menuItemId)
     const menuItem = menuItems.find(candidate => candidate.id === menuItemId)
@@ -138,6 +206,7 @@ export default function OrderCart({ onSendKOT, onSettleBill, onInstantCheckout, 
 
   const handleQuickAdd = () => {
     if (!quickSearch.trim()) return
+    if (!canAddWithoutTable()) return
     const qLower = quickSearch.toLowerCase()
     const item = filteredSearchItems.find(m => 
       m.name.toLowerCase() === qLower || 
@@ -146,6 +215,7 @@ export default function OrderCart({ onSendKOT, onSettleBill, onInstantCheckout, 
     ) ?? findBestMenuItemMatch(filteredSearchItems, quickSearch)
     if (item) {
       const q = parseInt(quickQty) || 1
+      ensureOrder()
       addToCart(item, { note: quickNote })
       if (q > 1) {
         // Since addToCart already adds 1, we add the remaining (q - 1)
@@ -167,6 +237,7 @@ export default function OrderCart({ onSendKOT, onSettleBill, onInstantCheckout, 
     } else if (selectedCartItemId) {
       removeFromCart(selectedCartItemId)
       setSelectedCartItemId(null)
+      setSelectedSavedItemId(null)
       addToast('success', 'Item removed from cart')
     } else if (currentOrder && savedItems.length > 0) {
       setCancelAllItemsOrderId(currentOrder.id)
@@ -174,6 +245,8 @@ export default function OrderCart({ onSendKOT, onSettleBill, onInstantCheckout, 
       setCancelKotId(latestKot.id)
     } else if (cart.length > 0) {
       clearCart()
+      setSelectedCartItemId(null)
+      setSelectedSavedItemId(null)
       addToast('success', 'Cart cleared')
     } else if (currentOrder) {
       setCancelOrderId(currentOrder.id)
@@ -305,8 +378,8 @@ export default function OrderCart({ onSendKOT, onSettleBill, onInstantCheckout, 
         <button disabled={!selectedCartItemId} onClick={() => openEditor(selectedCartItemId!)} className="w-9 h-8 bg-sky-600 hover:bg-sky-700 text-white rounded flex items-center justify-center disabled:opacity-50 transition-colors shadow-sm"><Info size={16} /></button>
         <button disabled={!selectedCartItemId && !selectedSavedItemId} onClick={() => setIsItemDiscountModalOpen(true)} className="w-9 h-8 bg-amber-500 hover:bg-amber-600 text-white rounded flex items-center justify-center disabled:opacity-50 transition-colors shadow-sm"><BadgePercent size={16} /></button>
         <button disabled={!selectedCartItemId} onClick={() => updateQty(selectedCartItemId!, 1)} className="w-9 h-8 bg-emerald-500 hover:bg-emerald-600 text-white rounded flex items-center justify-center disabled:opacity-50 transition-colors shadow-sm"><Plus size={16} /></button>
-        <button disabled={!selectedCartItemId} onClick={() => updateQty(selectedCartItemId!, -1)} className="w-9 h-8 bg-orange-500 hover:bg-orange-600 text-white rounded flex items-center justify-center disabled:opacity-50 transition-colors shadow-sm"><Minus size={16} /></button>
-        <button disabled={!selectedCartItemId} onClick={() => removeFromCart(selectedCartItemId!)} className="w-9 h-8 bg-rose-500 hover:bg-rose-600 text-white rounded flex items-center justify-center disabled:opacity-50 transition-colors shadow-sm"><Trash2 size={16} /></button>
+        <button disabled={focusedRowIndex < 0} onClick={() => changeFocusedQty(-1)} className="w-9 h-8 bg-orange-500 hover:bg-orange-600 text-white rounded flex items-center justify-center disabled:opacity-50 transition-colors shadow-sm"><Minus size={16} /></button>
+        <button disabled={focusedRowIndex < 0} onClick={removeFocusedRow} className="w-9 h-8 bg-rose-500 hover:bg-rose-600 text-white rounded flex items-center justify-center disabled:opacity-50 transition-colors shadow-sm"><Trash2 size={16} /></button>
         
         <div className="ml-auto flex items-center gap-3">
           <div className="flex flex-col items-center">

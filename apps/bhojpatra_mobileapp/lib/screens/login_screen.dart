@@ -29,6 +29,15 @@ class _LoginScreenState extends State<LoginScreen> {
   bool _busy = false, _discovering = false, _obscure = true, _manual = false;
   List<LanDesktopCandidate> _discovered = const [];
 
+  String? get _counterName {
+    final selected = _discovered
+        .where((candidate) => candidate.url == _server.text)
+        .firstOrNull;
+    final candidate = selected ?? _discovered.firstOrNull;
+    final name = text(candidate?.outletName, fallback: text(candidate?.name));
+    return name.isEmpty ? null : name;
+  }
+
   @override
   void initState() {
     super.initState();
@@ -83,7 +92,9 @@ class _LoginScreenState extends State<LoginScreen> {
   }
 
   Future<void> _submit() async {
-    if (_login.text.trim().isEmpty || _password.text.isEmpty) {
+    final loginId = _login.text.trim();
+    final secret = _password.text.trim();
+    if (loginId.isEmpty || secret.isEmpty) {
       appToast(
         context,
         'Enter your staff or owner login and password / PIN.',
@@ -96,14 +107,14 @@ class _LoginScreenState extends State<LoginScreen> {
       final session = _mode == 'lan'
           ? await CloudApi.loginAutoLan(
               _server.text,
-              _login.text,
-              _password.text,
+              loginId,
+              secret,
               allowCloudFallback: false,
             )
           : await CloudApi.login(
               _server.text,
-              _login.text,
-              _password.text,
+              loginId,
+              secret,
               mode: _mode,
             );
       if (widget.captainOnly &&
@@ -145,10 +156,10 @@ class _LoginScreenState extends State<LoginScreen> {
               children: [
                 const BrandLogo(size: 78),
                 const SizedBox(height: 12),
-                const Text(
-                  'BhojPatra',
+                Text(
+                  _counterName ?? 'BhojPatra',
                   textAlign: TextAlign.center,
-                  style: TextStyle(
+                  style: const TextStyle(
                     fontSize: 30,
                     fontWeight: FontWeight.w900,
                     color: Brand.navy,
@@ -286,7 +297,13 @@ class _LoginScreenState extends State<LoginScreen> {
                                   for (final c in _discovered)
                                     ChoiceChip(
                                       label: Text(
-                                        c.outletName ?? c.name ?? c.url,
+                                        text(
+                                          c.outletName,
+                                          fallback: text(
+                                            c.name,
+                                            fallback: c.url,
+                                          ),
+                                        ),
                                       ),
                                       selected: _server.text == c.url,
                                       onSelected: _busy
@@ -334,7 +351,7 @@ class _LoginScreenState extends State<LoginScreen> {
                           textInputAction: TextInputAction.next,
                           autofillHints: const [AutofillHints.username],
                           decoration: const InputDecoration(
-                            labelText: 'Email or phone',
+                            labelText: 'Login ID (email or phone)',
                             prefixIcon: Icon(Icons.person_outline, size: 20),
                           ),
                         ),
@@ -348,7 +365,7 @@ class _LoginScreenState extends State<LoginScreen> {
                             if (!_busy) _submit();
                           },
                           decoration: InputDecoration(
-                            labelText: 'Password / PIN',
+                            labelText: 'Password or PIN',
                             prefixIcon: const Icon(
                               Icons.lock_outline,
                               size: 20,

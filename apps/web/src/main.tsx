@@ -5,6 +5,7 @@ import App from './App'
 import './styles/globals.css'
 import { isTauriDesktop } from './lib/localDb'
 import DesktopBootstrap from './components/sync/DesktopBootstrap'
+import ErrorBoundary from './components/shared/ErrorBoundary'
 import { I18nRuntime } from './lib/i18n'
 
 if (isTauriDesktop()) {
@@ -44,9 +45,11 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>
     <I18nRuntime />
     <BrowserRouter>
-      <DesktopBootstrap>
-        <App />
-      </DesktopBootstrap>
+      <ErrorBoundary title="BhojPatra hit an unexpected error">
+        <DesktopBootstrap>
+          <App />
+        </DesktopBootstrap>
+      </ErrorBoundary>
     </BrowserRouter>
   </React.StrictMode>
 )

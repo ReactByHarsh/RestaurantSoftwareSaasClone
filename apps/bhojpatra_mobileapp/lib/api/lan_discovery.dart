@@ -33,7 +33,7 @@ class LanDiscovery {
 
   static Future<List<LanDesktopCandidate>> discover({
     String? preferredUrl,
-    Duration timeout = const Duration(seconds: 5),
+    Duration timeout = const Duration(seconds: 8),
   }) async {
     if (Platform.isAndroid &&
         await _platform.invokeMethod<bool>('prepareDiscovery') != true) {
@@ -65,7 +65,7 @@ class LanDiscovery {
         (await _likelyHotspotUrls()).map((url) => addProbe(url, 'hotspot')),
       );
 
-      final remaining = timeout - const Duration(seconds: 2);
+      final remaining = timeout - const Duration(seconds: 3);
       if (candidates.isEmpty && remaining.inMilliseconds > 0) {
         await _scanLocalSubnets(candidates, seen, timeout: remaining);
       }
@@ -81,6 +81,7 @@ class LanDiscovery {
   static Future<LanDesktopCandidate?> probe(
     String url, {
     String source = 'manual',
+    Duration timeout = const Duration(milliseconds: 1200),
   }) async {
     final normalized = normalizeLanUrl(url);
     if (normalized.isEmpty) return null;
@@ -89,7 +90,7 @@ class LanDiscovery {
     try {
       final response = await http
           .get(uri, headers: {'Accept': 'application/json'})
-          .timeout(const Duration(milliseconds: 750));
+          .timeout(timeout);
       if (response.statusCode < 200 || response.statusCode >= 300) return null;
       final payload = jsonDecode(response.body) as Map<String, dynamic>;
       if (payload['app'] != 'bhojpatra-desk') return null;
@@ -122,9 +123,21 @@ class LanDiscovery {
         InternetAddress('255.255.255.255'),
         ...await _broadcastAddresses(),
       };
-      for (final target in targets) {
-        socket.send(payload, target, discoveryPort);
+      void sendProbe() {
+        for (final target in targets) {
+          try {
+            socket?.send(payload, target, discoveryPort);
+          } catch (_) {
+            // A closing socket must not break discovery.
+          }
+        }
       }
+
+      sendProbe();
+      final resend = Timer(
+        const Duration(milliseconds: 700),
+        sendProbe,
+      );
 
       final probes = <Future<void>>[];
       late StreamSubscription subscription;
@@ -142,7 +155,8 @@ class LanDiscovery {
           }),
         );
       });
-      await Future<void>.delayed(const Duration(milliseconds: 1200));
+      await Future<void>.delayed(const Duration(milliseconds: 3000));
+      resend.cancel();
       await subscription.cancel();
       await Future.wait(probes);
     } catch (_) {
@@ -161,6 +175,9 @@ class LanDiscovery {
       'http://192.168.137.1:$httpPort',
       'http://192.168.137.100:$httpPort',
       'http://172.20.10.1:$httpPort',
+      'http://192.168.0.1:$httpPort',
+      'http://192.168.1.1:$httpPort',
+      'http://10.0.0.1:$httpPort',
     };
     for (final address in await _localIpv4Addresses()) {
       final parts = address.address.split('.');
@@ -197,7 +214,13 @@ class LanDiscovery {
           .take(batchSize)
           .where((url) => seen.add(normalizeLanUrl(url)));
       final results = await Future.wait(
-        batch.map((url) => probe(url, source: 'scan')),
+        batch.map(
+          (url) => probe(
+            url,
+            source: 'scan',
+            timeout: const Duration(milliseconds: 450),
+          ),
+        ),
       );
       candidates.addAll(results.whereType<LanDesktopCandidate>());
     }
@@ -229,16 +252,19 @@ class LanDiscovery {
 
   static Future<List<InternetAddress>> _broadcastAddresses() async {
     final addresses = await _localIpv4Addresses();
-    final broadcasts = <InternetAddress>[];
+    final broadcasts = <InternetAddress>{};
     for (final address in addresses) {
       final parts = address.address.split('.');
       if (parts.length == 4) {
         broadcasts.add(
           InternetAddress('${parts[0]}.${parts[1]}.${parts[2]}.255'),
         );
+        broadcasts.add(
+          InternetAddress('${parts[0]}.${parts[1]}.255.255'),
+        );
       }
     }
-    return broadcasts;
+    return broadcasts.toList();
   }
 
   static bool _isPrivateIpv4(String value) {

@@ -26,6 +26,7 @@ import { getDeviceId, getOrderSyncHealth, syncOrderDeltasNow } from '../../lib/o
 import { guardCloudSession } from '../../lib/cloudTransport'
 import { createDailyLocalBackup, getLanServerStatus, isTauriDesktop, readLocalDatabaseBackup, restoreLocalDatabaseBackup, saveDesktopState, type LanServerStatus, type LocalBackupResult } from '../../lib/localDb'
 import { getLanBridgeStatus, type LanBridgeStatus } from '../../lib/lanBridge'
+import ErrorBoundary from '../shared/ErrorBoundary'
 import { getDictionary, LANGUAGE_OPTIONS, useI18n } from '../../lib/i18n'
 import { MENU_LANGUAGES, menuLanguageDisplay } from '../../lib/menuTranslate'
 
@@ -77,6 +78,7 @@ export default function SettingsScreen() {
   const [syncHealth, setSyncHealth] = useState<{ pending: number; conflicts: number; oldestPendingAt?: string }>({ pending: 0, conflicts: 0 })
   const [selectedLanguage, setSelectedLanguage] = useState(language)
   const [menuLanguageDraft, setMenuLanguageDraft] = useState(outlet.menuLanguage ?? 'en')
+  const lanUrls = lanStatus?.urls ?? []
 
   useEffect(() => {
     setSelectedLanguage(language)
@@ -88,7 +90,9 @@ export default function SettingsScreen() {
 
   useEffect(() => {
     let active = true
-    const refresh = () => void getOrderSyncHealth().then((health) => { if (active) setSyncHealth(health) })
+    const refresh = () => void getOrderSyncHealth()
+      .then((health) => { if (active) setSyncHealth(health) })
+      .catch(() => { if (active) setSyncHealth({ pending: 0, conflicts: 0 }) })
     refresh()
     const timer = window.setInterval(refresh, 10_000)
     return () => { active = false; window.clearInterval(timer) }
@@ -99,7 +103,7 @@ export default function SettingsScreen() {
     const refresh = async () => {
       try {
         const status = isTauriDesktop() ? await getLanServerStatus() : await getLanBridgeStatus()
-        if (!cancelled && status) setLanStatus(status)
+        if (!cancelled && status) setLanStatus({ ...status, urls: Array.isArray(status.urls) ? status.urls : [] })
       } catch {
         if (!cancelled) setLanStatus(null)
       }
@@ -589,6 +593,7 @@ export default function SettingsScreen() {
       </div>
 
       <div className="flex-1 overflow-auto p-4 sm:p-6 lg:px-8">
+        <ErrorBoundary title="Settings could not be displayed">
         <div className="space-y-4 pb-8">
 
           {/* LANGUAGE */}
@@ -735,7 +740,7 @@ export default function SettingsScreen() {
                   {lastLocalBackup && (
                     <div className="mt-3 space-y-1 rounded-xl border border-emerald-100 bg-emerald-50 p-3">
                       <p className="text-[10px] font-black uppercase tracking-wider text-emerald-700">{lastLocalBackup.fileName} • {(lastLocalBackup.sizeBytes / 1024 / 1024).toFixed(2)} MB</p>
-                      {lastLocalBackup.paths.map(path => <p key={path} className="break-all font-mono text-[10px] font-bold text-slate-600">{path}</p>)}
+                      {(lastLocalBackup.paths ?? []).map(path => <p key={path} className="break-all font-mono text-[10px] font-bold text-slate-600">{path}</p>)}
                     </div>
                   )}
                 </div>
@@ -893,11 +898,11 @@ export default function SettingsScreen() {
                         <p className="text-[10px] font-black uppercase tracking-wider text-slate-500">Primary LAN URL</p>
                         <p className="mt-1 break-all font-mono text-sm font-black text-slate-800">{lanStatus.primaryUrl ?? `http://127.0.0.1:${lanStatus.port}`}</p>
                       </div>
-                      {lanStatus.urls.filter(url => !url.includes('127.0.0.1')).length > 1 && (
+                      {lanUrls.filter(url => !url.includes('127.0.0.1')).length > 1 && (
                         <div className="mt-2 rounded-xl border border-white/80 bg-white/60 px-3 py-2">
                           <p className="text-[10px] font-black uppercase tracking-wider text-slate-500">Other detected LAN URLs</p>
                           <div className="mt-1 space-y-1">
-                            {lanStatus.urls.filter(url => !url.includes('127.0.0.1') && url !== lanStatus.primaryUrl).map(url => (
+                            {lanUrls.filter(url => !url.includes('127.0.0.1') && url !== lanStatus.primaryUrl).map(url => (
                               <p key={url} className="break-all font-mono text-xs font-bold text-slate-700">{url}</p>
                             ))}
                           </div>
@@ -1037,6 +1042,7 @@ export default function SettingsScreen() {
           </section>
 
         </div>
+        </ErrorBoundary>
       </div>
     </div>
   )

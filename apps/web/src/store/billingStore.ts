@@ -2149,10 +2149,10 @@ export const useBillingStore = create<BillingStore>()(
             tables: state.tables.map((table) => table.activeOrderId === order.id ? { ...table, status: 'available' as TableStatus, activeOrderId: undefined } : table),
             currentOrder: null,
             cart: [],
-            selectedTableId: null,
+            selectedTableId: state.selectedTableId,
           }
         } else {
-          nextState = { currentOrder: null, cart: [], selectedTableId: null }
+          nextState = { currentOrder: null, cart: [], selectedTableId: state.selectedTableId }
         }
 
         if (state.activeOrderType === 'dine_in' && state.selectedTableId) {
@@ -2601,7 +2601,7 @@ export const useBillingStore = create<BillingStore>()(
           currentOrder: state.currentOrder?.id === orderId ? null : state.currentOrder,
           cart: state.currentOrder?.id === orderId ? [] : state.cart,
           savedCarts: newSavedCarts,
-          selectedTableId: state.currentOrder?.id === orderId ? null : state.selectedTableId,
+          selectedTableId: state.selectedTableId,
           inventoryItems: shouldRestoreRecipes ? applyRecipeStockDelta(state, orderItemsBeforeCancellation, 'restore') : state.inventoryItems,
           auditLogs: addAudit(state, shouldRestoreRecipes ? 'recipe.stock.restored' : 'order.cancelled', shouldRestoreRecipes ? 'inventory' : 'order', shouldRestoreRecipes ? `Restored recipes after order cancellation: ${reason}` : reason, orderId),
         }
@@ -2855,8 +2855,8 @@ export const useBillingStore = create<BillingStore>()(
             orders: current.orders.map(o => o.id === order.id ? updatedOrder : o),
             currentOrder: current.currentOrder?.id === order.id ? (hasRemainingItems ? updatedOrder : null) : current.currentOrder,
             kots: updatedKots,
-            cart: current.currentOrder?.id === order.id && !hasRemainingItems ? [] : current.cart,
-            selectedTableId: current.currentOrder?.id === order.id && !hasRemainingItems ? null : current.selectedTableId,
+            cart: current.cart,
+            selectedTableId: current.selectedTableId,
             savedCarts: !hasRemainingItems && order.tableId ? Object.fromEntries(Object.entries(current.savedCarts).filter(([tableId]) => tableId !== order.tableId)) as Record<string, CartItem[]> : current.savedCarts,
             tables: !hasRemainingItems && order.tableId
               ? current.tables.map((table) => table.id === order.tableId || table.activeOrderId === order.id ? { ...table, status: 'available' as TableStatus, activeOrderId: undefined } : table)
@@ -2905,7 +2905,7 @@ export const useBillingStore = create<BillingStore>()(
             } : candidate),
             currentOrder: current.currentOrder?.id === orderId ? null : current.currentOrder,
             cart: current.currentOrder?.id === orderId ? [] : current.cart,
-            selectedTableId: current.currentOrder?.id === orderId ? null : current.selectedTableId,
+            selectedTableId: current.selectedTableId,
             savedCarts,
             tables: current.tables.map((table) => table.activeOrderId === orderId || table.id === order.tableId ? { ...table, status: 'available' as TableStatus, activeOrderId: undefined } : table),
             auditLogs: addAudit(current, 'order.items.cancelled', 'order', `Cancelled all items: ${reason}`, orderId),

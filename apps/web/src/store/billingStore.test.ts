@@ -599,3 +599,48 @@ describe('whole-table transfers', () => {
     expect(useBillingStore.getState().savedCarts['table-2']).toEqual([destinationCart])
   })
 })
+
+describe('cancel keeps the table session', () => {
+  beforeEach(() => {
+    useBillingStore.getState().reset()
+    const activeOrder = order('running')
+    useBillingStore.setState({
+      tables: [table(activeOrder.id)],
+      orders: [activeOrder],
+      orderItems: [{ ...savedOrderItem, orderId: activeOrder.id }],
+      kots: [],
+      currentOrder: activeOrder,
+      selectedTableId: 'table-1',
+      cart: [cartItem],
+      savedCarts: { 'table-1': [cartItem] },
+      activeOrderType: 'dine_in',
+    })
+  })
+
+  it('keeps the table selected after cancelling all order items', () => {
+    expect(useBillingStore.getState().cancelOrderItems('order-1', 'Test cancel')).toBe(true)
+
+    const state = useBillingStore.getState()
+    expect(state.currentOrder).toBeNull()
+    expect(state.selectedTableId).toBe('table-1')
+    expect(state.tables[0]).toMatchObject({ status: 'available', activeOrderId: undefined })
+  })
+
+  it('keeps the table selected after cancelling the whole order', () => {
+    useBillingStore.getState().cancelOrder('order-1', 'Test cancel')
+
+    const state = useBillingStore.getState()
+    expect(state.currentOrder).toBeNull()
+    expect(state.selectedTableId).toBe('table-1')
+    expect(state.tables[0]).toMatchObject({ status: 'available', activeOrderId: undefined })
+  })
+
+  it('keeps the table selected after clearing the draft cart', () => {
+    useBillingStore.getState().clearCart()
+
+    const state = useBillingStore.getState()
+    expect(state.currentOrder).toBeNull()
+    expect(state.cart).toEqual([])
+    expect(state.selectedTableId).toBe('table-1')
+  })
+})

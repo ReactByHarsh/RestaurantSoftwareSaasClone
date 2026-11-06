@@ -81,9 +81,12 @@ export const useStaffStore = create<StaffStore>()(
       findByLogin: (emailOrPhone) => {
         const login = normalizeLogin(emailOrPhone)
         if (!login) return undefined
-        return get().staff.find((account) =>
+        const direct = get().staff.find((account) =>
           normalizeLogin(account.email) === login || normalizeLogin(account.phone) === login
         )
+        if (direct) return direct
+        const named = get().staff.filter((account) => normalizeLogin(account.name) === login)
+        return named.length === 1 ? named[0] : undefined
       },
 
       addStaff: (input) => {

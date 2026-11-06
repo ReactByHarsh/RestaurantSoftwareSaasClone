@@ -60,7 +60,7 @@ Map<String, dynamic> emptySnapshot(SavedSession session) {
       'tenantId': session.tenantId,
       'name': text(
         session.user['restaurantName'],
-        fallback: 'BhojPatra Restaurant',
+        fallback: 'BhojPatra Desk',
       ),
       'code': 'MOB',
       'timezone': 'Asia/Kolkata',

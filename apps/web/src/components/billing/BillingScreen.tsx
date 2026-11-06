@@ -5,13 +5,13 @@ import {
   ScanBarcode, X, ReceiptText, ArrowLeft, LayoutGrid, Clock,
   PlayCircle, HandPlatter, Printer, CheckCircle, ArrowRightLeft,
   GitMerge, Users, PanelRightClose, PanelRightOpen, Table2,
+  UtensilsCrossed, Wine,
 } from 'lucide-react'
 import { getMenuItemPriceForSection, getSectionAdjustedPrice, useBillingStore } from '../../store/billingStore'
 import { useAuthStore } from '../../store/authStore'
 import { useUIStore } from '../../store/uiStore'
 import { hasPermission } from '../../lib/permissions'
-import type { MenuItem, Modifier, OrderType, RestaurantTable, Order } from '../../lib/types'
-import CategoryRail from './CategoryRail'
+import type { MenuItem, MenuCategory, Modifier, OrderType, RestaurantTable, Order } from '../../lib/types'
 import MenuItemCard from './MenuItemCard'
 import OrderCart from './OrderCart'
 import PaymentDrawer from './PaymentDrawer'
@@ -273,7 +273,8 @@ export default function BillingScreen({ isModal = false, modalTableId, autoOpenP
   const [targetTableId, setTargetTableId] = useState('')
 
   const [searchQuery, setSearchQuery] = useState('')
-  const [activeCategoryId, setActiveCategoryId] = useState<string>('all')
+  const [activeCategoryId, setActiveCategoryId] = useState<string | null>(null)
+  const [activeGroup, setActiveGroup] = useState<'all' | 'food' | 'bar'>('food')
   const [activeFloorId, setActiveFloorId] = useState<string>('all')
   const [menuPage, setMenuPage] = useState(1)
   const [showPayment, setShowPayment] = useState(false)
@@ -347,46 +348,81 @@ export default function BillingScreen({ isModal = false, modalTableId, autoOpenP
   }, [autoOpenPayment, currentOrder, searchParams, setSearchParams])
 
   // ── menu data ────────────────────────────────────────────────────────────
-  const topSellingItemRank = useMemo(() => {
-    const paidOrderIds = new Set(
-      orders
-        .filter(order => order.paymentStatus === 'paid' && order.status !== 'cancelled')
-        .map(order => order.id)
-    )
-    const totals = new Map<string, { qty: number; revenuePaise: number }>()
-    orderItems.forEach((item) => {
-      if (!paidOrderIds.has(item.orderId) || item.status === 'cancelled') return
-      const current = totals.get(item.menuItemId) ?? { qty: 0, revenuePaise: 0 }
-      current.qty += item.quantity
-      current.revenuePaise += item.totalPaise
-      totals.set(item.menuItemId, current)
+  const saleableMenuItems = useMemo(() => menuItems.filter(isSaleableMenuItem), [menuItems])
+
+  const menuCategoryLabel = (category: MenuCategory) =>
+    menuLanguage !== 'en' ? category.nameTranslations?.[menuLanguage] || category.name : category.name
+
+  const categoryItemCounts = useMemo(() => {
+    const counts = new Map<string, number>()
+    saleableMenuItems.forEach(item => counts.set(item.categoryId, (counts.get(item.categoryId) ?? 0) + 1))
+    return counts
+  }, [saleableMenuItems])
+
+  const categoryCards = useMemo(() => {
+    const barPattern = /(bar|liquor|alcohol|beer|wine|whisky|whiskey|rum|vodka|gin|brandy|scotch|tequila|spirit|बार|दारू|मदिरा|मद्य)/i
+    const activeCategories = menuCategories.filter(category => category.isActive)
+    const childrenByParent = new Map<string, MenuCategory[]>()
+    const categoryById = new Map(activeCategories.map(category => [category.id, category]))
+    activeCategories.forEach(category => {
+      if (!category.parentId) return
+      const list = childrenByParent.get(category.parentId) ?? []
+      list.push(category)
+      childrenByParent.set(category.parentId, list)
     })
-    return new Map(
-      Array.from(totals.entries())
-        .sort((a, b) => b[1].qty - a[1].qty || b[1].revenuePaise - a[1].revenuePaise)
-        .slice(0, 20)
-        .map(([id], index) => [id, index])
+    const isBarCategory = (category: MenuCategory) => {
+      const parent = category.parentId ? categoryById.get(category.parentId) : undefined
+      return barPattern.test([category.name, category.billGroup, parent?.name, parent?.billGroup].filter(Boolean).join(' '))
+    }
+    const deepCount = (category: MenuCategory) =>
+      (categoryItemCounts.get(category.id) ?? 0) +
+      (childrenByParent.get(category.id) ?? []).reduce((sum, child) => sum + (categoryItemCounts.get(child.id) ?? 0), 0)
+    const palette = ['#EA580C', '#0EA5E9', '#7C3AED', '#059669', '#DB2777', '#CA8A04', '#4F46E5', '#0891B2']
+    const cards: { id: string; name: string; parentName?: string; count: number; color?: string; isBar: boolean; sortOrder: number }[] = []
+    const sortCategories = (rows: MenuCategory[]) => [...rows].sort((a, b) =>
+      a.sortOrder - b.sortOrder || menuCategoryLabel(a).localeCompare(menuCategoryLabel(b))
     )
-  }, [orderItems, orders])
+
+    sortCategories(activeCategories.filter(category => !category.parentId)).forEach(parent => {
+      const parentIsBar = isBarCategory(parent)
+      if (activeGroup === 'bar' && !parentIsBar) return
+      if (activeGroup === 'food' && parentIsBar) return
+      const children = sortCategories((childrenByParent.get(parent.id) ?? []).filter(child => (categoryItemCounts.get(child.id) ?? 0) > 0))
+      const directCount = categoryItemCounts.get(parent.id) ?? 0
+      if (children.length > 0) {
+        if (directCount > 0) {
+          cards.push({ id: parent.id, name: menuCategoryLabel(parent), count: directCount, color: parent.color, isBar: parentIsBar, sortOrder: parent.sortOrder })
+        }
+        children.forEach(child => cards.push({
+          id: child.id,
+          name: menuCategoryLabel(child),
+          parentName: menuCategoryLabel(parent),
+          count: categoryItemCounts.get(child.id) ?? 0,
+          color: child.color ?? parent.color,
+          isBar: isBarCategory(child),
+          sortOrder: child.sortOrder,
+        }))
+      } else if (deepCount(parent) > 0) {
+        cards.push({ id: parent.id, name: menuCategoryLabel(parent), count: deepCount(parent), color: parent.color, isBar: parentIsBar, sortOrder: parent.sortOrder })
+      }
+    })
+
+    return cards.map((card, index) => ({ ...card, color: card.color || palette[index % palette.length] }))
+  }, [activeGroup, menuCategories, categoryItemCounts, menuLanguage])
+
+  const selectedCategory = activeCategoryId ? menuCategories.find(category => category.id === activeCategoryId) : null
 
   const filteredItems = useMemo(() => {
-    let items = menuItems.filter(isSaleableMenuItem)
-    const childCategoryIds = new Set(menuCategories.filter(category => category.parentId === activeCategoryId).map(category => category.id))
-    if (activeCategoryId === 'favorites') items = items.filter(i => topSellingItemRank.has(i.id) || i.isFavorite)
-    else if (activeCategoryId !== 'all') items = items.filter(i => i.categoryId === activeCategoryId || childCategoryIds.has(i.categoryId))
-    if (searchQuery) {
-      items = filterMenuItemsByQuery(items, searchQuery)
+    let items = saleableMenuItems
+    if (!searchQuery && activeCategoryId) {
+      const childCategoryIds = new Set(menuCategories.filter(category => category.parentId === activeCategoryId).map(category => category.id))
+      items = items.filter(item => item.categoryId === activeCategoryId || childCategoryIds.has(item.categoryId))
     }
-    return [...items].sort((a, b) => {
-      if (activeCategoryId === 'favorites') {
-        const aRank = topSellingItemRank.get(a.id) ?? 999
-        const bRank = topSellingItemRank.get(b.id) ?? 999
-        if (aRank !== bRank) return aRank - bRank
-      }
-      return a.name.localeCompare(b.name, undefined, { sensitivity: 'base' })
-    })
-  }, [activeCategoryId, searchQuery, menuItems, menuCategories, topSellingItemRank])
+    if (searchQuery) items = filterMenuItemsByQuery(items, searchQuery)
+    return [...items].sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: 'base' }))
+  }, [activeCategoryId, searchQuery, saleableMenuItems, menuCategories])
 
+  const showCategoryCards = !searchQuery && !activeCategoryId && menuCategories.length > 0
   const menuPageCount  = Math.max(1, Math.ceil(filteredItems.length / MENU_PAGE_SIZE))
   const safeMenuPage   = Math.min(menuPage, menuPageCount)
   const paginatedItems = useMemo(() => filteredItems.slice((safeMenuPage-1)*MENU_PAGE_SIZE, safeMenuPage*MENU_PAGE_SIZE), [filteredItems, safeMenuPage])
@@ -401,6 +437,12 @@ export default function BillingScreen({ isModal = false, modalTableId, autoOpenP
   const hasBillableItems = cart.length > 0 || (currentOrder ? orderItems.some(item => item.orderId === currentOrder.id && item.status !== 'cancelled') : false)
   const ordersById     = useMemo(() => new Map(orders.map(o => [o.id, o])), [orders])
   useEffect(() => { setMenuPage(1) }, [activeCategoryId, searchQuery])
+
+  useEffect(() => {
+    if (activeCategoryId && !menuCategories.some(category => category.id === activeCategoryId)) {
+      setActiveCategoryId(null)
+    }
+  }, [activeCategoryId, menuCategories])
 
   // ── tables data ──────────────────────────────────────────────────────────
   const displayTables = useMemo(() =>
@@ -425,7 +467,8 @@ export default function BillingScreen({ isModal = false, modalTableId, autoOpenP
     clearCart()
     setShowPayment(false)
     setSearchQuery('')
-    setActiveCategoryId('all')
+    setActiveCategoryId(null)
+    setActiveGroup('food')
     if (activeOrderType === 'dine_in' && !isModal) navigate('/app/tables')
     addToast('success', 'Ready for new order')
   }
@@ -768,7 +811,26 @@ export default function BillingScreen({ isModal = false, modalTableId, autoOpenP
           // Mobile: show/hide based on tab
           mobileTab === 'menu' ? 'flex flex-1' : 'hidden'
         )}>
-          <CategoryRail categories={menuCategories} items={menuItems.filter(isSaleableMenuItem)} activeCategoryId={activeCategoryId} onSelect={setActiveCategoryId} menuLanguage={menuLanguage} />
+          <div className="flex items-center gap-1.5 px-2.5 py-2 bg-white border-b border-slate-100 flex-shrink-0">
+            {([
+              { id: 'all' as const, label: 'All', Icon: LayoutGrid },
+              { id: 'food' as const, label: 'Food', Icon: UtensilsCrossed },
+              { id: 'bar' as const, label: 'Bar', Icon: Wine },
+            ]).map(tab => (
+              <button
+                key={tab.id}
+                onClick={() => { setActiveGroup(tab.id); setActiveCategoryId(null); setSearchQuery('') }}
+                className={clsx(
+                  'flex flex-1 items-center justify-center gap-1.5 rounded-lg border px-3 py-2 text-[11px] font-black uppercase tracking-wider transition-all active:scale-95',
+                  activeGroup === tab.id
+                    ? 'bg-primary text-white border-primary shadow-sm shadow-primary/20'
+                    : 'bg-white text-slate-500 border-slate-200 hover:border-slate-300 hover:text-slate-700'
+                )}
+              >
+                <tab.Icon size={14} strokeWidth={2.5} /> {tab.label}
+              </button>
+            ))}
+          </div>
 
           {/* Search */}
           <div className="px-2.5 py-1.5 bg-white border-b border-slate-100 flex-shrink-0 shadow-sm">
@@ -801,20 +863,72 @@ export default function BillingScreen({ isModal = false, modalTableId, autoOpenP
                 <ShoppingCart size={40} className="text-slate-300" />
                 <p className="text-base font-bold text-slate-400">No menu items yet</p>
               </div>
+            ) : showCategoryCards ? (
+              categoryCards.length === 0 ? (
+                <div className="flex flex-col items-center justify-center h-full gap-3">
+                  <LayoutGrid size={40} className="text-slate-300" />
+                  <div className="text-center">
+                    <p className="text-base font-bold text-slate-400">No {activeGroup === 'all' ? '' : `${activeGroup} `}categories with products yet</p>
+                    <p className="mt-1 text-xs font-bold text-slate-400">Create a category and add products from the Menu page.</p>
+                  </div>
+                </div>
+              ) : (
+                <div className="grid grid-cols-2 sm:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-5 gap-2.5 p-0.5">
+                  {categoryCards.map(card => (
+                    <button
+                      key={card.id}
+                      onClick={() => { setActiveCategoryId(card.id); setMenuPage(1) }}
+                      className="group relative flex min-h-[116px] flex-col rounded-2xl border-2 border-white bg-white p-3.5 text-left shadow-sm transition-all hover:-translate-y-0.5 hover:border-primary/30 hover:shadow-lg active:scale-[0.98]"
+                    >
+                      <span className="absolute inset-x-0 top-0 h-1 rounded-t-2xl" style={{ backgroundColor: card.color }} />
+                      <div className="flex items-start justify-between gap-2">
+                        <span className="flex h-11 w-11 items-center justify-center rounded-xl" style={{ backgroundColor: `${card.color}18`, color: card.color }}>
+                          {card.isBar ? <Wine size={22} strokeWidth={2.3} /> : <UtensilsCrossed size={22} strokeWidth={2.3} />}
+                        </span>
+                        <ChevronRight size={16} className="mt-1 text-slate-300 transition-colors group-hover:text-primary" />
+                      </div>
+                      <p className="mt-2.5 line-clamp-2 text-sm font-black leading-tight text-slate-800">{card.name}</p>
+                      <p className="mt-auto pt-1 text-[10px] font-bold uppercase tracking-wider text-slate-500">
+                        {card.count} item{card.count === 1 ? '' : 's'}{card.parentName ? ` · ${card.parentName}` : ''}
+                      </p>
+                    </button>
+                  ))}
+                </div>
+              )
             ) : filteredItems.length === 0 ? (
               <div className="flex flex-col items-center justify-center h-full gap-4">
                 <Search size={40} className="text-slate-300" />
                 <div className="text-center">
                   <p className="text-base font-bold text-slate-400">No items found</p>
-                  {searchQuery && (
+                  {searchQuery ? (
                     <button onClick={() => setSearchQuery('')} className="text-sm font-bold text-primary mt-2 inline-block px-4 py-2 bg-primary-50 rounded-lg">
                       Clear search
+                    </button>
+                  ) : activeCategoryId && (
+                    <button onClick={() => setActiveCategoryId(null)} className="text-sm font-bold text-primary mt-2 inline-block px-4 py-2 bg-primary-50 rounded-lg">
+                      Back to categories
                     </button>
                   )}
                 </div>
               </div>
             ) : (
               <>
+                {(selectedCategory || searchQuery) && (
+                  <div className="mb-2 flex items-center justify-between gap-2 rounded-xl border border-slate-200 bg-white px-3 py-2 shadow-sm">
+                    <div className="flex min-w-0 items-center gap-2">
+                      {selectedCategory && !searchQuery && (
+                        <button onClick={() => setActiveCategoryId(null)} className="flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-lg bg-slate-100 text-slate-600 hover:bg-slate-200" title="Back to categories">
+                          <ArrowLeft size={14} />
+                        </button>
+                      )}
+                      <div className="min-w-0">
+                        <p className="truncate text-sm font-black text-slate-800">{searchQuery ? `Search results for “${searchQuery}”` : menuCategoryLabel(selectedCategory!)}</p>
+                        <p className="text-[10px] font-bold uppercase tracking-wider text-slate-400">{filteredItems.length} item{filteredItems.length === 1 ? '' : 's'}</p>
+                      </div>
+                    </div>
+                    {searchQuery && <button onClick={() => setSearchQuery('')} className="flex-shrink-0 text-[10px] font-black uppercase tracking-wider text-primary">Clear</button>}
+                  </div>
+                )}
                 <div className="grid grid-cols-2 sm:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-5 gap-2 p-0.5">
                   {paginatedItems.map(item => (
                     <MenuItemCard key={item.id} item={item} displayPricePaise={getSectionAdjustedPrice(getMenuItemPriceForSection(item, selectedFloor), selectedFloor)} displayName={menuLanguage !== 'en' ? item.nameTranslations?.[menuLanguage] : undefined} cartQty={cartQtyById.get(item.id) ?? 0} isKotItem={kotMenuItemIds.has(item.id)} onAdd={() => handleAddItem(item)} />

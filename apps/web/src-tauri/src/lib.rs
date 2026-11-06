@@ -612,10 +612,53 @@ fn normalize_login(value: &str) -> String {
     value.trim().to_lowercase()
 }
 
-fn parse_staff_accounts(value: Option<Value>) -> Vec<LanStaffAccount> {
+fn normalize_phone(value: &str) -> String {
+    let digits: String = value.chars().filter(char::is_ascii_digit).collect();
+    if digits.len() > 10 {
+        digits[digits.len() - 10..].to_string()
+    } else {
+        digits
+    }
+}
+
+fn optional_text(value: Option<&Value>) -> Option<String> {
     value
-        .and_then(|payload| serde_json::from_value::<Vec<LanStaffAccount>>(payload).ok())
-        .unwrap_or_default()
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string)
+}
+
+fn parse_staff_accounts(value: Option<Value>) -> Vec<LanStaffAccount> {
+    let Some(Value::Array(entries)) = value else {
+        return Vec::new();
+    };
+    entries
+        .into_iter()
+        .filter_map(|entry| {
+            let object = entry.as_object()?;
+            let id = optional_text(object.get("id"))?;
+            Some(LanStaffAccount {
+                id,
+                tenant_id: optional_text(object.get("tenantId"))
+                    .unwrap_or_else(|| "local_restaurant".to_string()),
+                name: optional_text(object.get("name"))
+                    .unwrap_or_else(|| "Staff".to_string()),
+                email: optional_text(object.get("email")),
+                phone: optional_text(object.get("phone")),
+                role: optional_text(object.get("role"))
+                    .unwrap_or_else(|| "cashier".to_string()),
+                status: optional_text(object.get("status"))
+                    .unwrap_or_else(|| "active".to_string()),
+                password: optional_text(object.get("password")).unwrap_or_default(),
+                pin: optional_text(object.get("pin")),
+                access_starts_at: optional_text(object.get("accessStartsAt")),
+                access_ends_at: optional_text(object.get("accessEndsAt")),
+                restaurant_name: optional_text(object.get("restaurantName")),
+                created_at: optional_text(object.get("createdAt")),
+            })
+        })
+        .collect()
 }
 
 fn is_open_order_value(order: &Value) -> bool {
@@ -792,7 +835,9 @@ fn snapshot_outlet(snapshot: &Value) -> LanOutlet {
     let name = outlet
         .and_then(|value| value.get("name"))
         .and_then(Value::as_str)
-        .unwrap_or("BhojPatra Bistro")
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("BhojPatra Desk")
         .to_string();
     let code = outlet
         .and_then(|value| value.get("code"))
@@ -931,15 +976,34 @@ fn authenticate_credentials(
         )
     })?;
     let normalized_login = normalize_login(login);
-    let Some(account) = staff.into_iter().find(|candidate| {
-        normalize_login(candidate.email.as_deref().unwrap_or("")) == normalized_login
-            || normalize_login(candidate.phone.as_deref().unwrap_or("")) == normalized_login
-    }) else {
-        return Err((
-            StatusCode::UNAUTHORIZED,
-            Json(json!({ "error": "Invalid credentials" })),
-        ));
-    };
+    let normalized_secret = secret.trim();
+    let login_phone = normalize_phone(login);
+    let account = staff
+        .iter()
+        .find(|candidate| {
+            normalize_login(candidate.email.as_deref().unwrap_or("")) == normalized_login
+                || normalize_login(candidate.phone.as_deref().unwrap_or("")) == normalized_login
+                || (!login_phone.is_empty()
+                    && normalize_phone(candidate.phone.as_deref().unwrap_or("")) == login_phone)
+        })
+        .cloned()
+        .or_else(|| {
+            let name_matches: Vec<&LanStaffAccount> = staff
+                .iter()
+                .filter(|candidate| normalize_login(&candidate.name) == normalized_login)
+                .collect();
+            if name_matches.len() == 1 {
+                Some(name_matches[0].clone())
+            } else {
+                None
+            }
+        })
+        .ok_or_else(|| {
+            (
+                StatusCode::UNAUTHORIZED,
+                Json(json!({ "error": "Invalid credentials" })),
+            )
+        })?;
 
     if account.status != "active" {
         return Err((
@@ -950,11 +1014,12 @@ fn authenticate_credentials(
     verify_account_access_window(&account)
         .map_err(|error| (StatusCode::FORBIDDEN, Json(json!({ "error": error }))))?;
     let matches_secret = |stored: &str| {
+        let stored = stored.trim();
         if let Some(expected) = stored.strip_prefix("sha256$") {
-            let actual = hex::encode(Sha256::digest(secret.as_bytes()));
+            let actual = hex::encode(Sha256::digest(normalized_secret.as_bytes()));
             expected.eq_ignore_ascii_case(&actual)
         } else {
-            stored == secret
+            stored == normalized_secret
         }
     };
     let valid_passwords = [Some(account.password.as_str()), account.pin.as_deref()];
@@ -2111,9 +2176,13 @@ fn lan_hello_payload(
         .as_ref()
         .map(|ip| format!("http://{}:{}", ip, port))
         .or(status.primary_url);
+    let name = outlet
+        .as_ref()
+        .map(|value| value.name.clone())
+        .unwrap_or_else(|| "BhojPatra Desk".to_string());
     LanHelloPayload {
         app: "bhojpatra-desk".to_string(),
-        name: "BhojPatra Desk".to_string(),
+        name,
         version: env!("CARGO_PKG_VERSION").to_string(),
         status: "ok".to_string(),
         http_port: port,
