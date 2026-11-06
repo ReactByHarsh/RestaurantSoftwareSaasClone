@@ -18,6 +18,7 @@ import PaymentDrawer from './PaymentDrawer'
 import CustomerModal from './CustomerModal'
 import OrdersScreen from '../orders/OrdersScreen'
 import { clsx } from 'clsx'
+import { getBillableOrderTotalPaise } from '../../lib/money'
 import { isSaleableMenuItem } from '../../lib/productTypes'
 import { filterMenuItemsByQuery } from '../../lib/menuSearch'
 
@@ -247,7 +248,8 @@ export default function BillingScreen({ isModal = false, modalTableId, autoOpenP
     tables, floors, menuCategories, menuItems, outlet,
     addToCart, orders,
     transferTable, mergeTable,
-    updateTableStatus, printReceipt, printCartProforma, getCustomerAccountDetails, setOrderCustomer
+    updateTableStatus, printReceipt, printCartProforma, getCustomerAccountDetails, setOrderCustomer,
+    settlePayment, getCartTotal
   } = useBillingStore()
 
   const menuLanguage = outlet.menuLanguage ?? 'en'
@@ -275,6 +277,7 @@ export default function BillingScreen({ isModal = false, modalTableId, autoOpenP
   const [activeFloorId, setActiveFloorId] = useState<string>('all')
   const [menuPage, setMenuPage] = useState(1)
   const [showPayment, setShowPayment] = useState(false)
+  const [isInstantCheckingOut, setIsInstantCheckingOut] = useState(false)
   const [mobileTab, setMobileTab] = useState<'menu' | 'cart'>('menu')
   const [customizingItem, setCustomizingItem] = useState<MenuItem | null>(null)
   const [selectedModifierIds, setSelectedModifierIds] = useState<string[]>([])
@@ -462,6 +465,39 @@ export default function BillingScreen({ isModal = false, modalTableId, autoOpenP
       return 
     }
     setShowPayment(true)
+  }
+
+  const handleInstantCheckout = async () => {
+    if (isInstantCheckingOut) return
+    if (!hasBillableItems) {
+      addToast('warning', 'Add at least one item before checkout')
+      return
+    }
+    if (!user) return
+
+    setIsInstantCheckingOut(true)
+    try {
+      const amountPaise = (currentOrder ? getBillableOrderTotalPaise(currentOrder) : 0) + getCartTotal().total
+      const settled = await settlePayment(
+        currentOrder ? currentOrder.id : null,
+        [{ method: 'cash', amountPaise }],
+        0,
+        user.id,
+        user.name,
+        undefined,
+        currentOrder?.tipPaise ?? 0
+      )
+      if (!settled) {
+        addToast('error', 'Instant checkout could not be completed. Please verify the order total.')
+        return
+      }
+      addToast('success', `Instant checkout done — ₹${(amountPaise / 100).toFixed(2)} collected in cash`)
+      setShowPayment(false)
+      if (isModal && onCloseModal) onCloseModal()
+      else navigate('/app/tables')
+    } finally {
+      setIsInstantCheckingOut(false)
+    }
   }
 
   // ── Global Barcode Listener ───────────────────────────────────────────────
@@ -828,7 +864,7 @@ export default function BillingScreen({ isModal = false, modalTableId, autoOpenP
           // Mobile: full width when cart tab is active
           mobileTab === 'cart' ? 'flex flex-1 w-full' : 'hidden lg:flex'
         )}>
-          <OrderCart onSendKOT={handleSendKOT} onSettleBill={handleSettleBill} onBackToMenu={() => setMobileTab('menu')} />
+          <OrderCart onSendKOT={handleSendKOT} onSettleBill={handleSettleBill} onInstantCheckout={handleInstantCheckout} instantCheckoutBusy={isInstantCheckingOut} onBackToMenu={() => setMobileTab('menu')} />
         </div>
       </div>
 

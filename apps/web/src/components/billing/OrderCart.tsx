@@ -1,9 +1,9 @@
 import { useEffect, useMemo, useState, useRef } from 'react'
-import { Ban, CreditCard, FileText, MessageSquareText, Minus, Pencil, Plus, SendHorizonal, UserRound, X, Trash2, Info, BadgePercent, Ticket, Bike, LogOut, Clock, User } from 'lucide-react'
+import { Ban, CreditCard, FileText, MessageSquareText, Minus, Pencil, Plus, SendHorizonal, UserRound, X, Trash2, Info, BadgePercent, Ticket, Bike, LogOut, Clock, User, Zap } from 'lucide-react'
 import { clsx } from 'clsx'
 import { useBillingStore } from '../../store/billingStore'
 import { useAuthStore } from '../../store/authStore'
-import { calculateTax, formatPaise } from '../../lib/money'
+import { calculateTax, formatPaise, getBillableOrderTotalPaise } from '../../lib/money'
 import { useUIStore } from '../../store/uiStore'
 import ReasonDialog from '../shared/ReasonDialog'
 import CancelItemDialog from './CancelItemDialog'
@@ -12,11 +12,17 @@ import DiscountModal from './DiscountModal'
 import { isSaleableMenuItem } from '../../lib/productTypes'
 import { filterMenuItemsByQuery, findBestMenuItemMatch } from '../../lib/menuSearch'
 
-interface Props { onSendKOT: () => void; onSettleBill: () => void; onBackToMenu?: () => void }
+interface Props {
+  onSendKOT: () => void
+  onSettleBill: () => void
+  onInstantCheckout: () => void
+  instantCheckoutBusy?: boolean
+  onBackToMenu?: () => void
+}
 
 const QUICK_INSTRUCTIONS = ['Add sugar', 'No sugar', 'More spice', 'Less spice', 'Less salt', 'No onion', 'No garlic']
 
-export default function OrderCart({ onSendKOT, onSettleBill, onBackToMenu }: Props) {
+export default function OrderCart({ onSendKOT, onSettleBill, onInstantCheckout, instantCheckoutBusy = false, onBackToMenu }: Props) {
   const {
     cart, currentOrder, orderItems, menuItems, kots, addToCart, payments, orders, activeOrderType, tables,
     updateQty, removeFromCart, getCartTotal, printKOT, printCartProforma, cancelKOT, cancelOrderItemQty, cancelOrderItems, clearCart, applyGlobalDiscount, applyDiscountToOrderItem,
@@ -104,6 +110,7 @@ export default function OrderCart({ onSendKOT, onSettleBill, onBackToMenu }: Pro
     discount: (currentOrder?.discountPaise ?? 0) + draftTotals.discount,
     total: (currentOrder?.totalPaise ?? 0) + draftTotals.total,
   }
+  const instantTotalPaise = (currentOrder ? getBillableOrderTotalPaise(currentOrder) : 0) + draftTotals.total
   const latestKot = currentOrder ? kots.find(kot => kot.orderId === currentOrder.id) : null
   const editingItem = editingItemId ? cart.find(item => item.menuItemId === editingItemId) : null
   const editingMenuItem = editingItem ? menuItems.find(item => item.id === editingItem.menuItemId) : null
@@ -380,7 +387,7 @@ export default function OrderCart({ onSendKOT, onSettleBill, onBackToMenu }: Pro
       </div>
 
       {/* ── BOTTOM ACTION GRID ── */}
-      <div className="p-1.5 border-t border-slate-300 bg-white flex-shrink-0 grid grid-cols-6 grid-rows-2 gap-1.5">
+      <div className="p-1.5 border-t border-slate-300 bg-white flex-shrink-0 grid grid-cols-7 grid-rows-2 gap-1.5">
         <button title="Send KOT (F3)" onClick={onSendKOT} disabled={cart.length === 0} className="flex flex-col items-center justify-center py-1.5 px-1 bg-emerald-600 hover:bg-emerald-700 text-white rounded-md gap-1 disabled:opacity-40 transition-colors shadow-sm">
           <SendHorizonal size={16} strokeWidth={2.5}/> <span className="text-[8px] font-black uppercase tracking-wider leading-none">KOT</span>
         </button>
@@ -404,6 +411,17 @@ export default function OrderCart({ onSendKOT, onSettleBill, onBackToMenu }: Pro
 
         <button title="Payment / Checkout (F2)" onClick={onSettleBill} disabled={!hasBillableItems} className="col-start-6 row-span-2 flex flex-col items-center justify-center py-3 bg-primary hover:bg-primary-dark text-white rounded-lg font-black uppercase tracking-widest text-sm disabled:opacity-40 transition-colors shadow-sm">
           Checkout
+        </button>
+
+        <button
+          title={`Instant checkout — collect ₹${(instantTotalPaise / 100).toFixed(2)} in cash`}
+          onClick={onInstantCheckout}
+          disabled={!hasBillableItems || instantCheckoutBusy}
+          className="col-start-7 row-span-2 flex flex-col items-center justify-center gap-1 py-2 bg-emerald-500 hover:bg-emerald-600 text-white rounded-lg disabled:opacity-40 transition-colors shadow-sm"
+        >
+          <Zap size={22} strokeWidth={2.5} fill="currentColor" />
+          <span className="text-[9px] font-black uppercase tracking-wider leading-none">Instant</span>
+          <span className="text-sm font-black leading-none tabular-nums">₹{(instantTotalPaise / 100).toFixed(0)}</span>
         </button>
 
         <button disabled className="flex flex-col items-center justify-center py-1.5 px-1 bg-fuchsia-500 hover:bg-fuchsia-600 text-white rounded-md gap-1 opacity-50 shadow-sm">
