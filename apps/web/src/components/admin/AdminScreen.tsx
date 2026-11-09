@@ -1,5 +1,5 @@
 import { useMemo, useState } from 'react'
-import { Activity, ChefHat, Eye, EyeOff, Layers, Plus, Receipt, ShieldCheck, Trash2, Users } from 'lucide-react'
+import { Activity, ChefHat, ChevronDown, ChevronUp, Eye, EyeOff, Layers, Plus, Receipt, ShieldCheck, Trash2, Users } from 'lucide-react'
 import { clsx } from 'clsx'
 import type { Role } from '../../lib/types'
 import type { Station } from '../../lib/types'
@@ -76,6 +76,7 @@ export default function AdminScreen() {
     cloudSync,
     addFloor,
     updateFloor,
+    reorderFloors,
     deleteFloor,
     addTable,
     updateTable,
@@ -88,6 +89,16 @@ export default function AdminScreen() {
   const cloudAuth = { accountLogin: cloudSync.accountLogin, accountSecret: cloudSync.accountSecret }
   const shouldSyncCloud = cloudSync.enabled && Boolean(cloudSync.serverUrl) && user?.tenantId !== 'local_restaurant'
   const isPlatformAdmin = user?.tenantId === 'platform' && user.role === 'admin'
+  const orderedFloors = useMemo(() => [...floors].sort((a, b) => a.sortOrder - b.sortOrder), [floors])
+  const moveFloor = (id: string, delta: number) => {
+    const index = orderedFloors.findIndex(floor => floor.id === id)
+    const target = index + delta
+    if (index < 0 || target < 0 || target >= orderedFloors.length) return
+    const ids = orderedFloors.map(floor => floor.id)
+    const [moved] = ids.splice(index, 1)
+    ids.splice(target, 0, moved)
+    reorderFloors(ids)
+  }
   const visibleTabs = isPlatformAdmin
     ? [
         { id: 'staff', label: 'Client Accounts', icon: Users },
@@ -450,10 +461,26 @@ export default function AdminScreen() {
               </div>
               <div className="p-4 grid grid-cols-1 sm:grid-cols-4 gap-3 overflow-y-auto max-h-[250px]">
                 {floors.length === 0 && <p className="text-xs font-bold text-slate-400">No floors yet.</p>}
-                {floors.map(floor => (
+                {orderedFloors.map((floor, index) => (
                   <div key={floor.id} className="p-3 rounded-xl border-2 border-slate-100 bg-slate-50 flex items-center justify-between group hover:border-slate-200 transition-colors">
                     <span className="font-black text-slate-800 text-sm">{floor.name}</span>
-                    <div className="flex gap-2.5">
+                    <div className="flex gap-2.5 items-center">
+                      <button
+                        onClick={() => moveFloor(floor.id, -1)}
+                        disabled={index === 0}
+                        className="text-slate-400 hover:text-primary transition-colors disabled:opacity-25"
+                        title="Move section up"
+                      >
+                        <ChevronUp size={13} strokeWidth={2.5} />
+                      </button>
+                      <button
+                        onClick={() => moveFloor(floor.id, 1)}
+                        disabled={index === orderedFloors.length - 1}
+                        className="text-slate-400 hover:text-primary transition-colors disabled:opacity-25"
+                        title="Move section down"
+                      >
+                        <ChevronDown size={13} strokeWidth={2.5} />
+                      </button>
                       <button
                         onClick={() => {
                           const name = window.prompt('Floor name', floor.name)

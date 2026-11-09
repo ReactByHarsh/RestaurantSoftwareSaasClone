@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { Settings as SettingsIcon, Save, Store, Printer, Bell, Wifi, Sparkles, Download, Upload, Cloud, ShieldCheck, ArrowUpCircle, Image as ImageIcon, Trash2, PanelRight, Database, Languages } from 'lucide-react'
+import { Settings as SettingsIcon, Save, Store, Printer, Bell, Wifi, Sparkles, Download, Upload, Cloud, ShieldCheck, ArrowUpCircle, Image as ImageIcon, Trash2, PanelRight, Database, Languages, CalendarClock } from 'lucide-react'
 import QRCode from 'qrcode'
 import { open as openFileDialog } from '@tauri-apps/plugin-dialog'
 import { useUIStore } from '../../store/uiStore'
@@ -1007,6 +1007,55 @@ export default function SettingsScreen() {
                 <input type="checkbox" checked={outlet.enableDirtyTableStatus !== false} onChange={event => { updateOutlet({ enableDirtyTableStatus: event.target.checked }); addToast('success', event.target.checked ? 'Dirty-table cleaning step enabled' : 'Tables will be available immediately after payment') }} className="w-5 h-5 rounded text-primary" />
                 <div><p className="font-black text-slate-800 text-sm">Dirty table / cleaning step</p><p className="text-[10px] font-bold text-slate-500 mt-0.5">Disable to skip “Dirty” and make a table available immediately after settlement.</p></div>
               </label>
+            </div>
+          </section>
+
+          <section className="bg-white rounded-2xl border-2 border-slate-100 shadow-sm overflow-hidden">
+            <div className="px-5 py-3 border-b-2 border-slate-100 bg-slate-50/50 flex items-center gap-2">
+              <CalendarClock size={18} className="text-sky-600" strokeWidth={2.5} />
+              <div>
+                <h2 className="text-sm font-black text-slate-800">Business Day</h2>
+                <p className="text-[10px] font-bold text-slate-500">Choose when a new billing day starts for late-night service.</p>
+              </div>
+            </div>
+            <div className="p-5 space-y-4">
+              <label className="flex items-center gap-3 cursor-pointer rounded-xl border-2 border-slate-100 bg-slate-50 p-4">
+                <input
+                  type="checkbox"
+                  checked={(outlet.businessDayCrossoverHour ?? 0) > 0}
+                  onChange={event => {
+                    const crossoverHour = event.target.checked ? 4 : 0
+                    updateOutlet({ businessDayCrossoverHour: crossoverHour })
+                    addToast('success', crossoverHour
+                      ? 'Late-night bills will stay on the previous business day'
+                      : 'New bills will use the calendar day')
+                  }}
+                  className="w-5 h-5 rounded text-primary"
+                />
+                <div>
+                  <p className="font-black text-slate-800 text-sm">Keep late-night bills on the previous day</p>
+                  <p className="text-[10px] font-bold text-slate-500 mt-0.5">When enabled, bills created after midnight are dated to the previous business day until the start time below.</p>
+                </div>
+              </label>
+              {(outlet.businessDayCrossoverHour ?? 0) > 0 && (
+                <label className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 rounded-xl border-2 border-slate-100 p-4">
+                  <span>
+                    <span className="block font-black text-slate-800 text-sm">New business day starts at</span>
+                    <span className="block text-[10px] font-bold text-slate-500 mt-0.5">For example, with 4:00 AM a bill at 1:30 AM belongs to the previous day.</span>
+                  </span>
+                  <select
+                    value={outlet.businessDayCrossoverHour ?? 4}
+                    onChange={event => {
+                      const crossoverHour = Number(event.target.value)
+                      updateOutlet({ businessDayCrossoverHour: crossoverHour })
+                      addToast('success', `Business day now starts at ${crossoverHour}:00 AM`)
+                    }}
+                    className="rounded-xl border-2 border-slate-200 px-3 py-2 text-sm font-black text-slate-800 outline-none focus:border-primary/50"
+                  >
+                    {[1, 2, 3, 4, 5, 6, 7, 8].map(hour => <option key={hour} value={hour}>{hour}:00 AM</option>)}
+                  </select>
+                </label>
+              )}
             </div>
           </section>
 

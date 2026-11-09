@@ -72,6 +72,8 @@ export interface OutletSettings {
   enableOrderTablesDrawer: boolean
   /** Secondary language used for translated menu and category names. English is always the base. */
   menuLanguage: string
+  /** Hour (0-12) at which a new business day starts. Bills before this hour stay on the previous day. */
+  businessDayCrossoverHour?: number
 }
 
 export interface PrintSettings {
@@ -200,6 +202,7 @@ interface BillingStore {
 
   addFloor: (name: string, settings?: Pick<Floor, 'priceAdjustmentType' | 'priceAdjustmentValue' | 'menuPriceOption'>) => void
   updateFloor: (id: string, updates: Partial<Floor>) => void
+  reorderFloors: (orderedIds: string[]) => void
   deleteFloor: (id: string) => boolean
   addTable: (input: { floorId: string; name: string; seats: number }) => void
   updateTable: (id: string, updates: Partial<RestaurantTable>) => void
@@ -271,7 +274,20 @@ interface BillingStore {
   }
 }
 
-const today = () => new Date().toISOString().split('T')[0]
+export function getBusinessDate(date: Date = new Date(), crossoverHour = 0): string {
+  const local = new Date(date.getTime())
+  if (crossoverHour > 0 && local.getHours() < crossoverHour) {
+    local.setDate(local.getDate() - 1)
+  }
+  const year = local.getFullYear()
+  const month = String(local.getMonth() + 1).padStart(2, '0')
+  const day = String(local.getDate()).padStart(2, '0')
+  return `${year}-${month}-${day}`
+}
+
+const businessToday = (state: Pick<BillingStore, 'outlet'>) =>
+  getBusinessDate(new Date(), state.outlet.businessDayCrossoverHour ?? 0)
+
 const now = () => new Date().toISOString()
 const newId = (prefix: string) => `${prefix}_${crypto.randomUUID()}`
 const taxablePercent = (item: { taxPercent?: number; taxType?: 'GST' | 'VAT' | 'None' }) =>
@@ -341,6 +357,7 @@ const DEFAULT_OUTLET: OutletSettings = {
   enableOrderMenuPanelToggle: false,
   enableOrderTablesDrawer: false,
   menuLanguage: 'en',
+  businessDayCrossoverHour: 0,
 }
 
 const DEFAULT_PRINT_SETTINGS: PrintSettings = {
@@ -1355,6 +1372,22 @@ export const useBillingStore = create<BillingStore>()(
         auditLogs: addAudit(state, 'floor.updated', 'floor', 'Updated floor', id),
       })),
 
+      reorderFloors: (orderedIds) => set((state) => {
+        const position = new Map(orderedIds.map((id, index) => [id, index]))
+        const ordered = [...state.floors].sort((a, b) => {
+          const aIndex = position.get(a.id)
+          const bIndex = position.get(b.id)
+          if (aIndex !== undefined && bIndex !== undefined) return aIndex - bIndex
+          if (aIndex !== undefined) return -1
+          if (bIndex !== undefined) return 1
+          return a.sortOrder - b.sortOrder
+        })
+        return {
+          floors: ordered.map((floor, sortOrder) => ({ ...floor, sortOrder })),
+          auditLogs: addAudit(state, 'floor.reordered', 'floor', 'Reordered sections'),
+        }
+      }),
+
       deleteFloor: (id) => {
         const hasTables = get().tables.some((table) => table.floorId === id)
         if (hasTables) return false
@@ -1434,7 +1467,7 @@ export const useBillingStore = create<BillingStore>()(
             isClosed: false,
             outletId: state.outlet.id,
             orderNo: orderNo(state.orders),
-            businessDate: today(),
+            businessDate: businessToday(state),
             type: 'dine_in',
             status: 'running',
             tableId: toTableId,
@@ -1861,7 +1894,7 @@ export const useBillingStore = create<BillingStore>()(
           isClosed: false,
           outletId: state.outlet.id,
           orderNo: orderNo(state.orders),
-          businessDate: today(),
+          businessDate: businessToday(state),
           type: state.activeOrderType,
           status: 'running',
           tableId: table?.id,
@@ -1912,7 +1945,7 @@ export const useBillingStore = create<BillingStore>()(
               isClosed: false,
               outletId: workingState.outlet.id,
               orderNo: orderNo(workingState.orders),
-              businessDate: today(),
+              businessDate: businessToday(workingState),
               type: workingState.activeOrderType,
               status: 'running',
               tableId: table?.id,
@@ -2177,7 +2210,7 @@ export const useBillingStore = create<BillingStore>()(
           isClosed: false,
           outletId: state.outlet.id,
           orderNo: orderNo(state.orders),
-          businessDate: today(),
+          businessDate: businessToday(state),
           type: state.activeOrderType,
           status: 'running' as const,
           tableId: table?.id,
@@ -2378,7 +2411,7 @@ export const useBillingStore = create<BillingStore>()(
             isClosed: false,
             outletId: state.outlet.id,
             orderNo: orderNo(state.orders),
-            businessDate: today(),
+            businessDate: businessToday(state),
             type: state.activeOrderType,
             status: 'running' as const,
             tableId: table?.id,
@@ -3069,7 +3102,7 @@ export const useBillingStore = create<BillingStore>()(
               id: orderId,
               outletId: state.outlet.id,
               orderNo: 'PROFORMA',
-              businessDate: today(),
+              businessDate: businessToday(state),
               type: state.activeOrderType,
               status: 'draft',
               tableId: table?.id,
@@ -3198,7 +3231,7 @@ export const useBillingStore = create<BillingStore>()(
         const state = get()
         const itemCountByOrder = getActiveItemCountByOrder(state.orderItems)
         const paidOrders = state.orders.filter((order) =>
-          order.businessDate === today() &&
+          order.businessDate === businessToday(state) &&
           order.paymentStatus === 'paid' &&
           !['cancelled', 'void'].includes(order.status) &&
           getBillableOrderTotalPaise(order) > 0 &&

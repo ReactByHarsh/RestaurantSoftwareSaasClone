@@ -1,17 +1,49 @@
+import { useState } from 'react'
 import { clsx } from 'clsx'
-import { Pencil, Settings2, Trash2 } from 'lucide-react'
+import { ChevronLeft, ChevronRight, GripVertical, Pencil, Settings2, Trash2 } from 'lucide-react'
 import { FLOOR_COLORS } from '../../lib/floorColors'
 
 interface Props {
-  floors: { id: string; name: string; priceAdjustmentType?: 'percentage' | 'amount'; priceAdjustmentValue?: number; menuPriceOption?: string }[]
+  floors: { id: string; name: string; priceAdjustmentType?: 'percentage' | 'amount'; priceAdjustmentValue?: number; menuPriceOption?: string; sortOrder?: number }[]
   activeFloorId: string
   onSelect: (id: string) => void
   onRename?: (id: string, name: string) => void
   onEdit?: (id: string) => void
   onDelete?: (id: string) => void
+  onReorder?: (orderedIds: string[]) => void
 }
 
-export default function FloorTabs({ floors, activeFloorId, onSelect, onRename, onEdit, onDelete }: Props) {
+export default function FloorTabs({ floors, activeFloorId, onSelect, onRename, onEdit, onDelete, onReorder }: Props) {
+  const [draggedId, setDraggedId] = useState<string | null>(null)
+  const orderedFloors = [...floors].sort((a, b) => (a.sortOrder ?? 0) - (b.sortOrder ?? 0))
+
+  const move = (id: string, delta: number) => {
+    if (!onReorder) return
+    const index = orderedFloors.findIndex(floor => floor.id === id)
+    const target = index + delta
+    if (index < 0 || target < 0 || target >= orderedFloors.length) return
+    const ids = orderedFloors.map(floor => floor.id)
+    const [moved] = ids.splice(index, 1)
+    ids.splice(target, 0, moved)
+    onReorder(ids)
+  }
+
+  const dropOn = (targetId: string) => {
+    if (!onReorder) return
+    if (!draggedId || draggedId === targetId) {
+      setDraggedId(null)
+      return
+    }
+    const ids = orderedFloors.map(floor => floor.id)
+    const from = ids.indexOf(draggedId)
+    const to = ids.indexOf(targetId)
+    setDraggedId(null)
+    if (from < 0 || to < 0) return
+    const [moved] = ids.splice(from, 1)
+    ids.splice(to, 0, moved)
+    onReorder(ids)
+  }
+
   return (
     <div className="flex gap-1.5 px-3 py-2 bg-white border-b border-slate-100 overflow-x-auto flex-shrink-0 scrollbar-hide z-10 shadow-[0_4px_12px_rgba(0,0,0,0.02)]">
       <button
@@ -25,23 +57,39 @@ export default function FloorTabs({ floors, activeFloorId, onSelect, onRename, o
       >
         All Sections
       </button>
-      {floors.map((floor, index) => {
+      {orderedFloors.map((floor, index) => {
         const selected = activeFloorId === floor.id
         const color = FLOOR_COLORS[index % FLOOR_COLORS.length]
         return (
           <div
             key={floor.id}
+            draggable={Boolean(onReorder)}
+            onDragStart={event => {
+              if (!onReorder) return
+              setDraggedId(floor.id)
+              event.dataTransfer.effectAllowed = 'move'
+            }}
+            onDragEnd={() => setDraggedId(null)}
+            onDragOver={event => { if (onReorder) event.preventDefault() }}
+            onDrop={event => {
+              if (!onReorder) return
+              event.preventDefault()
+              dropOn(floor.id)
+            }}
             className={clsx(
               'group flex flex-shrink-0 items-center rounded-lg border-2 transition-all active:scale-95 overflow-hidden',
               selected
                 ? `shadow-md ${color.active}`
-                : `hover:shadow-sm ${color.idle}`
+                : `hover:shadow-sm ${color.idle}`,
+              onReorder && 'cursor-grab active:cursor-grabbing',
+              draggedId === floor.id && 'opacity-40'
             )}
           >
             <button
               onClick={() => onSelect(floor.id)}
-              className="px-3 py-1.5 text-xs font-black"
+              className="flex items-center px-3 py-1.5 text-xs font-black"
             >
+              {onReorder && <GripVertical size={12} className="mr-1 opacity-40" />}
               {floor.name}
               {floor.menuPriceOption && floor.menuPriceOption !== 'regular' && (
                 <span className="ml-1.5 text-[10px] opacity-75">{floor.menuPriceOption.toUpperCase()}</span>
@@ -52,8 +100,28 @@ export default function FloorTabs({ floors, activeFloorId, onSelect, onRename, o
                 </span>
               )}
             </button>
-            {(onRename || onEdit || onDelete) && (
+            {(onRename || onEdit || onDelete || onReorder) && (
               <div className={clsx('flex items-center border-l', selected ? 'border-black/15' : 'border-black/10')}>
+                {onReorder && (
+                  <>
+                    <button
+                      onClick={() => move(floor.id, -1)}
+                      disabled={index === 0}
+                      className={clsx('w-6 h-8 flex items-center justify-center transition-colors disabled:opacity-25', selected ? 'hover:bg-black/10' : 'hover:bg-black/5')}
+                      title="Move section left"
+                    >
+                      <ChevronLeft size={13} />
+                    </button>
+                    <button
+                      onClick={() => move(floor.id, 1)}
+                      disabled={index === orderedFloors.length - 1}
+                      className={clsx('w-6 h-8 flex items-center justify-center transition-colors disabled:opacity-25', selected ? 'hover:bg-black/10' : 'hover:bg-black/5')}
+                      title="Move section right"
+                    >
+                      <ChevronRight size={13} />
+                    </button>
+                  </>
+                )}
                 {onRename && (
                   <button
                     onClick={() => {

@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { BarChart3, TrendingUp, IndianRupee, Users, ShoppingBag, FileText, Calendar } from 'lucide-react'
 import { formatPaise, getBillableOrderTotalPaise } from '../../lib/money'
-import { useBillingStore } from '../../store/billingStore'
+import { useBillingStore, getBusinessDate } from '../../store/billingStore'
 import {
   BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer,
   PieChart, Pie, Cell, CartesianGrid
@@ -19,7 +19,7 @@ export default function ReportsScreen() {
   const [tab, setTab] = useState<'overview' | 'summary' | 'sales' | 'cancellations' | 'inventory' | 'expenses'>('sales')
   const [dateRange, setDateRange] = useState<DateRange>('today')
   
-  const todayStr = new Date().toLocaleDateString('en-CA') // YYYY-MM-DD
+  const todayStr = getBusinessDate(new Date(), useBillingStore.getState().outlet.businessDayCrossoverHour ?? 0)
   const [customFrom, setCustomFrom] = useState(todayStr)
   const [customTo, setCustomTo] = useState(todayStr)
 

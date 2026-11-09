@@ -41,7 +41,7 @@ export default function TableScreen() {
   const { user } = useAuthStore()
   const {
     tables, orders, floors, savedCarts,
-    addFloor, updateFloor, deleteFloor,
+    addFloor, updateFloor, deleteFloor, reorderFloors,
     addTable, updateTable, deleteTable,
     transferTable, mergeTable, getActiveKOTs, closeTableView,
   } = useBillingStore()
@@ -384,6 +384,7 @@ export default function TableScreen() {
           if (floor) { setEditingFloor(floor); setShowSectionModal(true) }
         } : undefined}
         onDelete={canEditTables ? handleDeleteSection : undefined}
+        onReorder={canEditTables ? reorderFloors : undefined}
       />
 
       {/* Tables Grid */}

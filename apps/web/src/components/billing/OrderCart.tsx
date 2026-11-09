@@ -165,12 +165,42 @@ export default function OrderCart({ onSendKOT, onSettleBill, onInstantCheckout, 
       else updateQty(row.id, delta)
       return
     }
-    if (delta > 0) return
     const item = savedItems.find(candidate => candidate.id === row.id)
     if (!item) return
+    if (delta > 0) {
+      const menuItem = menuItems.find(candidate => candidate.id === item.menuItemId)
+      if (!menuItem) return
+      ensureOrder()
+      addToCart(menuItem)
+      addToast('success', `Added 1 more ${item.nameSnapshot} to the cart`)
+      return
+    }
     if (item.quantity <= 1) removeFocusedRow()
     else cancelOrderItemQty(item.id, 1, 'Quantity reduced from order screen')
   }
+
+  const keyHandlerRef = useRef<(event: KeyboardEvent) => void>(() => {})
+  keyHandlerRef.current = (event: KeyboardEvent) => {
+    if (event.ctrlKey || event.altKey || event.metaKey) return
+    const target = event.target as HTMLElement | null
+    if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable)) return
+    if (editingItemId || isCustomerModalOpen || isDiscountModalOpen || isItemDiscountModalOpen
+      || cancelKotId || cancelOrderId || cancelAllItemsOrderId || cancelItemConfig) return
+    if (focusedRowIndex < 0) return
+    if (event.key === '+' || event.key === '=' || event.code === 'NumpadAdd') {
+      event.preventDefault()
+      changeFocusedQty(1)
+    } else if (event.key === '-' || event.key === '_' || event.code === 'NumpadSubtract') {
+      event.preventDefault()
+      changeFocusedQty(-1)
+    }
+  }
+
+  useEffect(() => {
+    const listener = (event: KeyboardEvent) => keyHandlerRef.current(event)
+    window.addEventListener('keydown', listener)
+    return () => window.removeEventListener('keydown', listener)
+  }, [])
 
   const canAddWithoutTable = () => {
     if (activeOrderType === 'dine_in' && !selectedTableId && !currentOrder) {
@@ -377,8 +407,8 @@ export default function OrderCart({ onSendKOT, onSettleBill, onInstantCheckout, 
         <button disabled={!selectedCartItemId} onClick={() => openEditor(selectedCartItemId!)} className="w-9 h-8 bg-slate-700 hover:bg-slate-800 text-white rounded flex items-center justify-center disabled:opacity-50 transition-colors shadow-sm"><Pencil size={16} /></button>
         <button disabled={!selectedCartItemId} onClick={() => openEditor(selectedCartItemId!)} className="w-9 h-8 bg-sky-600 hover:bg-sky-700 text-white rounded flex items-center justify-center disabled:opacity-50 transition-colors shadow-sm"><Info size={16} /></button>
         <button disabled={!selectedCartItemId && !selectedSavedItemId} onClick={() => setIsItemDiscountModalOpen(true)} className="w-9 h-8 bg-amber-500 hover:bg-amber-600 text-white rounded flex items-center justify-center disabled:opacity-50 transition-colors shadow-sm"><BadgePercent size={16} /></button>
-        <button disabled={!selectedCartItemId} onClick={() => updateQty(selectedCartItemId!, 1)} className="w-9 h-8 bg-emerald-500 hover:bg-emerald-600 text-white rounded flex items-center justify-center disabled:opacity-50 transition-colors shadow-sm"><Plus size={16} /></button>
-        <button disabled={focusedRowIndex < 0} onClick={() => changeFocusedQty(-1)} className="w-9 h-8 bg-orange-500 hover:bg-orange-600 text-white rounded flex items-center justify-center disabled:opacity-50 transition-colors shadow-sm"><Minus size={16} /></button>
+        <button disabled={focusedRowIndex < 0} onClick={() => changeFocusedQty(1)} title="Increase quantity (+)" className="w-9 h-8 bg-emerald-500 hover:bg-emerald-600 text-white rounded flex items-center justify-center disabled:opacity-50 transition-colors shadow-sm"><Plus size={16} /></button>
+        <button disabled={focusedRowIndex < 0} onClick={() => changeFocusedQty(-1)} title="Decrease quantity (-)" className="w-9 h-8 bg-orange-500 hover:bg-orange-600 text-white rounded flex items-center justify-center disabled:opacity-50 transition-colors shadow-sm"><Minus size={16} /></button>
         <button disabled={focusedRowIndex < 0} onClick={removeFocusedRow} className="w-9 h-8 bg-rose-500 hover:bg-rose-600 text-white rounded flex items-center justify-center disabled:opacity-50 transition-colors shadow-sm"><Trash2 size={16} /></button>
         
         <div className="ml-auto flex items-center gap-3">

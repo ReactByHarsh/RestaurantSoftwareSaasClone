@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import type { MenuItem } from '../../lib/types'
 import { formatPaise } from '../../lib/money'
-import { Plus, UtensilsCrossed } from 'lucide-react'
+import { Plus, Star, UtensilsCrossed } from 'lucide-react'
 import { clsx } from 'clsx'
 
 interface Props {
@@ -11,9 +11,10 @@ interface Props {
   displayPricePaise?: number
   displayName?: string
   onAdd: () => void
+  onToggleFavorite?: () => void
 }
 
-export default function MenuItemCard({ item, cartQty, isKotItem = false, displayPricePaise, displayName, onAdd }: Props) {
+export default function MenuItemCard({ item, cartQty, isKotItem = false, displayPricePaise, displayName, onAdd, onToggleFavorite }: Props) {
   const [imageFailed, setImageFailed] = useState(false)
 
   useEffect(() => {
@@ -24,10 +25,18 @@ export default function MenuItemCard({ item, cartQty, isKotItem = false, display
   const primaryName = displayName?.trim() || item.name
 
   return (
-    <button
+    <div
+      role="button"
+      tabIndex={0}
       onClick={onAdd}
+      onKeyDown={event => {
+        if (event.key === 'Enter' || event.key === ' ') {
+          event.preventDefault()
+          onAdd()
+        }
+      }}
       className={clsx(
-        'group relative flex min-h-[132px] flex-col overflow-hidden rounded-xl border text-left transition-all active:scale-95',
+        'group relative flex min-h-[132px] cursor-pointer flex-col overflow-hidden rounded-xl border text-left transition-all active:scale-95',
         isKotItem
           ? 'border-yellow-200 bg-yellow-50 hover:border-yellow-300 hover:shadow-lg'
           : 'border-slate-100 bg-white hover:border-primary/30 hover:shadow-lg'
@@ -85,11 +94,28 @@ export default function MenuItemCard({ item, cartQty, isKotItem = false, display
           <span className="text-xs font-black tracking-tight text-slate-700">
             {formatPaise(displayPricePaise ?? item.pricePaise)}
           </span>
-          <div className="flex h-6 w-6 shrink-0 items-center justify-center rounded border border-slate-200 bg-slate-50 text-slate-400 shadow-sm transition-all group-hover:border-primary group-hover:bg-primary group-hover:text-white">
-            <Plus size={14} strokeWidth={2.5} />
+          <div className="flex items-center gap-1">
+            {onToggleFavorite && (
+              <button
+                type="button"
+                onClick={event => { event.stopPropagation(); onToggleFavorite() }}
+                className={clsx(
+                  'flex h-6 w-6 shrink-0 items-center justify-center rounded border shadow-sm transition-colors',
+                  item.isFavorite
+                    ? 'border-amber-300 bg-amber-50 text-amber-500'
+                    : 'border-slate-200 bg-slate-50 text-slate-400 hover:border-amber-300 hover:text-amber-500'
+                )}
+                title={item.isFavorite ? 'Remove from favourites' : 'Add to favourites'}
+              >
+                <Star size={13} className={item.isFavorite ? 'fill-amber-500' : ''} />
+              </button>
+            )}
+            <div className="flex h-6 w-6 shrink-0 items-center justify-center rounded border border-slate-200 bg-slate-50 text-slate-400 shadow-sm transition-all group-hover:border-primary group-hover:bg-primary group-hover:text-white">
+              <Plus size={14} strokeWidth={2.5} />
+            </div>
           </div>
         </div>
       </div>
-    </button>
+    </div>
   )
 }

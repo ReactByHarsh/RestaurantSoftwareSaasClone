@@ -5,7 +5,7 @@ import {
   ScanBarcode, X, ReceiptText, ArrowLeft, LayoutGrid, Clock,
   PlayCircle, HandPlatter, Printer, CheckCircle, ArrowRightLeft,
   GitMerge, Users, PanelRightClose, PanelRightOpen, Table2,
-  UtensilsCrossed, Wine,
+  UtensilsCrossed, Star, Wine,
 } from 'lucide-react'
 import { getMenuItemPriceForSection, getSectionAdjustedPrice, useBillingStore } from '../../store/billingStore'
 import { useAuthStore } from '../../store/authStore'
@@ -247,6 +247,7 @@ export default function BillingScreen({ isModal = false, modalTableId, autoOpenP
     startNewOrder, sendKOT, clearCart,
     tables, floors, menuCategories, menuItems, outlet,
     addToCart, orders,
+    updateMenuItem,
     transferTable, mergeTable,
     updateTableStatus, printReceipt, printCartProforma, getCustomerAccountDetails, setOrderCustomer,
     settlePayment, getCartTotal
@@ -274,7 +275,7 @@ export default function BillingScreen({ isModal = false, modalTableId, autoOpenP
 
   const [searchQuery, setSearchQuery] = useState('')
   const [activeCategoryId, setActiveCategoryId] = useState<string | null>(null)
-  const [activeGroup, setActiveGroup] = useState<'all' | 'food' | 'bar'>('food')
+  const [activeGroup, setActiveGroup] = useState<'all' | 'food' | 'bar' | 'fav'>('food')
   const [activeFloorId, setActiveFloorId] = useState<string>('all')
   const [menuPage, setMenuPage] = useState(1)
   const [showPayment, setShowPayment] = useState(false)
@@ -414,15 +415,19 @@ export default function BillingScreen({ isModal = false, modalTableId, autoOpenP
 
   const filteredItems = useMemo(() => {
     let items = saleableMenuItems
-    if (!searchQuery && activeCategoryId) {
-      const childCategoryIds = new Set(menuCategories.filter(category => category.parentId === activeCategoryId).map(category => category.id))
-      items = items.filter(item => item.categoryId === activeCategoryId || childCategoryIds.has(item.categoryId))
+    if (!searchQuery) {
+      if (activeGroup === 'fav') {
+        items = items.filter(item => item.isFavorite)
+      } else if (activeCategoryId) {
+        const childCategoryIds = new Set(menuCategories.filter(category => category.parentId === activeCategoryId).map(category => category.id))
+        items = items.filter(item => item.categoryId === activeCategoryId || childCategoryIds.has(item.categoryId))
+      }
     }
     if (searchQuery) items = filterMenuItemsByQuery(items, searchQuery)
     return [...items].sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: 'base' }))
-  }, [activeCategoryId, searchQuery, saleableMenuItems, menuCategories])
+  }, [activeCategoryId, activeGroup, searchQuery, saleableMenuItems, menuCategories])
 
-  const showCategoryCards = !searchQuery && !activeCategoryId && menuCategories.length > 0
+  const showCategoryCards = !searchQuery && !activeCategoryId && activeGroup !== 'fav' && menuCategories.length > 0
   const menuPageCount  = Math.max(1, Math.ceil(filteredItems.length / MENU_PAGE_SIZE))
   const safeMenuPage   = Math.min(menuPage, menuPageCount)
   const paginatedItems = useMemo(() => filteredItems.slice((safeMenuPage-1)*MENU_PAGE_SIZE, safeMenuPage*MENU_PAGE_SIZE), [filteredItems, safeMenuPage])
@@ -816,6 +821,7 @@ export default function BillingScreen({ isModal = false, modalTableId, autoOpenP
               { id: 'all' as const, label: 'All', Icon: LayoutGrid },
               { id: 'food' as const, label: 'Food', Icon: UtensilsCrossed },
               { id: 'bar' as const, label: 'Bar', Icon: Wine },
+              { id: 'fav' as const, label: 'Favs', Icon: Star },
             ]).map(tab => (
               <button
                 key={tab.id}
@@ -899,8 +905,10 @@ export default function BillingScreen({ isModal = false, modalTableId, autoOpenP
               <div className="flex flex-col items-center justify-center h-full gap-4">
                 <Search size={40} className="text-slate-300" />
                 <div className="text-center">
-                  <p className="text-base font-bold text-slate-400">No items found</p>
-                  {searchQuery ? (
+                  <p className="text-base font-bold text-slate-400">{activeGroup === 'fav' && !searchQuery ? 'No favourites yet' : 'No items found'}</p>
+                  {activeGroup === 'fav' && !searchQuery ? (
+                    <p className="mt-1 text-xs font-bold text-slate-400">Tap the star on any product to add it here.</p>
+                  ) : searchQuery ? (
                     <button onClick={() => setSearchQuery('')} className="text-sm font-bold text-primary mt-2 inline-block px-4 py-2 bg-primary-50 rounded-lg">
                       Clear search
                     </button>
@@ -913,7 +921,7 @@ export default function BillingScreen({ isModal = false, modalTableId, autoOpenP
               </div>
             ) : (
               <>
-                {(selectedCategory || searchQuery) && (
+                {(selectedCategory || searchQuery || activeGroup === 'fav') && (
                   <div className="mb-2 flex items-center justify-between gap-2 rounded-xl border border-slate-200 bg-white px-3 py-2 shadow-sm">
                     <div className="flex min-w-0 items-center gap-2">
                       {selectedCategory && !searchQuery && (
@@ -922,7 +930,7 @@ export default function BillingScreen({ isModal = false, modalTableId, autoOpenP
                         </button>
                       )}
                       <div className="min-w-0">
-                        <p className="truncate text-sm font-black text-slate-800">{searchQuery ? `Search results for “${searchQuery}”` : menuCategoryLabel(selectedCategory!)}</p>
+                        <p className="truncate text-sm font-black text-slate-800">{searchQuery ? `Search results for “${searchQuery}”` : activeGroup === 'fav' ? 'Favourites' : menuCategoryLabel(selectedCategory!)}</p>
                         <p className="text-[10px] font-bold uppercase tracking-wider text-slate-400">{filteredItems.length} item{filteredItems.length === 1 ? '' : 's'}</p>
                       </div>
                     </div>
@@ -931,7 +939,7 @@ export default function BillingScreen({ isModal = false, modalTableId, autoOpenP
                 )}
                 <div className="grid grid-cols-2 sm:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-5 gap-2 p-0.5">
                   {paginatedItems.map(item => (
-                    <MenuItemCard key={item.id} item={item} displayPricePaise={getSectionAdjustedPrice(getMenuItemPriceForSection(item, selectedFloor), selectedFloor)} displayName={menuLanguage !== 'en' ? item.nameTranslations?.[menuLanguage] : undefined} cartQty={cartQtyById.get(item.id) ?? 0} isKotItem={kotMenuItemIds.has(item.id)} onAdd={() => handleAddItem(item)} />
+                    <MenuItemCard key={item.id} item={item} displayPricePaise={getSectionAdjustedPrice(getMenuItemPriceForSection(item, selectedFloor), selectedFloor)} displayName={menuLanguage !== 'en' ? item.nameTranslations?.[menuLanguage] : undefined} cartQty={cartQtyById.get(item.id) ?? 0} isKotItem={kotMenuItemIds.has(item.id)} onAdd={() => handleAddItem(item)} onToggleFavorite={() => updateMenuItem(item.id, { isFavorite: !item.isFavorite })} />
                   ))}
                 </div>
                 {filteredItems.length > MENU_PAGE_SIZE && (
