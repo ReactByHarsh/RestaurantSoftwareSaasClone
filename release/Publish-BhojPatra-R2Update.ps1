@@ -1,5 +1,6 @@
 param(
   [string]$Version = "0.1.26",
+  [string]$Notes = $null,
   [string]$Bucket = "bhojpatra",
   [string]$PublicBaseUrl = "https://pub-99fc5ebb1fb24ce9a69d861fc420f8b2.r2.dev",
   [string]$SigningKeyPath = "$env:USERPROFILE\.tauri\bhojpatra-updater.key",
@@ -51,8 +52,10 @@ if (!$SkipBuild) {
   try {
     cargo tauri build --ci --bundles nsis
     if ($LASTEXITCODE -ne 0) { throw "x64 Tauri build failed with exit code $LASTEXITCODE." }
-    cargo tauri build --ci --target i686-pc-windows-msvc --bundles nsis
-    if ($LASTEXITCODE -ne 0) { throw "x86 Tauri build failed with exit code $LASTEXITCODE." }
+    if (!$SkipX86Upload) {
+      cargo tauri build --ci --target i686-pc-windows-msvc --bundles nsis
+      if ($LASTEXITCODE -ne 0) { throw "x86 Tauri build failed with exit code $LASTEXITCODE." }
+    }
   } finally {
     Pop-Location
   }
@@ -80,8 +83,10 @@ if (!$AllowUnsignedAuthenticode) {
   try {
     cargo tauri signer sign -f $SigningKeyPath $x64SourceInstaller
     if ($LASTEXITCODE -ne 0) { throw "x64 updater signing failed with exit code $LASTEXITCODE." }
-    cargo tauri signer sign -f $SigningKeyPath $x86SourceInstaller
-    if ($LASTEXITCODE -ne 0) { throw "x86 updater signing failed with exit code $LASTEXITCODE." }
+    if (!$SkipX86Upload) {
+      cargo tauri signer sign -f $SigningKeyPath $x86SourceInstaller
+      if ($LASTEXITCODE -ne 0) { throw "x86 updater signing failed with exit code $LASTEXITCODE." }
+    }
   } finally {
     Pop-Location
   }
@@ -119,7 +124,7 @@ if (!$SkipX86Upload) {
 
 $manifest = [ordered]@{
   version = $Version
-  notes = "BhojPatra Desk release $Version."
+  notes = if ($Notes) { $Notes } else { "BhojPatra Desk release $Version." }
   pub_date = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
   platforms = $platforms
 }

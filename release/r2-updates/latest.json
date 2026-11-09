@@ -1,15 +1,15 @@
 {
-    "version":  "0.1.39",
-    "notes":  "BhojPatra Desk 0.1.39: Category cards for the order menu, safer cancel and delete behavior, resilient Settings, and faster mobile LAN pairing with login ID/PIN fixes.",
-    "pub_date":  "2026-11-06T15:25:28Z",
+    "version":  "0.1.40",
+    "notes":  "BhojPatra Desk 0.1.40: Keyboard +/- quantity controls, section sequence reordering, menu item favorites, and configurable late-night business day shift.",
+    "pub_date":  "2026-11-09T14:47:20Z",
     "platforms":  {
                       "windows-x86_64-nsis":  {
-                                                  "signature":  "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVTS2hzdHZqVXVkNTUxbWg5WktkWjA4MCtjakVHWWQvOVlGYy9DcjZJUXIvb2lyblR3Tmc0eHhEZ3BONWVuUEtiS1Vsa3BENXczTTJyZHozMThOWkZ2TXp4eGkvVUkwUndvPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkzOTc4MzU4CWZpbGU6QmhvalBhdHJhIERlc2tfMC4xLjM5X3g2NC1zZXR1cC5leGUKVW5FODFueFVBckkyWktGZDVNcSsvNlN0LzluZHNUSkRDWTRWWWxoam9qQjNtSVl4MldhNEVFZFlsZytBcnNuZlQwenZpQWh2RXhoNGxxWWpITUR5QXc9PQo=",
-                                                  "url":  "https://pub-99fc5ebb1fb24ce9a69d861fc420f8b2.r2.dev/BhojPatra-Desk_0.1.39_x64-setup.exe"
+                                                  "signature":  "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVTS2hzdHZqVXVkNTRDT0t5SEd5NGxxNitLaEhFNTZ4amNNN1JwU1llTVM3RS85QU5yd21qcGV0dDVnYzVpMjJ3VDdPc2pjazRDamo2ejFWZkRSZXRGNnFnQjAzVkc2bHdVPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzk0MjM1NjM4CWZpbGU6QmhvalBhdHJhIERlc2tfMC4xLjQwX3g2NC1zZXR1cC5leGUKTWdxamw3K0E1SDZXRjI3NkdvN1Z6WGs1bVdjU2ZsZURBaTc3SzJDRGtSK0hiVkVXc2FoZjQxdEROUHdHaUlFSGNGS2lFYlgzY0grMGNrY1VSdXIrQXc9PQo=",
+                                                  "url":  "https://pub-99fc5ebb1fb24ce9a69d861fc420f8b2.r2.dev/BhojPatra-Desk_0.1.40_x64-setup.exe"
                                               },
                       "windows-x86_64":  {
-                                             "signature":  "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVTS2hzdHZqVXVkNTUxbWg5WktkWjA4MCtjakVHWWQvOVlGYy9DcjZJUXIvb2lyblR3Tmc0eHhEZ3BONWVuUEtiS1Vsa3BENXczTTJyZHozMThOWkZ2TXp4eGkvVUkwUndvPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkzOTc4MzU4CWZpbGU6QmhvalBhdHJhIERlc2tfMC4xLjM5X3g2NC1zZXR1cC5leGUKVW5FODFueFVBckkyWktGZDVNcSsvNlN0LzluZHNUSkRDWTRWWWxoam9qQjNtSVl4MldhNEVFZFlsZytBcnNuZlQwenZpQWh2RXhoNGxxWWpITUR5QXc9PQo=",
-                                             "url":  "https://pub-99fc5ebb1fb24ce9a69d861fc420f8b2.r2.dev/BhojPatra-Desk_0.1.39_x64-setup.exe"
+                                             "signature":  "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVTS2hzdHZqVXVkNTRDT0t5SEd5NGxxNitLaEhFNTZ4amNNN1JwU1llTVM3RS85QU5yd21qcGV0dDVnYzVpMjJ3VDdPc2pjazRDamo2ejFWZkRSZXRGNnFnQjAzVkc2bHdVPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzk0MjM1NjM4CWZpbGU6QmhvalBhdHJhIERlc2tfMC4xLjQwX3g2NC1zZXR1cC5leGUKTWdxamw3K0E1SDZXRjI3NkdvN1Z6WGs1bVdjU2ZsZURBaTc3SzJDRGtSK0hiVkVXc2FoZjQxdEROUHdHaUlFSGNGS2lFYlgzY0grMGNrY1VSdXIrQXc9PQo=",
+                                             "url":  "https://pub-99fc5ebb1fb24ce9a69d861fc420f8b2.r2.dev/BhojPatra-Desk_0.1.40_x64-setup.exe"
                                          }
                   }
 }
