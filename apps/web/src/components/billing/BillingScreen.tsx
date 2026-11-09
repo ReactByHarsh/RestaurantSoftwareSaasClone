@@ -415,13 +415,11 @@ export default function BillingScreen({ isModal = false, modalTableId, autoOpenP
 
   const filteredItems = useMemo(() => {
     let items = saleableMenuItems
-    if (!searchQuery) {
-      if (activeGroup === 'fav') {
-        items = items.filter(item => item.isFavorite)
-      } else if (activeCategoryId) {
-        const childCategoryIds = new Set(menuCategories.filter(category => category.parentId === activeCategoryId).map(category => category.id))
-        items = items.filter(item => item.categoryId === activeCategoryId || childCategoryIds.has(item.categoryId))
-      }
+    if (activeGroup === 'fav') {
+      items = items.filter(item => item.isFavorite)
+    } else if (activeCategoryId && !searchQuery) {
+      const childCategoryIds = new Set(menuCategories.filter(category => category.parentId === activeCategoryId).map(category => category.id))
+      items = items.filter(item => item.categoryId === activeCategoryId || childCategoryIds.has(item.categoryId))
     }
     if (searchQuery) items = filterMenuItemsByQuery(items, searchQuery)
     return [...items].sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: 'base' }))

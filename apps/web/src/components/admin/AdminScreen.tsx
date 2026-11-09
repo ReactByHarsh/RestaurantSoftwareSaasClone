@@ -1,5 +1,5 @@
 import { useMemo, useState } from 'react'
-import { Activity, ChefHat, ChevronDown, ChevronUp, Eye, EyeOff, Layers, Plus, Receipt, ShieldCheck, Trash2, Users } from 'lucide-react'
+import { Activity, ChefHat, ChevronDown, ChevronUp, Eye, EyeOff, GripVertical, Layers, Plus, Receipt, ShieldCheck, Trash2, Users } from 'lucide-react'
 import { clsx } from 'clsx'
 import type { Role } from '../../lib/types'
 import type { Station } from '../../lib/types'
@@ -90,6 +90,7 @@ export default function AdminScreen() {
   const shouldSyncCloud = cloudSync.enabled && Boolean(cloudSync.serverUrl) && user?.tenantId !== 'local_restaurant'
   const isPlatformAdmin = user?.tenantId === 'platform' && user.role === 'admin'
   const orderedFloors = useMemo(() => [...floors].sort((a, b) => a.sortOrder - b.sortOrder), [floors])
+  const [draggedFloorId, setDraggedFloorId] = useState<string | null>(null)
   const moveFloor = (id: string, delta: number) => {
     const index = orderedFloors.findIndex(floor => floor.id === id)
     const target = index + delta
@@ -97,6 +98,20 @@ export default function AdminScreen() {
     const ids = orderedFloors.map(floor => floor.id)
     const [moved] = ids.splice(index, 1)
     ids.splice(target, 0, moved)
+    reorderFloors(ids)
+  }
+  const dropFloorOn = (targetId: string) => {
+    if (!draggedFloorId || draggedFloorId === targetId) {
+      setDraggedFloorId(null)
+      return
+    }
+    const ids = orderedFloors.map(floor => floor.id)
+    const from = ids.indexOf(draggedFloorId)
+    const to = ids.indexOf(targetId)
+    setDraggedFloorId(null)
+    if (from < 0 || to < 0) return
+    const [moved] = ids.splice(from, 1)
+    ids.splice(to, 0, moved)
     reorderFloors(ids)
   }
   const visibleTabs = isPlatformAdmin
@@ -462,9 +477,29 @@ export default function AdminScreen() {
               <div className="p-4 grid grid-cols-1 sm:grid-cols-4 gap-3 overflow-y-auto max-h-[250px]">
                 {floors.length === 0 && <p className="text-xs font-bold text-slate-400">No floors yet.</p>}
                 {orderedFloors.map((floor, index) => (
-                  <div key={floor.id} className="p-3 rounded-xl border-2 border-slate-100 bg-slate-50 flex items-center justify-between group hover:border-slate-200 transition-colors">
-                    <span className="font-black text-slate-800 text-sm">{floor.name}</span>
-                    <div className="flex gap-2.5 items-center">
+                  <div
+                    key={floor.id}
+                    draggable
+                    onDragStart={event => {
+                      setDraggedFloorId(floor.id)
+                      event.dataTransfer.effectAllowed = 'move'
+                    }}
+                    onDragEnd={() => setDraggedFloorId(null)}
+                    onDragOver={event => event.preventDefault()}
+                    onDrop={event => {
+                      event.preventDefault()
+                      dropFloorOn(floor.id)
+                    }}
+                    className={clsx(
+                      'p-3 rounded-xl border-2 border-slate-100 bg-slate-50 flex items-center justify-between group hover:border-slate-200 transition-colors cursor-grab active:cursor-grabbing',
+                      draggedFloorId === floor.id && 'opacity-40'
+                    )}
+                  >
+                    <div className="flex items-center gap-1.5 min-w-0">
+                      <GripVertical size={13} className="text-slate-400 shrink-0 opacity-40 group-hover:opacity-100 transition-opacity" />
+                      <span className="font-black text-slate-800 text-sm truncate">{floor.name}</span>
+                    </div>
+                    <div className="flex gap-2 items-center shrink-0">
                       <button
                         onClick={() => moveFloor(floor.id, -1)}
                         disabled={index === 0}

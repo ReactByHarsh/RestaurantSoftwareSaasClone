@@ -1,5 +1,5 @@
 import { useMemo, useRef, useState } from 'react'
-import { ChefHat, ChevronLeft, ChevronRight, Download, Edit2, FileDown, FileText, Globe, Languages, Loader2, Percent, Plus, Search, Trash2, Upload, X } from 'lucide-react'
+import { ChefHat, ChevronLeft, ChevronRight, Download, Edit2, FileDown, FileText, Globe, Languages, Loader2, Percent, Plus, Search, Star, Trash2, Upload, X } from 'lucide-react'
 import type { MenuCategory, MenuItem, ProductUsageType, RecipeItem, StockUnit } from '../../lib/types'
 import { formatPaise } from '../../lib/money'
 import { useUIStore } from '../../store/uiStore'
@@ -895,6 +895,17 @@ export default function MenuScreen() {
                       <td className="px-3 py-2 text-xs font-bold text-slate-600 border-r border-slate-100">{item.barcode || item.shortCode || '-'}</td>
                       <td className="px-3 py-2 text-sm font-black text-slate-800 border-r border-slate-100">
                         <div className="flex items-center gap-2">
+                          <button
+                            type="button"
+                            onClick={() => updateMenuItem(item.id, { isFavorite: !item.isFavorite })}
+                            className={clsx(
+                              'shrink-0 p-1 rounded-md transition-colors',
+                              item.isFavorite ? 'text-amber-500 bg-amber-50' : 'text-slate-300 hover:text-amber-400 hover:bg-slate-50'
+                            )}
+                            title={item.isFavorite ? 'Remove from favorites' : 'Add to favorites'}
+                          >
+                            <Star size={15} className={item.isFavorite ? 'fill-amber-500' : ''} />
+                          </button>
                           <button
                             type="button"
                             onClick={() => { if (item.imageUrl) setImageViewer({ url: item.imageUrl, name: item.name }) }}

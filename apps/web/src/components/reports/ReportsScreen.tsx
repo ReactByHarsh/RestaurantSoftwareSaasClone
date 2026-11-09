@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useMemo, useState } from 'react'
 import { BarChart3, TrendingUp, IndianRupee, Users, ShoppingBag, FileText, Calendar } from 'lucide-react'
 import { formatPaise, getBillableOrderTotalPaise } from '../../lib/money'
 import { useBillingStore, getBusinessDate } from '../../store/billingStore'
@@ -18,8 +18,8 @@ const COLORS = ['#2563EB', '#F97316', '#8B5CF6', '#06B6D4']
 export default function ReportsScreen() {
   const [tab, setTab] = useState<'overview' | 'summary' | 'sales' | 'cancellations' | 'inventory' | 'expenses'>('sales')
   const [dateRange, setDateRange] = useState<DateRange>('today')
-  
-  const todayStr = getBusinessDate(new Date(), useBillingStore.getState().outlet.businessDayCrossoverHour ?? 0)
+  const crossoverHour = useBillingStore(s => s.outlet.businessDayCrossoverHour ?? 0)
+  const todayStr = useMemo(() => getBusinessDate(new Date(), crossoverHour), [crossoverHour])
   const [customFrom, setCustomFrom] = useState(todayStr)
   const [customTo, setCustomTo] = useState(todayStr)
 

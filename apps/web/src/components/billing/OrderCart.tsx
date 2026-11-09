@@ -127,6 +127,18 @@ export default function OrderCart({ onSendKOT, onSettleBill, onInstantCheckout, 
     row.kind === 'saved' ? row.id === selectedSavedItemId : row.id === selectedCartItemId
   )
 
+  const prevCartLengthRef = useRef(cart.length)
+  useEffect(() => {
+    if (cart.length > prevCartLengthRef.current) {
+      const lastItem = cart[cart.length - 1]
+      if (lastItem) {
+        setSelectedCartItemId(lastItem.menuItemId)
+        setSelectedSavedItemId(null)
+      }
+    }
+    prevCartLengthRef.current = cart.length
+  }, [cart])
+
   useEffect(() => {
     if (selectedCartItemId && !cart.some(item => item.menuItemId === selectedCartItemId)) setSelectedCartItemId(null)
     if (selectedSavedItemId && !savedItems.some(item => item.id === selectedSavedItemId)) setSelectedSavedItemId(null)
@@ -141,8 +153,12 @@ export default function OrderCart({ onSendKOT, onSettleBill, onInstantCheckout, 
   }
 
   const removeFocusedRow = () => {
-    if (focusedRowIndex < 0) return
-    const row = rowRefs[focusedRowIndex]
+    let index = focusedRowIndex
+    if (index < 0 && rowRefs.length > 0) {
+      index = rowRefs.length - 1
+    }
+    if (index < 0) return
+    const row = rowRefs[index]
     if (row.kind === 'cart') {
       removeFromCart(row.id)
       addToast('success', 'Item removed from cart')
@@ -152,12 +168,19 @@ export default function OrderCart({ onSendKOT, onSettleBill, onInstantCheckout, 
       cancelOrderItemQty(item.id, item.quantity, 'Removed from order screen')
       addToast('success', `${item.nameSnapshot} removed`)
     }
-    selectAfterRemoval(focusedRowIndex)
+    selectAfterRemoval(index)
   }
 
   const changeFocusedQty = (delta: number) => {
-    if (focusedRowIndex < 0) return
-    const row = rowRefs[focusedRowIndex]
+    let index = focusedRowIndex
+    if (index < 0 && rowRefs.length > 0) {
+      index = rowRefs.length - 1
+      const defaultRow = rowRefs[index]
+      if (defaultRow.kind === 'cart') { setSelectedCartItemId(defaultRow.id); setSelectedSavedItemId(null) }
+      else if (defaultRow.kind === 'saved') { setSelectedSavedItemId(defaultRow.id); setSelectedCartItemId(null) }
+    }
+    if (index < 0) return
+    const row = rowRefs[index]
     if (row.kind === 'cart') {
       const item = cart.find(candidate => candidate.menuItemId === row.id)
       if (!item) return
@@ -186,13 +209,32 @@ export default function OrderCart({ onSendKOT, onSettleBill, onInstantCheckout, 
     if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable)) return
     if (editingItemId || isCustomerModalOpen || isDiscountModalOpen || isItemDiscountModalOpen
       || cancelKotId || cancelOrderId || cancelAllItemsOrderId || cancelItemConfig) return
-    if (focusedRowIndex < 0) return
+
     if (event.key === '+' || event.key === '=' || event.code === 'NumpadAdd') {
       event.preventDefault()
       changeFocusedQty(1)
     } else if (event.key === '-' || event.key === '_' || event.code === 'NumpadSubtract') {
       event.preventDefault()
       changeFocusedQty(-1)
+    } else if (event.key === 'ArrowDown') {
+      if (rowRefs.length === 0) return
+      event.preventDefault()
+      const nextIndex = focusedRowIndex < 0 ? 0 : Math.min(rowRefs.length - 1, focusedRowIndex + 1)
+      const next = rowRefs[nextIndex]
+      if (next?.kind === 'cart') { setSelectedCartItemId(next.id); setSelectedSavedItemId(null) }
+      else if (next?.kind === 'saved') { setSelectedSavedItemId(next.id); setSelectedCartItemId(null) }
+    } else if (event.key === 'ArrowUp') {
+      if (rowRefs.length === 0) return
+      event.preventDefault()
+      const prevIndex = focusedRowIndex < 0 ? rowRefs.length - 1 : Math.max(0, focusedRowIndex - 1)
+      const prev = rowRefs[prevIndex]
+      if (prev?.kind === 'cart') { setSelectedCartItemId(prev.id); setSelectedSavedItemId(null) }
+      else if (prev?.kind === 'saved') { setSelectedSavedItemId(prev.id); setSelectedCartItemId(null) }
+    } else if (event.key === 'Delete' || event.key === 'Backspace') {
+      if (rowRefs.length > 0) {
+        event.preventDefault()
+        removeFocusedRow()
+      }
     }
   }
 
@@ -407,9 +449,9 @@ export default function OrderCart({ onSendKOT, onSettleBill, onInstantCheckout, 
         <button disabled={!selectedCartItemId} onClick={() => openEditor(selectedCartItemId!)} className="w-9 h-8 bg-slate-700 hover:bg-slate-800 text-white rounded flex items-center justify-center disabled:opacity-50 transition-colors shadow-sm"><Pencil size={16} /></button>
         <button disabled={!selectedCartItemId} onClick={() => openEditor(selectedCartItemId!)} className="w-9 h-8 bg-sky-600 hover:bg-sky-700 text-white rounded flex items-center justify-center disabled:opacity-50 transition-colors shadow-sm"><Info size={16} /></button>
         <button disabled={!selectedCartItemId && !selectedSavedItemId} onClick={() => setIsItemDiscountModalOpen(true)} className="w-9 h-8 bg-amber-500 hover:bg-amber-600 text-white rounded flex items-center justify-center disabled:opacity-50 transition-colors shadow-sm"><BadgePercent size={16} /></button>
-        <button disabled={focusedRowIndex < 0} onClick={() => changeFocusedQty(1)} title="Increase quantity (+)" className="w-9 h-8 bg-emerald-500 hover:bg-emerald-600 text-white rounded flex items-center justify-center disabled:opacity-50 transition-colors shadow-sm"><Plus size={16} /></button>
-        <button disabled={focusedRowIndex < 0} onClick={() => changeFocusedQty(-1)} title="Decrease quantity (-)" className="w-9 h-8 bg-orange-500 hover:bg-orange-600 text-white rounded flex items-center justify-center disabled:opacity-50 transition-colors shadow-sm"><Minus size={16} /></button>
-        <button disabled={focusedRowIndex < 0} onClick={removeFocusedRow} className="w-9 h-8 bg-rose-500 hover:bg-rose-600 text-white rounded flex items-center justify-center disabled:opacity-50 transition-colors shadow-sm"><Trash2 size={16} /></button>
+        <button disabled={rowRefs.length === 0} onClick={() => changeFocusedQty(1)} title="Increase quantity (+)" className="w-9 h-8 bg-emerald-500 hover:bg-emerald-600 text-white rounded flex items-center justify-center disabled:opacity-50 transition-colors shadow-sm"><Plus size={16} /></button>
+        <button disabled={rowRefs.length === 0} onClick={() => changeFocusedQty(-1)} title="Decrease quantity (-)" className="w-9 h-8 bg-orange-500 hover:bg-orange-600 text-white rounded flex items-center justify-center disabled:opacity-50 transition-colors shadow-sm"><Minus size={16} /></button>
+        <button disabled={rowRefs.length === 0} onClick={removeFocusedRow} className="w-9 h-8 bg-rose-500 hover:bg-rose-600 text-white rounded flex items-center justify-center disabled:opacity-50 transition-colors shadow-sm"><Trash2 size={16} /></button>
         
         <div className="ml-auto flex items-center gap-3">
           <div className="flex flex-col items-center">
@@ -425,7 +467,7 @@ export default function OrderCart({ onSendKOT, onSettleBill, onInstantCheckout, 
       {/* ── TABLE HEADER ── */}
       <div className="bg-[#009688] text-white text-[11px] font-bold flex flex-shrink-0 uppercase tracking-wide">
         <div className="flex-[2] px-3 py-2 border-r border-teal-600/50">Product Name</div>
-        <div className="w-12 px-2 py-2 border-r border-teal-600/50 text-center">Qty</div>
+        <div className="w-16 px-1 py-2 border-r border-teal-600/50 text-center">Qty</div>
         <div className="w-16 px-2 py-2 border-r border-teal-600/50 text-right">Rate</div>
         <div className="w-16 px-2 py-2 border-r border-teal-600/50 text-right">Tax</div>
         <div className="w-16 px-2 py-2 border-r border-teal-600/50 text-right">Disc</div>
@@ -451,7 +493,41 @@ export default function OrderCart({ onSendKOT, onSettleBill, onInstantCheckout, 
                 {item.modifiers?.length ? <span className={clsx("text-[10px] ml-1", isSelected ? "text-blue-700" : "text-yellow-800")}>+{item.modifiers.join(', ')}</span> : null}
                 {item.note && <span className={clsx("text-[10px] ml-1 block opacity-80", isSelected ? "text-blue-700" : "text-yellow-800")}>({item.note})</span>}
               </div>
-              <div className={clsx("w-12 px-2 py-2 border-r text-center font-black", isSelected ? "border-blue-200" : "border-slate-200")}>{item.quantity}</div>
+              <div className={clsx("w-16 px-1 py-1.5 border-r flex items-center justify-center gap-1 font-black", isSelected ? "border-blue-200" : "border-slate-200")}>
+                <button
+                  type="button"
+                  title="Reduce quantity (-)"
+                  onClick={(e) => {
+                    e.stopPropagation()
+                    if (item.quantity <= 1) {
+                      cancelOrderItemQty(item.id, item.quantity, 'Removed from order screen')
+                      addToast('success', `${item.nameSnapshot} removed`)
+                    } else {
+                      cancelOrderItemQty(item.id, 1, 'Quantity reduced from order screen')
+                    }
+                  }}
+                  className="w-4 h-5 rounded flex items-center justify-center bg-amber-100 hover:bg-amber-200 text-amber-900 transition-colors text-xs font-black"
+                >
+                  -
+                </button>
+                <span className="min-w-[14px] text-center">{item.quantity}</span>
+                <button
+                  type="button"
+                  title="Add 1 more (+)"
+                  onClick={(e) => {
+                    e.stopPropagation()
+                    const menuItem = menuItems.find(candidate => candidate.id === item.menuItemId)
+                    if (menuItem) {
+                      ensureOrder()
+                      addToCart(menuItem)
+                      addToast('success', `Added 1 more ${item.nameSnapshot} to cart`)
+                    }
+                  }}
+                  className="w-4 h-5 rounded flex items-center justify-center bg-amber-100 hover:bg-amber-200 text-amber-900 transition-colors text-xs font-black"
+                >
+                  +
+                </button>
+              </div>
               <div className={clsx("w-16 px-2 py-2 border-r text-right", isSelected ? "border-blue-200" : "border-slate-200")}>{(item.unitPricePaise / 100).toFixed(0)}</div>
               <div className={clsx("w-16 px-2 py-2 border-r text-right", isSelected ? "border-blue-200" : "border-slate-200")}>{(item.taxPaise / 100).toFixed(2)}</div>
               <div className={clsx("w-16 px-2 py-2 border-r text-right", isSelected ? "border-blue-200" : "border-slate-200")}>{(item.discountPaise / 100).toFixed(2)}</div>
@@ -479,7 +555,25 @@ export default function OrderCart({ onSendKOT, onSettleBill, onInstantCheckout, 
                 {item.modifiers?.length ? <span className="text-[10px] text-primary ml-1">+{item.modifiers.join(', ')}</span> : null}
                 {item.note && <span className="text-[10px] text-amber-700 ml-1 block opacity-80">({item.note})</span>}
               </div>
-              <div className="w-12 px-2 py-2 border-r border-slate-200 text-center font-black">{item.quantity}</div>
+              <div className="w-16 px-1 py-1.5 border-r border-slate-200 flex items-center justify-center gap-1 font-black">
+                <button
+                  type="button"
+                  title="Decrease quantity (-)"
+                  onClick={(e) => { e.stopPropagation(); updateQty(item.menuItemId, -1) }}
+                  className="w-4 h-5 rounded flex items-center justify-center bg-slate-100 hover:bg-slate-200 text-slate-700 transition-colors text-xs font-black"
+                >
+                  -
+                </button>
+                <span className="min-w-[14px] text-center">{item.quantity}</span>
+                <button
+                  type="button"
+                  title="Increase quantity (+)"
+                  onClick={(e) => { e.stopPropagation(); updateQty(item.menuItemId, 1) }}
+                  className="w-4 h-5 rounded flex items-center justify-center bg-slate-100 hover:bg-slate-200 text-slate-700 transition-colors text-xs font-black"
+                >
+                  +
+                </button>
+              </div>
               <div className="w-16 px-2 py-2 border-r border-slate-200 text-right">{(item.unitPricePaise / 100).toFixed(0)}</div>
               <div className="w-16 px-2 py-2 border-r border-slate-200 text-right">{(itemTaxPaise / 100).toFixed(2)}</div>
               <div className="w-16 px-2 py-2 border-r border-slate-200 text-right text-rose-500 font-bold">{item.discountPaise ? (item.discountPaise / 100).toFixed(2) : '0'}</div>

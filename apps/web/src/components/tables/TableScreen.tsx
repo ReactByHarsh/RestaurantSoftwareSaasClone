@@ -384,7 +384,7 @@ export default function TableScreen() {
           if (floor) { setEditingFloor(floor); setShowSectionModal(true) }
         } : undefined}
         onDelete={canEditTables ? handleDeleteSection : undefined}
-        onReorder={canEditTables ? reorderFloors : undefined}
+        onReorder={canManageTables ? reorderFloors : undefined}
       />
 
       {/* Tables Grid */}

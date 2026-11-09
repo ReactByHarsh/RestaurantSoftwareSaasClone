@@ -2,7 +2,7 @@ import { Fragment, useMemo, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { ArrowDown, ArrowUp, ChevronDown, ChevronUp, Edit3, Printer, RefreshCw, SlidersHorizontal, Undo } from 'lucide-react'
 import { clsx } from 'clsx'
-import { isClosedOrder, useBillingStore } from '../../store/billingStore'
+import { getBusinessDate, isClosedOrder, useBillingStore } from '../../store/billingStore'
 import { formatPaise } from '../../lib/money'
 import { getOrderHistoryTimestamp, isWithinLocalDateRange, localDateInputValue } from '../../lib/orderHistory'
 import {
@@ -54,13 +54,13 @@ function formatQuantity(quantity: number) {
 }
 
 export default function OrdersScreen({ onBack }: Props = {}) {
-  const { orders, orderItems, payments, tables, cancelOrder, cancelPayments, updateOrderGlobalDiscount, printReceipt } = useBillingStore()
+  const { orders, orderItems, payments, tables, outlet, cancelOrder, cancelPayments, updateOrderGlobalDiscount, printReceipt } = useBillingStore()
   const { addToast } = useUIStore()
   const navigate = useNavigate()
 
   const [search, setSearch] = useState('')
-  const [fromDate, setFromDate] = useState(() => localDateInputValue())
-  const [toDate, setToDate] = useState(() => localDateInputValue())
+  const [fromDate, setFromDate] = useState(() => getBusinessDate(new Date(), outlet.businessDayCrossoverHour ?? 0))
+  const [toDate, setToDate] = useState(() => getBusinessDate(new Date(), outlet.businessDayCrossoverHour ?? 0))
   
   const [selectedOrderId, setSelectedOrderId] = useState<string | null>(null)
   const [expandedOrderId, setExpandedOrderId] = useState<string | null>(null)
@@ -135,7 +135,10 @@ export default function OrdersScreen({ onBack }: Props = {}) {
       if (!isClosedOrder(o) && (activeItemCountByOrder.get(o.id) ?? 0) <= 0) return false
 
       const historyTime = getOrderHistoryTimestamp(o)
-      if (!isWithinLocalDateRange(historyTime, fromDate, toDate)) return false
+      const matchesDate = o.businessDate
+        ? (o.businessDate >= fromDate && o.businessDate <= toDate)
+        : isWithinLocalDateRange(historyTime, fromDate, toDate)
+      if (!matchesDate) return false
       
       if (search) {
         const q = search.toLowerCase()
