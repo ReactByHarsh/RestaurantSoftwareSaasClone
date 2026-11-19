@@ -3,7 +3,13 @@ import { useNavigate } from 'react-router-dom'
 import { AlertTriangle, KeyRound, Loader2, LogOut, ShieldCheck, Wifi } from 'lucide-react'
 import { useAuthStore, LOCAL_TENANT_ID } from '../../store/authStore'
 import { useBillingStore } from '../../store/billingStore'
-import { activateDesktopLicense, DEFAULT_LICENSE_SERVER, LicenseActivationError, readSavedLicenseKey } from '../../lib/license'
+import {
+  activateDesktopLicense,
+  DEFAULT_LICENSE_SERVER,
+  isLicenseLocallyVerified,
+  LicenseActivationError,
+  readSavedLicenseKey,
+} from '../../lib/license'
 import { isTauriDesktop } from '../../lib/localDb'
 
 type GateStatus = 'checking' | 'ready' | 'activation-needed' | 'cloud-login-needed'
@@ -12,7 +18,12 @@ export default function DesktopLicenseGuard({ children }: { children: React.Reac
   const navigate = useNavigate()
   const { user, isAuthenticated, logout } = useAuthStore()
   const cloud = useBillingStore((state) => state.cloudSync)
-  const [status, setStatus] = useState<GateStatus>('checking')
+  const [status, setStatus] = useState<GateStatus>(() => {
+    if (!isTauriDesktop()) return 'ready'
+    const savedKey = readSavedLicenseKey()
+    if (savedKey && isLicenseLocallyVerified(savedKey)) return 'ready'
+    return 'checking'
+  })
   const [licenseKey, setLicenseKey] = useState(readSavedLicenseKey)
   const [moveLicense, setMoveLicense] = useState(false)
   const [busy, setBusy] = useState(false)
@@ -42,8 +53,14 @@ export default function DesktopLicenseGuard({ children }: { children: React.Reac
       return
     }
 
+    const locallyVerified = isLicenseLocallyVerified(key)
+    if (locallyVerified) {
+      setStatus('ready')
+    } else {
+      setStatus('checking')
+    }
+
     let cancelled = false
-    setStatus('checking')
     setError('')
     void activateDesktopLicense({
       serverUrl: DEFAULT_LICENSE_SERVER,
@@ -53,9 +70,15 @@ export default function DesktopLicenseGuard({ children }: { children: React.Reac
     }).catch((activationError: unknown) => {
       if (cancelled) return
       const typedError = activationError instanceof Error ? activationError : new Error('License check failed.')
-      setError(typedError.message)
-      setShowMoveOption(typedError instanceof LicenseActivationError && typedError.code === 'LICENSE_IN_USE')
-      setStatus('activation-needed')
+      const isServerRejection = typedError instanceof LicenseActivationError && (
+        typedError.code === 'LICENSE_IN_USE' ||
+        /invalid|expired|suspended|not found|revoked|already in use/i.test(typedError.message)
+      )
+      if (!locallyVerified || isServerRejection) {
+        setError(typedError.message)
+        setShowMoveOption(typedError instanceof LicenseActivationError && typedError.code === 'LICENSE_IN_USE')
+        setStatus('activation-needed')
+      }
     })
 
     return () => { cancelled = true }

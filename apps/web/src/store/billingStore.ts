@@ -2560,16 +2560,23 @@ export const useBillingStore = create<BillingStore>()(
         const order = afterSettle.orders.find(o => o.id === actualOrderId)
         if (!order || !isClosedOrder(order)) return false
 
-        const completedSnapshot = afterSettle.exportSnapshot()
-        if (isTauriDesktop()) {
+        // Print receipt immediately without waiting for disk serialization
+        const shouldPrint = printAfter ?? (afterSettle.printSettings.autoPrintReceipt || afterSettle.printSettings.directReceiptPrint)
+        if (shouldPrint) {
           try {
-            await saveDesktopState(completedSnapshot, useStaffStore.getState().staff)
-          } catch (error) {
-            console.error('Checkout local save failed', error)
-            useUIStore.getState().addToast('error', 'Checkout is complete in memory, but its local database save failed. Keep BhojPatra open while it retries.', 'Local Save Warning')
+            afterSettle.printReceipt(actualOrderId)
+          } catch (printErr) {
+            console.error('Receipt print dispatch failed', printErr)
           }
         }
-        if (printAfter ?? (get().printSettings.autoPrintReceipt || get().printSettings.directReceiptPrint)) setTimeout(() => get().printReceipt(actualOrderId), 0)
+
+        const completedSnapshot = afterSettle.exportSnapshot()
+        if (isTauriDesktop()) {
+          void saveDesktopState(completedSnapshot, useStaffStore.getState().staff).catch((error) => {
+            console.error('Checkout local save failed', error)
+            useUIStore.getState().addToast('error', 'Checkout is complete in memory, but its local database save failed. Keep BhojPatra open while it retries.', 'Local Save Warning')
+          })
+        }
         return true
       },
 

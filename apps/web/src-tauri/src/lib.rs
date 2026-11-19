@@ -3,7 +3,7 @@ use std::io::Write;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpStream, ToSocketAddrs};
 use std::path::PathBuf;
 use std::process::Command;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use axum::{
@@ -1640,31 +1640,116 @@ fn query_windows_printers() -> Result<Vec<NativePrinter>, String> {
     Ok(printers)
 }
 
-#[tauri::command]
-fn get_desktop_machine_id() -> Result<String, String> {
+#[cfg(windows)]
+fn get_smbios_uuid() -> Option<String> {
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn GetSystemFirmwareTable(
+            firmware_table_provider_signature: u32,
+            firmware_table_id: u32,
+            firmware_table_buffer: *mut u8,
+            buffer_size: u32,
+        ) -> u32;
+    }
+
+    const RSMB: u32 = u32::from_be_bytes(*b"RSMB");
+
+    unsafe {
+        let size = GetSystemFirmwareTable(RSMB, 0, ptr::null_mut(), 0);
+        if size == 0 {
+            return None;
+        }
+
+        let mut buffer = vec![0u8; size as usize];
+        let bytes_read = GetSystemFirmwareTable(RSMB, 0, buffer.as_mut_ptr(), size);
+        if bytes_read == 0 || bytes_read > size || buffer.len() < 8 {
+            return None;
+        }
+
+        let table_data = &buffer[8..];
+        let mut offset = 0usize;
+
+        while offset + 4 <= table_data.len() {
+            let struct_type = table_data[offset];
+            let struct_len = table_data[offset + 1] as usize;
+            if struct_len < 4 || offset + struct_len > table_data.len() {
+                break;
+            }
+
+            if struct_type == 1 && struct_len >= 0x18 {
+                let uuid_bytes = &table_data[offset + 8..offset + 24];
+
+                if uuid_bytes.iter().all(|&b| b == 0) || uuid_bytes.iter().all(|&b| b == 0xff) {
+                    return None;
+                }
+
+                let uuid = format!(
+                    "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+                    uuid_bytes[3], uuid_bytes[2], uuid_bytes[1], uuid_bytes[0],
+                    uuid_bytes[5], uuid_bytes[4],
+                    uuid_bytes[7], uuid_bytes[6],
+                    uuid_bytes[8], uuid_bytes[9],
+                    uuid_bytes[10], uuid_bytes[11], uuid_bytes[12], uuid_bytes[13], uuid_bytes[14], uuid_bytes[15]
+                );
+                return Some(uuid);
+            }
+
+            offset += struct_len;
+            while offset + 1 < table_data.len() && (table_data[offset] != 0 || table_data[offset + 1] != 0) {
+                offset += 1;
+            }
+            offset += 2;
+        }
+        None
+    }
+}
+
+static CACHED_MACHINE_ID: OnceLock<String> = OnceLock::new();
+
+fn resolve_desktop_machine_id() -> Result<String, String> {
     #[cfg(windows)]
     {
-        let output = Command::new("powershell.exe")
-            .args([
-                "-NoProfile",
-                "-NonInteractive",
-                "-Command",
-                "$ErrorActionPreference='Stop'; (Get-CimInstance Win32_ComputerSystemProduct).UUID",
-            ])
-            .output()
-            .map_err(to_error)?;
-        if output.status.success() {
-            let machine_uuid = String::from_utf8_lossy(&output.stdout)
-                .trim()
-                .trim_matches('{')
-                .trim_matches('}')
-                .to_ascii_lowercase();
+        if let Some(machine_uuid) = get_smbios_uuid() {
             let normalized = machine_uuid.replace('-', "");
             if normalized.len() >= 16
                 && normalized.bytes().any(|byte| byte != b'0')
                 && !machine_uuid.to_ascii_lowercase().contains("to be filled")
             {
                 return Ok(format!("windows-hardware:{machine_uuid}"));
+            }
+        }
+
+        if let Ok(key) = RegKey::predef(HKEY_LOCAL_MACHINE).open_subkey("SOFTWARE\\Microsoft\\Cryptography") {
+            if let Ok(machine_guid) = key.get_value::<String, _>("MachineGuid") {
+                let trimmed = machine_guid.trim().to_ascii_lowercase();
+                if !trimmed.is_empty() {
+                    return Ok(format!("windows-install:{trimmed}"));
+                }
+            }
+        }
+
+        let mut command = Command::new("powershell.exe");
+        command.args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            "$ErrorActionPreference='Stop'; (Get-CimInstance Win32_ComputerSystemProduct).UUID",
+        ]);
+        command.creation_flags(CREATE_NO_WINDOW);
+        if let Ok(output) = command.output() {
+            if output.status.success() {
+                let machine_uuid = String::from_utf8_lossy(&output.stdout)
+                    .trim()
+                    .trim_matches('{')
+                    .trim_matches('}')
+                    .to_ascii_lowercase();
+                let normalized = machine_uuid.replace('-', "");
+                if normalized.len() >= 16
+                    && normalized.bytes().any(|byte| byte != b'0')
+                    && !machine_uuid.to_ascii_lowercase().contains("to be filled")
+                {
+                    return Ok(format!("windows-hardware:{machine_uuid}"));
+                }
             }
         }
 
@@ -1691,6 +1776,16 @@ fn get_desktop_machine_id() -> Result<String, String> {
     {
         return Err("Desktop licensing is not available on this mobile target.".to_string());
     }
+}
+
+#[tauri::command]
+fn get_desktop_machine_id() -> Result<String, String> {
+    if let Some(cached) = CACHED_MACHINE_ID.get() {
+        return Ok(cached.clone());
+    }
+    let resolved = resolve_desktop_machine_id()?;
+    let _ = CACHED_MACHINE_ID.set(resolved.clone());
+    Ok(resolved)
 }
 
 #[tauri::command]
@@ -2644,7 +2739,10 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             clear_desktop_webview_cache(app.handle());
-            ensure_windows_firewall_rules();
+            #[cfg(windows)]
+            std::thread::spawn(|| {
+                ensure_windows_firewall_rules();
+            });
             #[cfg(desktop)]
             app.handle()
                 .plugin(tauri_plugin_updater::Builder::new().build())?;
