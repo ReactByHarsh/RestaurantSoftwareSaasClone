@@ -10,11 +10,12 @@ interface Props {
   isKotItem?: boolean
   displayPricePaise?: number
   displayName?: string
+  rank?: number
   onAdd: () => void
   onToggleFavorite?: () => void
 }
 
-export default function MenuItemCard({ item, cartQty, isKotItem = false, displayPricePaise, displayName, onAdd, onToggleFavorite }: Props) {
+export default function MenuItemCard({ item, cartQty, isKotItem = false, displayPricePaise, displayName, rank, onAdd, onToggleFavorite }: Props) {
   const [imageFailed, setImageFailed] = useState(false)
 
   useEffect(() => {
@@ -72,6 +73,10 @@ export default function MenuItemCard({ item, cartQty, isKotItem = false, display
         {isKotItem ? (
           <span className="absolute right-1.5 top-1.5 rounded bg-yellow-200 px-1.5 py-0.5 text-[8px] font-black uppercase text-yellow-900 shadow-sm">
             KOT
+          </span>
+        ) : rank !== undefined ? (
+          <span className="absolute right-1.5 top-1.5 flex items-center rounded bg-amber-500 px-1.5 py-0.5 text-[8px] font-black uppercase tracking-wider text-white shadow-sm">
+            #{rank}
           </span>
         ) : (
           <span className="absolute right-1.5 top-1.5 rounded bg-white/85 px-1.5 py-0.5 text-[8px] font-black uppercase tracking-wide text-slate-600 opacity-0 shadow-sm transition-opacity group-hover:opacity-100">

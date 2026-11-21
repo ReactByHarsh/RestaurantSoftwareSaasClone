@@ -413,17 +413,70 @@ export default function BillingScreen({ isModal = false, modalTableId, autoOpenP
 
   const selectedCategory = activeCategoryId ? menuCategories.find(category => category.id === activeCategoryId) : null
 
+  const topSellingMenuItems = useMemo(() => {
+    const validOrders = new Set(
+      orders
+        .filter(order => order.status !== 'cancelled' && order.status !== 'void')
+        .map(order => order.id)
+    )
+
+    const menuItemByName = new Map(saleableMenuItems.map(m => [m.name.trim().toLowerCase(), m.id]))
+    const salesCount = new Map<string, number>()
+    const salesRevenue = new Map<string, number>()
+
+    for (const item of orderItems) {
+      if (item.status === 'cancelled') continue
+      if (!validOrders.has(item.orderId)) continue
+
+      const targetId = (item.menuItemId && saleableMenuItems.some(m => m.id === item.menuItemId))
+        ? item.menuItemId
+        : menuItemByName.get(item.nameSnapshot.trim().toLowerCase())
+
+      if (!targetId) continue
+
+      salesCount.set(targetId, (salesCount.get(targetId) ?? 0) + (item.quantity || 1))
+      salesRevenue.set(targetId, (salesRevenue.get(targetId) ?? 0) + (item.totalPaise || 0))
+    }
+
+    const soldItems = saleableMenuItems.filter(item => (salesCount.get(item.id) ?? 0) > 0)
+
+    soldItems.sort((a, b) => {
+      const countA = salesCount.get(a.id) ?? 0
+      const countB = salesCount.get(b.id) ?? 0
+      if (countB !== countA) return countB - countA
+
+      const revA = salesRevenue.get(a.id) ?? 0
+      const revB = salesRevenue.get(b.id) ?? 0
+      if (revB !== revA) return revB - revA
+
+      return a.name.localeCompare(b.name, undefined, { sensitivity: 'base' })
+    })
+
+    return soldItems.slice(0, 10)
+  }, [orders, orderItems, saleableMenuItems])
+
+  const topSellingRankMap = useMemo(() => {
+    const map = new Map<string, number>()
+    topSellingMenuItems.forEach((item, index) => {
+      map.set(item.id, index + 1)
+    })
+    return map
+  }, [topSellingMenuItems])
+
   const filteredItems = useMemo(() => {
     let items = saleableMenuItems
     if (activeGroup === 'fav') {
-      items = items.filter(item => item.isFavorite)
+      items = topSellingMenuItems
     } else if (activeCategoryId && !searchQuery) {
       const childCategoryIds = new Set(menuCategories.filter(category => category.parentId === activeCategoryId).map(category => category.id))
       items = items.filter(item => item.categoryId === activeCategoryId || childCategoryIds.has(item.categoryId))
     }
     if (searchQuery) items = filterMenuItemsByQuery(items, searchQuery)
+    if (activeGroup === 'fav' && !searchQuery) {
+      return items
+    }
     return [...items].sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: 'base' }))
-  }, [activeCategoryId, activeGroup, searchQuery, saleableMenuItems, menuCategories])
+  }, [activeCategoryId, activeGroup, searchQuery, saleableMenuItems, menuCategories, topSellingMenuItems])
 
   const showCategoryCards = !searchQuery && !activeCategoryId && activeGroup !== 'fav' && menuCategories.length > 0
   const menuPageCount  = Math.max(1, Math.ceil(filteredItems.length / MENU_PAGE_SIZE))
@@ -903,9 +956,9 @@ export default function BillingScreen({ isModal = false, modalTableId, autoOpenP
               <div className="flex flex-col items-center justify-center h-full gap-4">
                 <Search size={40} className="text-slate-300" />
                 <div className="text-center">
-                  <p className="text-base font-bold text-slate-400">{activeGroup === 'fav' && !searchQuery ? 'No favourites yet' : 'No items found'}</p>
+                  <p className="text-base font-bold text-slate-400">{activeGroup === 'fav' && !searchQuery ? 'No sales recorded yet' : 'No items found'}</p>
                   {activeGroup === 'fav' && !searchQuery ? (
-                    <p className="mt-1 text-xs font-bold text-slate-400">Tap the star on any product to add it here.</p>
+                    <p className="mt-1 text-xs font-bold text-slate-400">Your top 10 most selling items will appear here automatically as orders are billed.</p>
                   ) : searchQuery ? (
                     <button onClick={() => setSearchQuery('')} className="text-sm font-bold text-primary mt-2 inline-block px-4 py-2 bg-primary-50 rounded-lg">
                       Clear search
@@ -928,7 +981,7 @@ export default function BillingScreen({ isModal = false, modalTableId, autoOpenP
                         </button>
                       )}
                       <div className="min-w-0">
-                        <p className="truncate text-sm font-black text-slate-800">{searchQuery ? `Search results for “${searchQuery}”` : activeGroup === 'fav' ? 'Favourites' : menuCategoryLabel(selectedCategory!)}</p>
+                        <p className="truncate text-sm font-black text-slate-800">{searchQuery ? `Search results for “${searchQuery}”` : activeGroup === 'fav' ? 'Top 10 Most Selling' : menuCategoryLabel(selectedCategory!)}</p>
                         <p className="text-[10px] font-bold uppercase tracking-wider text-slate-400">{filteredItems.length} item{filteredItems.length === 1 ? '' : 's'}</p>
                       </div>
                     </div>
@@ -937,7 +990,16 @@ export default function BillingScreen({ isModal = false, modalTableId, autoOpenP
                 )}
                 <div className="grid grid-cols-2 sm:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-5 gap-2 p-0.5">
                   {paginatedItems.map(item => (
-                    <MenuItemCard key={item.id} item={item} displayPricePaise={getSectionAdjustedPrice(getMenuItemPriceForSection(item, selectedFloor), selectedFloor)} displayName={menuLanguage !== 'en' ? item.nameTranslations?.[menuLanguage] : undefined} cartQty={cartQtyById.get(item.id) ?? 0} isKotItem={kotMenuItemIds.has(item.id)} onAdd={() => handleAddItem(item)} onToggleFavorite={() => updateMenuItem(item.id, { isFavorite: !item.isFavorite })} />
+                    <MenuItemCard
+                      key={item.id}
+                      item={item}
+                      displayPricePaise={getSectionAdjustedPrice(getMenuItemPriceForSection(item, selectedFloor), selectedFloor)}
+                      displayName={menuLanguage !== 'en' ? item.nameTranslations?.[menuLanguage] : undefined}
+                      cartQty={cartQtyById.get(item.id) ?? 0}
+                      isKotItem={kotMenuItemIds.has(item.id)}
+                      rank={activeGroup === 'fav' ? topSellingRankMap.get(item.id) : undefined}
+                      onAdd={() => handleAddItem(item)}
+                    />
                   ))}
                 </div>
                 {filteredItems.length > MENU_PAGE_SIZE && (
