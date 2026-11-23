@@ -9,6 +9,7 @@ type ReceiptPrintInfo = {
   businessName: string
   headerText: string
   footerText: string
+  finalAmountScale?: number
   showGstin: boolean
   showGstinOnFirstBill?: boolean
   showGstinOnSecondBill?: boolean
@@ -384,6 +385,12 @@ export function buildReceiptPrintParts(
       if (item.note) lines.push(`  Note: ${item.note}`.slice(0, width))
     })
 
+    const isFinalAmountEnlarged = (settings.finalAmountScale ?? 100) >= 125
+    const netAmountFormatted = money(partCount === 1 ? getBillableOrderTotalPaise(order) : totals.netPaise)
+    const formattedNetLine = isFinalAmountEnlarged
+      ? columns(netLabel.toUpperCase(), netAmountFormatted, width)
+      : columns(netLabel, netAmountFormatted, width)
+
     lines.push(
       rule(width),
       columns('Subtotal', money(totals.subtotalPaise), width),
@@ -391,8 +398,9 @@ export function buildReceiptPrintParts(
       ...(totals.taxPaise > 0 ? [columns('CGST', money(totals.cgstPaise), width), columns('SGST', money(totals.sgstPaise), width)] : []),
       rule(width, '='),
       ...(previousPartsNetPaise !== undefined ? [columns('Previous Bills Total', money(previousPartsNetPaise), width)] : []),
-      columns(netLabel, money(partCount === 1 ? getBillableOrderTotalPaise(order) : totals.netPaise), width),
+      formattedNetLine,
       ...(previousPartsNetPaise !== undefined ? [columns('Grand Total', money(grandTotalPaise), width)] : []),
+      ...(isFinalAmountEnlarged ? [rule(width, '=')] : []),
     )
     const upiPaymentUrl = buildReceiptUpiPaymentUrl(order, settings, paymentAmountPaise)
     if (showPaymentDetails) lines.push(...paymentSummaryLines(order, payments, width))

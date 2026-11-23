@@ -360,6 +360,34 @@ export default function BillingScreen({ isModal = false, modalTableId, autoOpenP
     return counts
   }, [saleableMenuItems])
 
+  const hasBarItems = useMemo(() => {
+    const barPattern = /(bar|liquor|alcohol|beer|wine|whisky|whiskey|rum|vodka|gin|brandy|scotch|tequila|spirit|बार|दारू|मदिरा|मद्य)/i
+    const activeCategories = menuCategories.filter(category => category.isActive)
+    const categoryById = new Map(activeCategories.map(category => [category.id, category]))
+    const isBarCategory = (category: MenuCategory) => {
+      const parent = category.parentId ? categoryById.get(category.parentId) : undefined
+      return (
+        category.billGroup === 'liquor' ||
+        category.billGroup === 'bar' ||
+        barPattern.test([category.name, category.billGroup, parent?.name, parent?.billGroup].filter(Boolean).join(' '))
+      )
+    }
+
+    if (activeCategories.some(isBarCategory)) return true
+
+    return saleableMenuItems.some(item =>
+      item.isSeparateBill ||
+      (item as { isBar?: boolean }).isBar ||
+      barPattern.test(item.name)
+    )
+  }, [menuCategories, saleableMenuItems])
+
+  useEffect(() => {
+    if (!hasBarItems && activeGroup === 'bar') {
+      setActiveGroup('food')
+    }
+  }, [hasBarItems, activeGroup])
+
   const categoryCards = useMemo(() => {
     const barPattern = /(bar|liquor|alcohol|beer|wine|whisky|whiskey|rum|vodka|gin|brandy|scotch|tequila|spirit|बार|दारू|मदिरा|मद्य)/i
     const activeCategories = menuCategories.filter(category => category.isActive)
@@ -871,7 +899,7 @@ export default function BillingScreen({ isModal = false, modalTableId, autoOpenP
             {([
               { id: 'all' as const, label: 'All', Icon: LayoutGrid },
               { id: 'food' as const, label: 'Food', Icon: UtensilsCrossed },
-              { id: 'bar' as const, label: 'Bar', Icon: Wine },
+              ...(hasBarItems ? [{ id: 'bar' as const, label: 'Bar', Icon: Wine }] : []),
               { id: 'fav' as const, label: 'Favs', Icon: Star },
             ]).map(tab => (
               <button

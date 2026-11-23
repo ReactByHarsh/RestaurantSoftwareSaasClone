@@ -398,6 +398,7 @@ type DevicePrintSettings = Pick<PrintSettings,
   | 'receiptWidth'
   | 'headingSize'
   | 'fontSize'
+  | 'finalAmountScale'
   | 'printerName'
   | 'kotPrinterName'
   | 'autoPrintCaptainKot'
@@ -419,6 +420,7 @@ function pickDevicePrintSettings(settings: PrintSettings): DevicePrintSettings {
     receiptWidth: settings.receiptWidth,
     headingSize: settings.headingSize,
     fontSize: settings.fontSize,
+    finalAmountScale: settings.finalAmountScale ?? 100,
     printerName: settings.printerName,
     kotPrinterName: settings.kotPrinterName,
     autoPrintCaptainKot: settings.autoPrintCaptainKot,

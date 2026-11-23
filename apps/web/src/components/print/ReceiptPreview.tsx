@@ -61,7 +61,10 @@ export default function ReceiptPreview({
   return (
     <main
       className={`thermal-page ${className}`.trim()}
-      style={{ ['--receipt-width' as string]: printSettings.receiptWidth }}
+      style={{
+        ['--receipt-width' as string]: printSettings.receiptWidth,
+        ['--thermal-final-amount-size' as string]: finalAmountFontSize,
+      }}
       data-receipt-width={printSettings.receiptWidth}
       data-heading-size={printSettings.headingSize}
       data-font-size={printSettings.fontSize}

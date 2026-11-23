@@ -258,7 +258,7 @@ button, a, [role="button"] { min-height: 32px; }
 }
 
 .thermal-total {
-  font-size: calc(var(--thermal-total-base) + var(--thermal-total-adjust));
+  font-size: var(--thermal-final-amount-size, calc(var(--thermal-total-base) + var(--thermal-total-adjust)));
   margin-top: 4px;
 }
 
@@ -436,7 +436,7 @@ button, a, [role="button"] { min-height: 32px; }
   .thermal-slip h1 { font-size: calc(var(--thermal-heading-base) + var(--thermal-heading-adjust)); }
   .thermal-header-with-logo { gap: 1mm; }
   .thermal-logo-box img { width: var(--thermal-logo-size); max-width: var(--thermal-logo-size); max-height: var(--thermal-logo-size); }
-  .thermal-total { font-size: calc(var(--thermal-total-base) + var(--thermal-total-adjust)); }
+  .thermal-total { font-size: var(--thermal-final-amount-size, calc(var(--thermal-total-base) + var(--thermal-total-adjust))) !important; }
   .thermal-rule { margin: 3px 0; }
   .thermal-table td { padding: 1px 1px 1px 0; }
   .thermal-upi img { width: var(--thermal-upi-size); height: var(--thermal-upi-size); }
