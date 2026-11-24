@@ -29,9 +29,10 @@ export default function ReceiptPreview({
   className = '',
 }: Props) {
   const [upiQrByPart, setUpiQrByPart] = useState<Record<string, string>>({})
-  const totalBaseByWidth = printSettings.receiptWidth === '58mm' ? 10.75 : printSettings.receiptWidth === '72mm' ? 11.5 : 12
-  const totalFontAdjust = printSettings.fontSize === 'compact' ? -0.5 : printSettings.fontSize === 'large' ? 0.75 : 0
-  const finalAmountFontSize = `${(totalBaseByWidth + totalFontAdjust) * (Math.max(80, Math.min(180, printSettings.finalAmountScale ?? 100)) / 100)}px`
+  const totalBaseByWidth = printSettings.receiptWidth === '58mm' ? 13.5 : printSettings.receiptWidth === '72mm' ? 15 : 16.5
+  const totalFontAdjust = printSettings.fontSize === 'compact' ? -1 : printSettings.fontSize === 'large' ? 1.5 : 0
+  const scaleMultiplier = Math.max(80, Math.min(220, printSettings.finalAmountScale ?? 100)) / 100
+  const finalAmountFontSize = `${Math.round((totalBaseByWidth + totalFontAdjust) * scaleMultiplier * 10) / 10}px`
 
   useEffect(() => {
     let cancelled = false
@@ -144,12 +145,35 @@ export default function ReceiptPreview({
           {part.previousPartsNetPaise !== undefined && (
             <div className="thermal-row"><span>Previous Bills Total</span><strong>{formatPaise(part.previousPartsNetPaise)}</strong></div>
           )}
-          <div className="thermal-row thermal-total" style={{ fontSize: finalAmountFontSize }}>
-            <span>{part.partCount > 1 ? `Net ${part.title.replace(/\s*BILL$/i, '')} Amount` : 'Net Payable'}</span>
-            <strong>{formatPaise(part.partCount === 1 ? getBillableOrderTotalPaise(order) : part.netPaise)}</strong>
+          <div
+            className="thermal-row thermal-total"
+            style={{
+              fontSize: finalAmountFontSize,
+              lineHeight: 1.25,
+              marginTop: '5px',
+              marginBottom: '3px',
+            }}
+          >
+            <span style={{ fontSize: finalAmountFontSize, fontWeight: 900 }}>
+              {part.partCount > 1 ? `Net ${part.title.replace(/\s*BILL$/i, '')} Amount` : 'Net Payable'}
+            </span>
+            <strong style={{ fontSize: finalAmountFontSize, fontWeight: 900 }}>
+              {formatPaise(part.partCount === 1 ? getBillableOrderTotalPaise(order) : part.netPaise)}
+            </strong>
           </div>
           {part.combinedNetPaise !== undefined && (
-            <div className="thermal-row thermal-total" style={{ fontSize: finalAmountFontSize }}><span>Grand Total</span><strong>{formatPaise(part.combinedNetPaise)}</strong></div>
+            <div
+              className="thermal-row thermal-total"
+              style={{
+                fontSize: finalAmountFontSize,
+                lineHeight: 1.25,
+                marginTop: '5px',
+                marginBottom: '3px',
+              }}
+            >
+              <span style={{ fontSize: finalAmountFontSize, fontWeight: 900 }}>Grand Total</span>
+              <strong style={{ fontSize: finalAmountFontSize, fontWeight: 900 }}>{formatPaise(part.combinedNetPaise)}</strong>
+            </div>
           )}
 
           {printSettings.showUpiQrOnBill && printSettings.upiId.trim() && upiQrByPart[part.section] && (

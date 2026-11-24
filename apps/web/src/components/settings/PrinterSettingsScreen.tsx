@@ -425,16 +425,40 @@ export default function PrinterSettingsScreen() {
 
     setPrinterBusy(true)
     try {
+      const testParts = buildReceiptPrintParts(
+        previewOrder,
+        previewItems,
+        previewPayments,
+        outlet,
+        prepared.value,
+        'invoice',
+        PREVIEW_MENU_ITEMS,
+        PREVIEW_CATEGORIES,
+      )
+      const testText = testParts[0]?.text || `BHOJPATRA PRINTER TEST\n${outlet.name}\n${new Date().toLocaleString('en-IN')}\n\nPrinter connection successful.\n`
       const result = await sendPrintJob(prepared.value, {
-        jobName: 'BhojPatra Printer Test',
-        text: `BHOJPATRA PRINTER TEST\n${outlet.name}\n${new Date().toLocaleString('en-IN')}\n\nPrinter connection successful.\n`,
+        jobName: 'BhojPatra Printer Test Bill',
+        text: testText,
+        browserUrl: `/print/receipt/${previewOrder.id}?type=invoice&part=${testParts[0]?.section || 'combined'}`,
       })
       addToast('success', result === 'direct' ? 'Test page sent directly to the printer' : 'Test page opened in the system print dialog', 'Printer Setup')
     } catch (error) {
       if (prepared.value.connectionMode === 'webusb') {
+        const testParts = buildReceiptPrintParts(
+          previewOrder,
+          previewItems,
+          previewPayments,
+          outlet,
+          prepared.value,
+          'invoice',
+          PREVIEW_MENU_ITEMS,
+          PREVIEW_CATEGORIES,
+        )
+        const testText = testParts[0]?.text || `BHOJPATRA PRINTER TEST\n${outlet.name}\n${new Date().toLocaleString('en-IN')}\n\nPrinter connection successful.\n`
         await sendPrintJob({ ...prepared.value, connectionMode: 'browser' }, {
-          jobName: 'BhojPatra Printer Test',
-          text: `BHOJPATRA PRINTER TEST\n${outlet.name}\n${new Date().toLocaleString('en-IN')}\n\nPrinter connection successful.\n`,
+          jobName: 'BhojPatra Printer Test Bill',
+          text: testText,
+          browserUrl: `/print/receipt/${previewOrder.id}?type=invoice&part=${testParts[0]?.section || 'combined'}`,
         })
         addToast('warning', `${error instanceof Error ? error.message : 'Direct USB failed'} Opened System Dialog instead.`, 'Printer Setup')
       } else {
@@ -704,14 +728,14 @@ export default function PrinterSettingsScreen() {
                     id="final-amount-scale"
                     type="range"
                     min="80"
-                    max="180"
+                    max="200"
                     step="5"
                     value={draftSettings.finalAmountScale ?? 100}
                     onChange={(event) => setDraftValue('finalAmountScale', Number(event.target.value))}
                     className="mt-3 w-full accent-primary"
                   />
-                  <div className="mt-1 flex justify-between text-[10px] font-bold text-slate-500"><span>Smaller</span><span>Bigger</span></div>
-                  <p className="mt-2 text-[10px] font-bold text-slate-500">Controls the final payable amount line on browser/HTML bill prints.</p>
+                  <div className="mt-1 flex justify-between text-[10px] font-bold text-slate-500"><span>Smaller (80%)</span><span>Standard (100%)</span><span>Bigger (200%)</span></div>
+                  <p className="mt-2 text-[10px] font-bold text-slate-500">Controls final payable amount size on both desktop thermal printers (ESC/POS double-size) and Windows print dialog.</p>
                 </div>
                 <div>
                   <label className="block text-xs font-black text-slate-700 mb-1.5 uppercase tracking-wider">Print Business Name</label>

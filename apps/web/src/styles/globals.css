@@ -262,6 +262,12 @@ button, a, [role="button"] { min-height: 32px; }
   margin-top: 4px;
 }
 
+.thermal-total span,
+.thermal-total strong {
+  font-size: inherit;
+  font-weight: 900;
+}
+
 .thermal-table {
   width: 100%;
   border-collapse: collapse;
@@ -436,7 +442,15 @@ button, a, [role="button"] { min-height: 32px; }
   .thermal-slip h1 { font-size: calc(var(--thermal-heading-base) + var(--thermal-heading-adjust)); }
   .thermal-header-with-logo { gap: 1mm; }
   .thermal-logo-box img { width: var(--thermal-logo-size); max-width: var(--thermal-logo-size); max-height: var(--thermal-logo-size); }
-  .thermal-total { font-size: var(--thermal-final-amount-size, calc(var(--thermal-total-base) + var(--thermal-total-adjust))) !important; }
+  .thermal-total {
+    font-size: var(--thermal-final-amount-size, calc(var(--thermal-total-base) + var(--thermal-total-adjust))) !important;
+    line-height: 1.25 !important;
+  }
+  .thermal-total span,
+  .thermal-total strong {
+    font-size: inherit !important;
+    font-weight: 900 !important;
+  }
   .thermal-rule { margin: 3px 0; }
   .thermal-table td { padding: 1px 1px 1px 0; }
   .thermal-upi img { width: var(--thermal-upi-size); height: var(--thermal-upi-size); }

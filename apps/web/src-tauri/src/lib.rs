@@ -1352,6 +1352,18 @@ fn logo_to_esc_pos_raster(data_url: &str) -> Vec<u8> {
     out
 }
 
+fn extract_tag_content<'a>(line: &'a str, open_tag: &str, close_tag: &str) -> Option<&'a str> {
+    let trimmed = line.trim();
+    if trimmed.starts_with(open_tag) && trimmed.ends_with(close_tag) {
+        let start = trimmed.find(open_tag)? + open_tag.len();
+        let end = trimmed.rfind(close_tag)?;
+        if start <= end {
+            return Some(&trimmed[start..end]);
+        }
+    }
+    None
+}
+
 fn esc_pos_bytes(payload: &NativePrintPayload) -> Vec<u8> {
     let mut bytes = vec![0x1b, 0x40];
     if payload.open_cash_drawer {
@@ -1366,9 +1378,23 @@ fn esc_pos_bytes(payload: &NativePrintPayload) -> Vec<u8> {
             }
         }
     }
-    bytes.extend_from_slice(&ascii_bytes(&payload.text));
-    if !payload.text.ends_with('\n') {
-        bytes.push(0x0a);
+    for line in payload.text.lines() {
+        if let Some(content) = extract_tag_content(line, "[BIG]", "[/BIG]") {
+            // ESC E 1 (bold), GS ! 0x11 (double width + double height), ESC ! 0x30
+            bytes.extend_from_slice(&[0x1b, 0x45, 0x01, 0x1d, 0x21, 0x11, 0x1b, 0x21, 0x30]);
+            bytes.extend_from_slice(&ascii_bytes(content));
+            // Reset to normal font and bold OFF
+            bytes.extend_from_slice(&[0x1b, 0x21, 0x00, 0x1d, 0x21, 0x00, 0x1b, 0x45, 0x00, 0x0a]);
+        } else if let Some(content) = extract_tag_content(line, "[DOUBLE_HEIGHT]", "[/DOUBLE_HEIGHT]") {
+            // ESC E 1 (bold), GS ! 0x01 (double height), ESC ! 0x10
+            bytes.extend_from_slice(&[0x1b, 0x45, 0x01, 0x1d, 0x21, 0x01, 0x1b, 0x21, 0x10]);
+            bytes.extend_from_slice(&ascii_bytes(content));
+            // Reset to normal font and bold OFF
+            bytes.extend_from_slice(&[0x1b, 0x21, 0x00, 0x1d, 0x21, 0x00, 0x1b, 0x45, 0x00, 0x0a]);
+        } else {
+            bytes.extend_from_slice(&ascii_bytes(line));
+            bytes.push(0x0a);
+        }
     }
     for qr in &payload.qr_codes {
         append_qr_bytes(&mut bytes, qr);

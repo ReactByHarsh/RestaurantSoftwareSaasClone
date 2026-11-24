@@ -385,11 +385,25 @@ export function buildReceiptPrintParts(
       if (item.note) lines.push(`  Note: ${item.note}`.slice(0, width))
     })
 
-    const isFinalAmountEnlarged = (settings.finalAmountScale ?? 100) >= 125
+    const finalScale = settings.finalAmountScale ?? 100
+    const isBig = finalScale >= 120
+    const isDoubleHeightOnly = finalScale >= 110 && finalScale < 120
     const netAmountFormatted = money(partCount === 1 ? getBillableOrderTotalPaise(order) : totals.netPaise)
-    const formattedNetLine = isFinalAmountEnlarged
-      ? columns(netLabel.toUpperCase(), netAmountFormatted, width)
-      : columns(netLabel, netAmountFormatted, width)
+    const doubleWidthCols = Math.floor(width / 2)
+
+    const formattedNetLine = isBig
+      ? `[BIG]${columns(netLabel.toUpperCase(), netAmountFormatted, doubleWidthCols)}[/BIG]`
+      : isDoubleHeightOnly
+        ? `[DOUBLE_HEIGHT]${columns(netLabel.toUpperCase(), netAmountFormatted, width)}[/DOUBLE_HEIGHT]`
+        : columns(netLabel, netAmountFormatted, width)
+
+    const formattedGrandTotalLine = previousPartsNetPaise !== undefined
+      ? (isBig
+          ? `[BIG]${columns('GRAND TOTAL', money(grandTotalPaise), doubleWidthCols)}[/BIG]`
+          : isDoubleHeightOnly
+            ? `[DOUBLE_HEIGHT]${columns('GRAND TOTAL', money(grandTotalPaise), width)}[/DOUBLE_HEIGHT]`
+            : columns('Grand Total', money(grandTotalPaise), width))
+      : undefined
 
     lines.push(
       rule(width),
@@ -399,8 +413,8 @@ export function buildReceiptPrintParts(
       rule(width, '='),
       ...(previousPartsNetPaise !== undefined ? [columns('Previous Bills Total', money(previousPartsNetPaise), width)] : []),
       formattedNetLine,
-      ...(previousPartsNetPaise !== undefined ? [columns('Grand Total', money(grandTotalPaise), width)] : []),
-      ...(isFinalAmountEnlarged ? [rule(width, '=')] : []),
+      ...(formattedGrandTotalLine ? [formattedGrandTotalLine] : []),
+      ...(isBig || isDoubleHeightOnly ? [rule(width, '=')] : []),
     )
     const upiPaymentUrl = buildReceiptUpiPaymentUrl(order, settings, paymentAmountPaise)
     if (showPaymentDetails) lines.push(...paymentSummaryLines(order, payments, width))

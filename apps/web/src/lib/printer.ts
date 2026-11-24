@@ -162,19 +162,38 @@ function escPosQrBytes(data: string, label?: string) {
 }
 
 function escPosBytes(job: Pick<PrintJob, 'text' | 'qrCodes'>, settings: PrinterTransportSettings) {
-  const safeText = job.text
-    .replace(/₹/g, 'Rs.')
-    .replace(/[–—]/g, '-')
-    .normalize('NFKD')
-    .replace(/[^\x00-\x7F]/g, '')
-  const body = new TextEncoder().encode(safeText.endsWith('\n') ? safeText : `${safeText}\n`)
+  const lines = job.text.split('\n')
+  const bodyChunks: Uint8Array[] = []
+  for (const line of lines) {
+    const trimmed = line.trim()
+    if (trimmed.startsWith('[BIG]') && trimmed.endsWith('[/BIG]')) {
+      const inner = trimmed.slice(5, -6)
+      const safe = inner.replace(/₹/g, 'Rs.').replace(/[–—]/g, '-').normalize('NFKD').replace(/[^\x00-\x7F]/g, '')
+      bodyChunks.push(
+        new Uint8Array([0x1b, 0x45, 0x01, 0x1d, 0x21, 0x11, 0x1b, 0x21, 0x30]),
+        new TextEncoder().encode(safe),
+        new Uint8Array([0x1b, 0x21, 0x00, 0x1d, 0x21, 0x00, 0x1b, 0x45, 0x00, 0x0a]),
+      )
+    } else if (trimmed.startsWith('[DOUBLE_HEIGHT]') && trimmed.endsWith('[/DOUBLE_HEIGHT]')) {
+      const inner = trimmed.slice(15, -16)
+      const safe = inner.replace(/₹/g, 'Rs.').replace(/[–—]/g, '-').normalize('NFKD').replace(/[^\x00-\x7F]/g, '')
+      bodyChunks.push(
+        new Uint8Array([0x1b, 0x45, 0x01, 0x1d, 0x21, 0x01, 0x1b, 0x21, 0x10]),
+        new TextEncoder().encode(safe),
+        new Uint8Array([0x1b, 0x21, 0x00, 0x1d, 0x21, 0x00, 0x1b, 0x45, 0x00, 0x0a]),
+      )
+    } else {
+      const safe = line.replace(/₹/g, 'Rs.').replace(/[–—]/g, '-').normalize('NFKD').replace(/[^\x00-\x7F]/g, '')
+      bodyChunks.push(new TextEncoder().encode(`${safe}\n`))
+    }
+  }
   const prefix = new Uint8Array([0x1b, 0x40])
   const drawer = settings.openCashDrawer ? new Uint8Array([0x1b, 0x70, 0x00, 0x19, 0xfa]) : new Uint8Array()
   const qrCodes = (job.qrCodes ?? []).map((qr) => escPosQrBytes(qr.data, qr.label))
   const suffix = settings.autoCut === false
     ? new Uint8Array([0x0a, 0x0a, 0x0a])
     : new Uint8Array([0x0a, 0x0a, 0x0a, 0x1d, 0x56, 0x00])
-  return concatBytes([prefix, drawer, body, ...qrCodes, suffix])
+  return concatBytes([prefix, drawer, ...bodyChunks, ...qrCodes, suffix])
 }
 
 function usbOpenError(error: unknown) {
@@ -515,9 +534,14 @@ export function printUrlWithoutPopup(url: string) {
 
 function printTextWithDialog(job: PrintJob) {
   const frame = appendHiddenFrame()
-  const escaped = job.text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+  const formattedHtml = job.text
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/\[BIG\](.*?)\[\/BIG\]/g, '<strong style="font-size: 20px; display: block; font-weight: 900; margin: 4px 0;">$1</strong>')
+    .replace(/\[DOUBLE_HEIGHT\](.*?)\[\/DOUBLE_HEIGHT\]/g, '<strong style="font-size: 18px; display: block; font-weight: 900; margin: 3px 0;">$1</strong>')
   // Use a generous font size and margins so the receipt is legible on any paper size
-  frame.srcdoc = `<!doctype html><html><head><title>${job.jobName}</title><style>@page{size:80mm auto;margin:6mm 4mm}body{margin:0;font:13px/1.5 'Courier New',Courier,monospace;white-space:pre-wrap;word-break:break-word}pre{margin:0;padding:0}</style></head><body><pre>${escaped}</pre><script>setTimeout(()=>window.print(),300)<\/script></body></html>`
+  frame.srcdoc = `<!doctype html><html><head><title>${job.jobName}</title><style>@page{size:80mm auto;margin:6mm 4mm}body{margin:0;font:13px/1.5 'Courier New',Courier,monospace;white-space:pre-wrap;word-break:break-word}pre{margin:0;padding:0}</style></head><body><pre>${formattedHtml}</pre><script>setTimeout(()=>window.print(),300)<\/script></body></html>`
 }
 
 const printerTails = new Map<string, Promise<'direct' | 'dialog'>>()
