@@ -1,4 +1,5 @@
 import type { KOT, MenuCategory, MenuItem, Order, OrderItem, Payment } from './types'
+import { isBarCategory } from './barDetection'
 import { calculateTax, getBillableOrderTotalPaise } from './money'
 import { buildUpiPaymentUrl } from './upi'
 
@@ -186,10 +187,9 @@ function receiptGroupForItem(item: OrderItem, menuItems: MenuItem[], categories:
   const parent = chain.length > 1 ? chain[0] : undefined
   const explicit = [...chain].reverse().find((candidate) => candidate.billGroup?.trim())?.billGroup?.trim()
   const separate = [...chain].reverse().find((candidate) => candidate.separateBill !== undefined)?.separateBill
-  const fallbackText = `${item.nameSnapshot} ${chain.map((candidate) => candidate.name).join(' ')} ${menuItem?.description ?? ''}`.toLowerCase()
-  const inferredSeparate = /\b(liquor|alcohol|beer|wine|whisky|whiskey|rum|vodka|gin|brandy|scotch|tequila|cocktail|bar|peg|bottle)\b/.test(fallbackText)
-  const isSeparate = separate ?? inferredSeparate
-  const title = isSeparate ? (explicit || parent?.name || category?.name || 'Separate') : 'Food'
+  const isBar = category ? isBarCategory(category, parent) : false
+  const isSeparate = separate ?? isBar
+  const title = isSeparate ? (explicit || (isBar ? 'Liquor' : parent?.name || category?.name || 'Separate')) : 'Food'
   return {
     key: title.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '') || 'food',
     title: `${title.toUpperCase()} BILL`,

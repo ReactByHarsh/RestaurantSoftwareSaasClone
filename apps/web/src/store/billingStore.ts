@@ -32,6 +32,7 @@ import { isTauriDesktop, saveDesktopState } from '../lib/localDb'
 import { realtimeClient } from '../lib/realtime'
 import { DEFAULT_BRIDGE_URL, describePrinterError, normalizePrinterConnectionMode, sendPrintJob, type PrinterConnectionMode } from '../lib/printer'
 import { buildReceiptPrintParts } from '../lib/printTemplates'
+import { isBarCategory } from '../lib/barDetection'
 import { planKotPrintJobs } from '../lib/kotPrintRouting'
 import { isInventoryMenuItem, isSaleableMenuItem } from '../lib/productTypes'
 import { DEFAULT_STATIONS } from '../lib/seedData'
@@ -669,8 +670,8 @@ function effectiveCategoryRule(categories: MenuCategory[], categoryId?: string) 
 function isSeparateBillCategory(category?: MenuCategory, parent?: MenuCategory) {
   if (category?.separateBill !== undefined) return category.separateBill
   if (parent?.separateBill !== undefined) return parent.separateBill
-  const value = `${category?.name ?? ''} ${parent?.name ?? ''}`.toLowerCase()
-  return /\b(liquor|alcohol|beer|wine|whisky|whiskey|rum|vodka|gin|brandy|scotch|tequila|bar)\b/.test(value)
+  if (!category) return false
+  return isBarCategory(category, parent)
 }
 
 const INITIAL_STATE = {

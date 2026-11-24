@@ -8,6 +8,7 @@ import { clsx } from 'clsx'
 import { convertRecipeQuantity, exportProducts, generateTemplate, parseCsvRows, parseRecipeField } from '../../lib/csv'
 import { fetchMenuItemImageUrl, enlargeImageUrl, MENU_IMAGE_ACCEPT, MENU_IMAGE_FORMATS_LABEL, readMenuImageFile } from '../../lib/menuItemImages'
 import { isAutoTranslatableLanguage, menuLanguageLabel, translateMenuTexts } from '../../lib/menuTranslate'
+import { isBarCategory } from '../../lib/barDetection'
 import MenuItemThumb from './MenuItemThumb'
 import FetchMenuImagesModal from './FetchMenuImagesModal'
 import TranslateMenuModal from './TranslateMenuModal'
@@ -886,7 +887,8 @@ export default function MenuScreen() {
                   const cat = categoriesById.get(item.categoryId)
                   const parentCat = cat?.parentId ? categoriesById.get(cat.parentId) : undefined
                   const categoryLabel = parentCat ? `${parentCat.name} / ${cat?.name}` : cat?.name || 'Unknown'
-                  const billGroup = cat?.billGroup || parentCat?.billGroup || (item.isSeparateBill ? 'Liquor' : 'Food')
+                  const isBar = Boolean(cat && isBarCategory(cat, parentCat))
+                  const billGroup = cat?.billGroup || parentCat?.billGroup || (isBar ? 'Liquor' : item.isSeparateBill ? 'Separate' : 'Food')
                   const separateBill = cat?.separateBill ?? parentCat?.separateBill ?? item.isSeparateBill
                   const globalIndex = (safePage - 1) * PAGE_SIZE + index + 1
                   return (

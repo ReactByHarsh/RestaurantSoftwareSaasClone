@@ -21,6 +21,7 @@ import { clsx } from 'clsx'
 import { getBillableOrderTotalPaise } from '../../lib/money'
 import { isSaleableMenuItem } from '../../lib/productTypes'
 import { filterMenuItemsByQuery } from '../../lib/menuSearch'
+import { getBarCategoryIds, hasBarItems as checkHasBarItems } from '../../lib/barDetection'
 
 const ORDER_TYPES: { key: OrderType; label: string }[] = [
   { key: 'dine_in',      label: 'Dine-in'  },
@@ -360,27 +361,11 @@ export default function BillingScreen({ isModal = false, modalTableId, autoOpenP
     return counts
   }, [saleableMenuItems])
 
-  const hasBarItems = useMemo(() => {
-    const barPattern = /(bar|liquor|alcohol|beer|wine|whisky|whiskey|rum|vodka|gin|brandy|scotch|tequila|spirit|बार|दारू|मदिरा|मद्य)/i
-    const activeCategories = menuCategories.filter(category => category.isActive)
-    const categoryById = new Map(activeCategories.map(category => [category.id, category]))
-    const isBarCategory = (category: MenuCategory) => {
-      const parent = category.parentId ? categoryById.get(category.parentId) : undefined
-      return (
-        category.billGroup === 'liquor' ||
-        category.billGroup === 'bar' ||
-        barPattern.test([category.name, category.billGroup, parent?.name, parent?.billGroup].filter(Boolean).join(' '))
-      )
-    }
-
-    if (activeCategories.some(isBarCategory)) return true
-
-    return saleableMenuItems.some(item =>
-      item.isSeparateBill ||
-      (item as { isBar?: boolean }).isBar ||
-      barPattern.test(item.name)
-    )
-  }, [menuCategories, saleableMenuItems])
+  const barCategoryIds = useMemo(() => getBarCategoryIds(menuCategories), [menuCategories])
+  const hasBarItems = useMemo(
+    () => checkHasBarItems(menuCategories, saleableMenuItems),
+    [menuCategories, saleableMenuItems]
+  )
 
   useEffect(() => {
     if (!hasBarItems && activeGroup === 'bar') {
@@ -389,20 +374,14 @@ export default function BillingScreen({ isModal = false, modalTableId, autoOpenP
   }, [hasBarItems, activeGroup])
 
   const categoryCards = useMemo(() => {
-    const barPattern = /(bar|liquor|alcohol|beer|wine|whisky|whiskey|rum|vodka|gin|brandy|scotch|tequila|spirit|बार|दारू|मदिरा|मद्य)/i
     const activeCategories = menuCategories.filter(category => category.isActive)
     const childrenByParent = new Map<string, MenuCategory[]>()
-    const categoryById = new Map(activeCategories.map(category => [category.id, category]))
     activeCategories.forEach(category => {
       if (!category.parentId) return
       const list = childrenByParent.get(category.parentId) ?? []
       list.push(category)
       childrenByParent.set(category.parentId, list)
     })
-    const isBarCategory = (category: MenuCategory) => {
-      const parent = category.parentId ? categoryById.get(category.parentId) : undefined
-      return barPattern.test([category.name, category.billGroup, parent?.name, parent?.billGroup].filter(Boolean).join(' '))
-    }
     const deepCount = (category: MenuCategory) =>
       (categoryItemCounts.get(category.id) ?? 0) +
       (childrenByParent.get(category.id) ?? []).reduce((sum, child) => sum + (categoryItemCounts.get(child.id) ?? 0), 0)
@@ -413,31 +392,36 @@ export default function BillingScreen({ isModal = false, modalTableId, autoOpenP
     )
 
     sortCategories(activeCategories.filter(category => !category.parentId)).forEach(parent => {
-      const parentIsBar = isBarCategory(parent)
+      const parentIsBar = barCategoryIds.has(parent.id)
       if (activeGroup === 'bar' && !parentIsBar) return
-      if (activeGroup === 'food' && parentIsBar) return
+      if (activeGroup === 'food' && hasBarItems && parentIsBar) return
       const children = sortCategories((childrenByParent.get(parent.id) ?? []).filter(child => (categoryItemCounts.get(child.id) ?? 0) > 0))
       const directCount = categoryItemCounts.get(parent.id) ?? 0
       if (children.length > 0) {
         if (directCount > 0) {
           cards.push({ id: parent.id, name: menuCategoryLabel(parent), count: directCount, color: parent.color, isBar: parentIsBar, sortOrder: parent.sortOrder })
         }
-        children.forEach(child => cards.push({
-          id: child.id,
-          name: menuCategoryLabel(child),
-          parentName: menuCategoryLabel(parent),
-          count: categoryItemCounts.get(child.id) ?? 0,
-          color: child.color ?? parent.color,
-          isBar: isBarCategory(child),
-          sortOrder: child.sortOrder,
-        }))
+        children.forEach(child => {
+          const childIsBar = barCategoryIds.has(child.id)
+          if (activeGroup === 'bar' && !childIsBar) return
+          if (activeGroup === 'food' && hasBarItems && childIsBar) return
+          cards.push({
+            id: child.id,
+            name: menuCategoryLabel(child),
+            parentName: menuCategoryLabel(parent),
+            count: categoryItemCounts.get(child.id) ?? 0,
+            color: child.color ?? parent.color,
+            isBar: childIsBar,
+            sortOrder: child.sortOrder,
+          })
+        })
       } else if (deepCount(parent) > 0) {
         cards.push({ id: parent.id, name: menuCategoryLabel(parent), count: deepCount(parent), color: parent.color, isBar: parentIsBar, sortOrder: parent.sortOrder })
       }
     })
 
     return cards.map((card, index) => ({ ...card, color: card.color || palette[index % palette.length] }))
-  }, [activeGroup, menuCategories, categoryItemCounts, menuLanguage])
+  }, [activeGroup, menuCategories, categoryItemCounts, menuLanguage, barCategoryIds, hasBarItems])
 
   const selectedCategory = activeCategoryId ? menuCategories.find(category => category.id === activeCategoryId) : null
 
@@ -495,16 +479,23 @@ export default function BillingScreen({ isModal = false, modalTableId, autoOpenP
     let items = saleableMenuItems
     if (activeGroup === 'fav') {
       items = topSellingMenuItems
-    } else if (activeCategoryId && !searchQuery) {
-      const childCategoryIds = new Set(menuCategories.filter(category => category.parentId === activeCategoryId).map(category => category.id))
-      items = items.filter(item => item.categoryId === activeCategoryId || childCategoryIds.has(item.categoryId))
+    } else {
+      if (activeGroup === 'bar') {
+        items = items.filter(item => barCategoryIds.has(item.categoryId))
+      } else if (activeGroup === 'food' && hasBarItems) {
+        items = items.filter(item => !barCategoryIds.has(item.categoryId))
+      }
+      if (activeCategoryId && !searchQuery) {
+        const childCategoryIds = new Set(menuCategories.filter(category => category.parentId === activeCategoryId).map(category => category.id))
+        items = items.filter(item => item.categoryId === activeCategoryId || childCategoryIds.has(item.categoryId))
+      }
     }
     if (searchQuery) items = filterMenuItemsByQuery(items, searchQuery)
     if (activeGroup === 'fav' && !searchQuery) {
       return items
     }
     return [...items].sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: 'base' }))
-  }, [activeCategoryId, activeGroup, searchQuery, saleableMenuItems, menuCategories, topSellingMenuItems])
+  }, [activeCategoryId, activeGroup, searchQuery, saleableMenuItems, menuCategories, topSellingMenuItems, barCategoryIds, hasBarItems])
 
   const showCategoryCards = !searchQuery && !activeCategoryId && activeGroup !== 'fav' && menuCategories.length > 0
   const menuPageCount  = Math.max(1, Math.ceil(filteredItems.length / MENU_PAGE_SIZE))

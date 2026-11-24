@@ -1,4 +1,5 @@
 import { MenuItem, MenuCategory, Station, RecipeItem, StockUnit } from './types'
+import { isBarCategory } from './barDetection'
 
 export const PRODUCT_CSV_HEADERS = [
   'ShortCode',
@@ -191,7 +192,7 @@ export function exportProducts(items: MenuItem[], categories: MenuCategory[], st
     item.name,
     parent?.name || category?.name || 'Uncategorized',
     parent ? category?.name || '' : '',
-    category?.billGroup || parent?.billGroup || (item.isSeparateBill ? 'Liquor' : 'Food'),
+    category?.billGroup || parent?.billGroup || (category && isBarCategory(category, parent) ? 'Liquor' : item.isSeparateBill ? 'Separate' : 'Food'),
     (category?.separateBill ?? parent?.separateBill ?? item.isSeparateBill) ? 'Yes' : 'No',
     item.stationId ? stationMap.get(item.stationId) || '' : '',
     item.productType || 'sale_only',
